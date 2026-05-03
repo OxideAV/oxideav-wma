@@ -141,7 +141,9 @@ impl Decoder for WmaDecoder {
                 };
             }
         };
-        let mut out: Vec<Vec<f32>> = (0..self.ctx.channels as usize).map(|_| Vec::new()).collect();
+        let mut out: Vec<Vec<f32>> = (0..self.ctx.channels as usize)
+            .map(|_| Vec::new())
+            .collect();
         self.ctx.decode_frame(&pkt.data, &mut out)?;
 
         let _ = self.version;

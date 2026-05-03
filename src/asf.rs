@@ -67,7 +67,13 @@ fn read_u32_le(buf: &[u8], at: usize) -> u32 {
 }
 fn read_u64_le(buf: &[u8], at: usize) -> u64 {
     u64::from_le_bytes([
-        buf[at], buf[at + 1], buf[at + 2], buf[at + 3], buf[at + 4], buf[at + 5], buf[at + 6],
+        buf[at],
+        buf[at + 1],
+        buf[at + 2],
+        buf[at + 3],
+        buf[at + 4],
+        buf[at + 5],
+        buf[at + 6],
         buf[at + 7],
     ])
 }
@@ -170,10 +176,14 @@ fn parse_one_packet(pkt: &[u8]) -> Vec<Vec<u8>> {
 
     let pktlen = if pktlt > 0 {
         let n = lb(pktlt);
-        if p + n > pkt.len() { return out; }
+        if p + n > pkt.len() {
+            return out;
+        }
         let v = u32::from_le_bytes({
             let mut b = [0u8; 4];
-            for (i, x) in pkt[p..p + n].iter().enumerate() { b[i] = *x; }
+            for (i, x) in pkt[p..p + n].iter().enumerate() {
+                b[i] = *x;
+            }
             b
         }) as usize;
         p += n;
@@ -183,15 +193,21 @@ fn parse_one_packet(pkt: &[u8]) -> Vec<Vec<u8>> {
     };
     if seqlt > 0 {
         let n = lb(seqlt);
-        if p + n > pkt.len() { return out; }
+        if p + n > pkt.len() {
+            return out;
+        }
         p += n;
     }
     let padding = if paddlt > 0 {
         let n = lb(paddlt);
-        if p + n > pkt.len() { return out; }
+        if p + n > pkt.len() {
+            return out;
+        }
         let v = u32::from_le_bytes({
             let mut b = [0u8; 4];
-            for (i, x) in pkt[p..p + n].iter().enumerate() { b[i] = *x; }
+            for (i, x) in pkt[p..p + n].iter().enumerate() {
+                b[i] = *x;
+            }
             b
         }) as usize;
         p += n;
@@ -199,13 +215,17 @@ fn parse_one_packet(pkt: &[u8]) -> Vec<Vec<u8>> {
     } else {
         0
     };
-    if p + 6 > pkt.len() { return out; }
+    if p + 6 > pkt.len() {
+        return out;
+    }
     p += 4; // send_time
     p += 2; // duration
 
     // Multi-payload?
     let (payload_count, payload_lt) = if mp != 0 {
-        if p >= pkt.len() { return out; }
+        if p >= pkt.len() {
+            return out;
+        }
         let b = pkt[p];
         p += 1;
         ((b & 0x3f) as usize, (b >> 6) & 3)
@@ -221,30 +241,46 @@ fn parse_one_packet(pkt: &[u8]) -> Vec<Vec<u8>> {
             break;
         }
         // Payload header.
-        if p + 1 > pkt.len() { break; }
+        if p + 1 > pkt.len() {
+            break;
+        }
         let _stream_num = pkt[p];
         p += 1;
-        if p + lb(monlt) > pkt.len() { break; }
+        if p + lb(monlt) > pkt.len() {
+            break;
+        }
         p += lb(monlt);
-        if p + lb(oimlt) > pkt.len() { break; }
+        if p + lb(oimlt) > pkt.len() {
+            break;
+        }
         p += lb(oimlt);
-        if p + lb(rdlt) > pkt.len() { break; }
+        if p + lb(rdlt) > pkt.len() {
+            break;
+        }
         let n = lb(rdlt);
         let rdl = u32::from_le_bytes({
             let mut b = [0u8; 4];
-            for (i, x) in pkt[p..p + n].iter().enumerate() { b[i] = *x; }
+            for (i, x) in pkt[p..p + n].iter().enumerate() {
+                b[i] = *x;
+            }
             b
         }) as usize;
         p += n;
-        if p + rdl > pkt.len() { break; }
+        if p + rdl > pkt.len() {
+            break;
+        }
         p += rdl;
 
         let plen = if mp != 0 && payload_lt > 0 {
-            if p + lb(payload_lt) > pkt.len() { break; }
+            if p + lb(payload_lt) > pkt.len() {
+                break;
+            }
             let n = lb(payload_lt);
             let v = u32::from_le_bytes({
                 let mut b = [0u8; 4];
-                for (i, x) in pkt[p..p + n].iter().enumerate() { b[i] = *x; }
+                for (i, x) in pkt[p..p + n].iter().enumerate() {
+                    b[i] = *x;
+                }
                 b
             }) as usize;
             p += n;
@@ -252,7 +288,9 @@ fn parse_one_packet(pkt: &[u8]) -> Vec<Vec<u8>> {
         } else {
             avail_end - p
         };
-        if p + plen > pkt.len() { break; }
+        if p + plen > pkt.len() {
+            break;
+        }
         out.push(pkt[p..p + plen].to_vec());
         p += plen;
     }

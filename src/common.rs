@@ -268,8 +268,8 @@ fn build_v1_bands(block_len: usize, sample_rate: u32) -> Vec<u32> {
     let mut bands = Vec::new();
     let mut lpos = 0u32;
     for &cf in CRITICAL_FREQS.iter() {
-        let pos = ((block_len as u64 * 2 * cf as u64 + sample_rate as u64 / 2)
-            / sample_rate as u64) as u32;
+        let pos = ((block_len as u64 * 2 * cf as u64 + sample_rate as u64 / 2) / sample_rate as u64)
+            as u32;
         let pos = pos.min(block_len as u32);
         if pos > lpos {
             bands.push(pos - lpos);
@@ -338,7 +338,9 @@ impl WmaContext {
             return Err(Error::unsupported("wma: bit reservoir not yet supported"));
         }
         if use_variable_block_len {
-            return Err(Error::unsupported("wma: variable block length not yet supported"));
+            return Err(Error::unsupported(
+                "wma: variable block length not yet supported",
+            ));
         }
 
         let sr_normalised = match version {
@@ -353,8 +355,7 @@ impl WmaContext {
         let bps = bit_rate as f32 / channels as f32 / sample_rate as f32;
         let bps1 = if channels == 2 { bps * 1.6 } else { bps };
 
-        let (high_freq, use_noise_coding) =
-            select_high_freq_and_noise(sr_normalised, bps, bps1);
+        let (high_freq, use_noise_coding) = select_high_freq_and_noise(sr_normalised, bps, bps1);
         if use_noise_coding {
             // The trace fixtures in our corpus all have noise coding off
             // (`flags2 = 0x0001`). Round-2 work item.
@@ -369,8 +370,8 @@ impl WmaContext {
             Version::V1 => build_v1_bands(frame_len, sample_rate),
             Version::V2 => build_v2_bands(frame_len, sr_normalised, frame_len_bits),
         };
-        let high_band_start = ((frame_len as u64 * 2 * high_freq.round() as u64)
-            / sample_rate as u64) as usize;
+        let high_band_start =
+            ((frame_len as u64 * 2 * high_freq.round() as u64) / sample_rate as u64) as usize;
         let coefs_end = (frame_len - frame_len * 9 / 100).min(frame_len);
         let coefs_start = match version {
             Version::V1 => 3,
@@ -378,9 +379,7 @@ impl WmaContext {
         };
 
         // Pre-quantised antilog: pow_tab[60 + i] = 10^(i/16) for i in -60..=95.
-        let pow_tab: Vec<f32> = (-60..=95)
-            .map(|i| 10f32.powf(i as f32 / 16.0))
-            .collect();
+        let pow_tab: Vec<f32> = (-60..=95).map(|i| 10f32.powf(i as f32 / 16.0)).collect();
 
         // Plain sine window of length `frame_len`.
         let sin_window: Vec<f32> = (0..frame_len)
@@ -419,7 +418,9 @@ impl WmaContext {
             CoefBook::new(COEF5_HUFFCODES, COEF5_HUFFBITS, COEF5_LEVELS),
         ];
 
-        let overlap = (0..channels as usize).map(|_| vec![0f32; frame_len]).collect();
+        let overlap = (0..channels as usize)
+            .map(|_| vec![0f32; frame_len])
+            .collect();
 
         Ok(Self {
             version,
@@ -624,7 +625,11 @@ impl WmaContext {
 
         // ── §3.3 step 1: block-length triplet — skipped (single block).
         // ── §3.3 step 2: M/S stereo flag.
-        let ms_stereo = if self.channels == 2 { br.read_u32(1)? != 0 } else { false };
+        let ms_stereo = if self.channels == 2 {
+            br.read_u32(1)? != 0
+        } else {
+            false
+        };
 
         // ── §3.3 step 3: per-channel coded flags.
         let mut channel_coded = [false; 2];
@@ -632,7 +637,10 @@ impl WmaContext {
             channel_coded[c] = br.read_u32(1)? != 0;
         }
 
-        let any_coded = channel_coded.iter().take(self.channels as usize).any(|&v| v);
+        let any_coded = channel_coded
+            .iter()
+            .take(self.channels as usize)
+            .any(|&v| v);
         let mut total_gain: u32 = 1;
         if any_coded {
             // ── §3.3 step 4: total_gain — unary chain of 7-bit fields.

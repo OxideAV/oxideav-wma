@@ -28,7 +28,10 @@ fn have_tool(name: &str) -> bool {
 }
 
 fn run_ffmpeg(args: &[&str]) {
-    let status = Command::new("ffmpeg").args(args).status().expect("ffmpeg failed to spawn");
+    let status = Command::new("ffmpeg")
+        .args(args)
+        .status()
+        .expect("ffmpeg failed to spawn");
     assert!(status.success(), "ffmpeg failed for args: {:?}", args);
 }
 
@@ -177,7 +180,11 @@ fn wmav1_roundtrip_pipeline_ok() {
 
     let mut decoded: Vec<f32> = Vec::new();
     for (i, frame_bytes) in frames.iter().enumerate() {
-        let pkt = Packet::new(0, TimeBase::new(1, wfe.sample_rate as i64), frame_bytes.clone());
+        let pkt = Packet::new(
+            0,
+            TimeBase::new(1, wfe.sample_rate as i64),
+            frame_bytes.clone(),
+        );
         if dec.send_packet(&pkt).is_err() {
             continue;
         }
@@ -187,7 +194,8 @@ fn wmav1_roundtrip_pipeline_ok() {
                     if !af.data.is_empty() {
                         let plane = &af.data[0];
                         for chunk in plane.chunks_exact(4) {
-                            decoded.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                            decoded
+                                .push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                         }
                     }
                 }
@@ -230,7 +238,11 @@ fn wmav1_roundtrip_pipeline_ok() {
 
     let dec_peak = dec_slice.iter().fold(0f32, |a, &b| a.max(b.abs()));
     let ref_peak = ref_slice.iter().fold(0f32, |a, &b| a.max(b.abs()));
-    let scale = if dec_peak > 0.0 { ref_peak / dec_peak } else { 1.0 };
+    let scale = if dec_peak > 0.0 {
+        ref_peak / dec_peak
+    } else {
+        1.0
+    };
     let dec_normalised: Vec<f32> = dec_slice.iter().map(|&v| v * scale).collect();
     let psnr = psnr_db(ref_slice, &dec_normalised);
     eprintln!(
@@ -245,10 +257,7 @@ fn wmav1_roundtrip_pipeline_ok() {
 
 fn tempdir_path(tag: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!(
-        "oxideav-wma-{tag}-{}",
-        std::process::id()
-    ));
+    p.push(format!("oxideav-wma-{tag}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&p);
     p
 }

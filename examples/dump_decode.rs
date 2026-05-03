@@ -40,7 +40,11 @@ fn main() {
     let mut dec = reg.make_decoder(&params).expect("make decoder");
 
     for (i, pkt_bytes) in asf_file.packets.iter().enumerate() {
-        let pkt = Packet::new(0, TimeBase::new(1, wfe.sample_rate as i64), pkt_bytes.clone());
+        let pkt = Packet::new(
+            0,
+            TimeBase::new(1, wfe.sample_rate as i64),
+            pkt_bytes.clone(),
+        );
         if let Err(e) = dec.send_packet(&pkt) {
             println!("pkt {i}: send err {e:?}");
             continue;
@@ -71,4 +75,3 @@ fn main() {
         }
     }
 }
-
