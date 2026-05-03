@@ -609,11 +609,7 @@ impl WmaContext {
     /// Decode one full frame (round 1: single block per frame, no bit
     /// reservoir, no variable block length, no noise coding). Output
     /// is appended to `out` (one Vec<f32> per channel, frame_len floats).
-    pub fn decode_frame(
-        &mut self,
-        packet: &[u8],
-        out_per_channel: &mut [Vec<f32>],
-    ) -> Result<()> {
+    pub fn decode_frame(&mut self, packet: &[u8], out_per_channel: &mut [Vec<f32>]) -> Result<()> {
         let mut br = BitReader::new(packet);
 
         // No outer superframe header on round 1 (use_bit_reservoir is
