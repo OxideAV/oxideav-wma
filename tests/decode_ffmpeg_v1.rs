@@ -7,7 +7,7 @@
 //! them, but local developer machines may not.
 //!
 //! Round 1's amplitude calibration is deliberately permissive (PSNR
-//! >= 8 dB after a wide pre-roll skip): the structural pipeline (ASF
+//! \>= 8 dB after a wide pre-roll skip): the structural pipeline (ASF
 //! demux, WMA frame parse, AAC scale-factor exponent VLC, six
 //! run-level VLCs, sine-window IMDCT + overlap-add) is the actual
 //! deliverable. Tightening the gain factor to land in the
