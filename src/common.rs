@@ -160,8 +160,6 @@ pub fn frame_len_bits_for(sr: u32, version: Version) -> u32 {
         Version::V1 => {
             if sr <= 16_000 {
                 9
-            } else if sr <= 22_050 {
-                10
             } else if sr <= 32_000 {
                 10
             } else {
@@ -173,8 +171,6 @@ pub fn frame_len_bits_for(sr: u32, version: Version) -> u32 {
                 9
             } else if sr <= 22_050 {
                 10
-            } else if sr <= 32_000 {
-                11
             } else {
                 11
             }
@@ -284,8 +280,8 @@ fn build_v1_bands(block_len: usize, sample_rate: u32) -> Vec<u32> {
 
 fn build_v2_bands(block_len: usize, sample_rate: u32, frame_len_bits: u32) -> Vec<u32> {
     // §3 precomputed override?
-    let a = frame_len_bits as i32 - 7 - 0; // k=0 (single block size)
-    if a < 3 && a >= 0 {
+    let a = frame_len_bits as i32 - 7; // k=0 (single block size)
+    if (0..3).contains(&a) {
         let table = match sample_rate {
             22050 => Some(EXP_BAND_22050),
             32000 => Some(EXP_BAND_32000),
@@ -616,7 +612,7 @@ impl WmaContext {
     pub fn decode_frame(
         &mut self,
         packet: &[u8],
-        out_per_channel: &mut Vec<Vec<f32>>,
+        out_per_channel: &mut [Vec<f32>],
     ) -> Result<()> {
         let mut br = BitReader::new(packet);
 
