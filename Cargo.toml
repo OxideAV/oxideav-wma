@@ -1,0 +1,19 @@
+[package]
+name = "oxideav-wma"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Windows Media Audio (WMA v1 + v2 baseline; later Pro + Lossless) decoder for oxideav"
+repository = "https://github.com/OxideAV/oxideav-wma"
+homepage = "https://github.com/OxideAV/oxideav-wma"
+readme = "README.md"
+keywords = ["multimedia", "audio", "wma", "codec", "asf"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = "0.1"
+
+[dev-dependencies]
+hex = "0.4"
