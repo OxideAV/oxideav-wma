@@ -176,7 +176,7 @@ fn wmav1_roundtrip_pipeline_ok() {
     params.channels = Some(wfe.channels);
     params.bit_rate = Some((wfe.avg_bytes_per_sec as u64) * 8);
     params.extradata = wfe.extradata.clone();
-    let mut dec = reg.make_decoder(&params).expect("make wmav1 decoder");
+    let mut dec = reg.first_decoder(&params).expect("make wmav1 decoder");
 
     let mut decoded: Vec<f32> = Vec::new();
     for (i, frame_bytes) in frames.iter().enumerate() {

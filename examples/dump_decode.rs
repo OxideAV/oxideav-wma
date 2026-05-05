@@ -37,7 +37,7 @@ fn main() {
     params.channels = Some(wfe.channels);
     params.bit_rate = Some((wfe.avg_bytes_per_sec as u64) * 8);
     params.extradata = wfe.extradata.clone();
-    let mut dec = reg.make_decoder(&params).expect("make decoder");
+    let mut dec = reg.first_decoder(&params).expect("make decoder");
 
     for (i, pkt_bytes) in asf_file.packets.iter().enumerate() {
         let pkt = Packet::new(
