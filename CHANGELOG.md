@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Version` enum (v1 / v2) recoverable from `WAVEFORMATEX` codec ID
+  (`0x160` / `0x161`).
+- `WmaHeader` struct holding the container-supplied fields
+  (`sample_rate`, `channels`, `bit_rate`, `block_align`) plus the
+  parsed extradata (`flags1`, `flags2`, the three low `flags2` bits as
+  named booleans, `frame_length_bits`, `frame_length`).
+- `WmaHeader::parse(version, sample_rate, channels, bit_rate, block_align, extradata)`
+  parser. Supports v1 (4-byte) and v2 (6-byte) extradata layouts,
+  applies the version-specific frame-length-bits decision tree, and
+  applies the v2 sample-rate normaliser at its single explicit cutoff
+  (`sample_rate >= 44_100` snaps to `44_100`).
+- `normalize_sample_rate_v2` helper exposing the v2 sample-rate
+  normaliser as a standalone function.
+- `Error::ExtradataTooShort { expected, got }` and
+  `Error::InvalidContainerField { field }` variants.
+- 21 unit tests covering the extradata layouts, every flags2 bit, every
+  branch of the frame-length decision tree (including the v1-only
+  32 kHz special case), the explicit v2 44.1 kHz cutoff, and the error
+  paths for short extradata and zero `sample_rate`.
+
 ### Changed
 
 - Clean-room rebuild from a fresh orphan `master`. The previous
