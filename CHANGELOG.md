@@ -6,6 +6,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-wma/releases/tag/v0.0.2) - 2026-05-29
+
+### Other
+
+- Round 1 — WAVEFORMATEX-extradata header parser + v1/v2 frame-length tree
+- Round 0 — clean-room rebuild scaffold (orphan master)
+
 ### Added
 
 - `Version` enum (v1 / v2) recoverable from `WAVEFORMATEX` codec ID
