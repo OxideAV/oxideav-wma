@@ -1,12 +1,21 @@
 //! Pure-Rust Windows Media Audio codec.
 //!
-//! **Round 1 — header-only.** This crate is in clean-room rebuild
-//! following the OxideAV docs audit dated 2026-05-06. The only staged
-//! material under `docs/audio/wma/` is an 81-line wiki snapshot
-//! describing the WMA v1/v2 extradata layout and the deterministic
-//! rule that maps `(version, sample_rate)` to the per-frame MDCT
-//! block size. This round implements that rule and the extradata
-//! parser; tables (Huffman codebooks, exponent bands, LSP codebook,
+//! **Clean-room rebuild in progress.** This crate is in clean-room
+//! rebuild following the OxideAV docs audit dated 2026-05-06. The
+//! staged material under `docs/audio/wma/` is:
+//!
+//! * `wiki/Windows_Media_Audio.wiki` — an 81-line multimedia.cx
+//!   orientation snapshot describing the WMA v1/v2 extradata layout
+//!   and the deterministic rule that maps `(version, sample_rate)` to
+//!   the per-frame MDCT long-block size. Round 1 implemented those.
+//! * `wma-bitstream-from-patents.md` — a patents-only structural
+//!   trace assembled from the Microsoft USPTO patent corpus
+//!   (Malvar-126/380, Chen-162/171, Thumpudi-180/291/743, Koishida-819).
+//!   Round 2 (this round) lifts the §2 patent-disclosed
+//!   **block-size set `{256, 512, 1024, 2048, 4096}`** out of the
+//!   trace as the [`BlockSize`] typed primitive.
+//!
+//! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
 //! bitstream decode path is intentionally absent.
 //!
@@ -16,13 +25,19 @@
 //!   `0x160` and `0x161` respectively).
 //! * [`WmaHeader`] — parsed combination of container-supplied
 //!   `WAVEFORMATEX` fields plus the extradata payload.
+//! * [`BlockSize`] — the five patent-disclosed long-block transform
+//!   sizes for WMA Standard (`{256, 512, 1024, 2048, 4096}` samples),
+//!   sourced from US7,930,171 (Chen-171) Background. Drawn from
+//!   `docs/audio/wma/wma-bitstream-from-patents.md` §2.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 
 #![forbid(unsafe_code)]
 
+pub mod block;
 pub mod header;
 
+pub use block::BlockSize;
 pub use header::{Version, WmaHeader};
 
 /// Crate-local error type. Concrete variants land as the rebuild
@@ -46,6 +61,16 @@ pub enum Error {
         /// Human-readable field name (e.g. `"sample_rate"`).
         field: &'static str,
     },
+    /// A transform block size was not a member of the patent-disclosed
+    /// WMA Standard set `{256, 512, 1024, 2048, 4096}` samples (per
+    /// US7,930,171 Background). Raised by [`BlockSize::from_samples`]
+    /// and [`BlockSize::from_log2`].
+    InvalidBlockSize {
+        /// The rejected sample count. For [`BlockSize::from_log2`]
+        /// this is reconstructed as `1 << exponent`, saturated to
+        /// `u16::MAX` when the exponent would overflow `u16`.
+        samples: u16,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -61,6 +86,10 @@ impl core::fmt::Display for Error {
             Error::InvalidContainerField { field } => {
                 write!(f, "oxideav-wma: container field `{field}` was zero",)
             }
+            Error::InvalidBlockSize { samples } => write!(
+                f,
+                "oxideav-wma: block size {samples} samples is not a member of the patent-disclosed set {{256, 512, 1024, 2048, 4096}}",
+            ),
         }
     }
 }

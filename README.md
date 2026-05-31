@@ -5,13 +5,11 @@ Pure-Rust Windows Media Audio codec for the
 
 ## Status
 
-**Round 1 — header-only.** The clean-room rebuild proceeds from the
-single staged document under `docs/audio/wma/` (a multimedia.cx wiki
-snapshot fetched 2026-05-06, mirrored as
-`docs/audio/wma/wiki/Windows_Media_Audio.wiki`). That snapshot
-specifies, concretely:
+**Round 1** landed the WAVEFORMATEX-extradata header parser and the
+sample-rate → MDCT long-block decision tree, sourced from the
+multimedia.cx wiki snapshot at `docs/audio/wma/wiki/Windows_Media_Audio.wiki`:
 
-* the WMA v1 (codec ID `0x160`) and v2 (codec ID `0x161`) extradata
+* WMA v1 (codec ID `0x160`) and v2 (codec ID `0x161`) extradata
   layouts inside `WAVEFORMATEX` (4 bytes for v1; 6 bytes for v2);
 * the meaning of the low three bits of `flags2`
   (exponential VLCs / bit reservoir / variable block length);
@@ -21,11 +19,28 @@ specifies, concretely:
 * one explicit cutoff in the v2 sample-rate normaliser
   (`sample_rate >= 44_100` snaps to `44_100`).
 
-This round implements those items behind [`WmaHeader::parse`] and
-ships 21 tests covering every branch of the frame-length decision
-tree, every flags2 bit, both extradata layouts, the explicit v2
-44.1 kHz cutoff, and the error paths for short extradata and zero
-sample rate.
+Round 1 ships 21 tests behind [`WmaHeader::parse`].
+
+**Round 2** (this round) lifts the §2 patent-disclosed **block-size
+set** out of the patents-only structural trace
+(`docs/audio/wma/wma-bitstream-from-patents.md`, citing
+US7,930,171 Chen-171 Background) into a typed
+[`BlockSize`] primitive:
+
+```text
+{ S256, S512, S1024, S2048, S4096 }    // 8..=12 bits log2
+```
+
+The enum exposes [`BlockSize::ALL`] (ascending iteration), `samples()`
+/ `log2_samples()` accessors, validating constructors
+[`BlockSize::from_samples`] / [`BlockSize::from_log2`], and
+`is_shortest()` / `is_longest()` predicates for transient-handling
+code. A new [`Error::InvalidBlockSize`] variant carries the rejected
+sample count when a non-set value is offered. Round 2 ships 14
+additional tests; one cross-module test verifies that every
+`WmaHeader::frame_length` Round 1 produces is itself a member of the
+patent set, so future transform code can wrap a header-supplied frame
+length without a redundant lookup.
 
 ## What is NOT in this round
 
