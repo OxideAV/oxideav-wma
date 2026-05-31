@@ -23,6 +23,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   paths (including saturation on absurd exponents), the outer-bound
   predicates, and a cross-module check that every `WmaHeader::frame_length`
   Round 1 produces is itself a member of the patent set.
+- `stereo` module — sum/difference (mid/side) two-channel transform
+  from §5 of the patent trace (US7,930,171 / US7,502,743). Public
+  helpers `mid`, `side`, `forward`, `inverse` (per-sample) and
+  `forward_in_place`, `inverse_in_place` (whole-block, slice-paired).
+  13 unit tests covering the channel-average / half-difference
+  identities, the algebraic round-trip in both directions, the
+  correlated/anti-correlated energy-concentration cases, and the
+  panic-on-mismatch contract of the slice helpers.
+- `runlevel` module — typed `RunLevelPair { run: u32, level: NonZeroU32 }`
+  from §6 of the patent trace (US6,223,162 Claims 1–2, US7,885,819).
+  Constructor `RunLevelPair::new` enforces `run ≥ 1` and `level ≥ 1`
+  per the patent set with `InvalidPair::{ZeroRun, ZeroLevel}` error
+  variants. Accessors `coefficient_count` and
+  `is_implicit_terminator_for` plus the `expand_into` walker that
+  decodes a pair sequence into a sparse coefficient block, honouring
+  both the implicit `(N, 1)` terminator and explicit underrun with
+  `WalkError::{Overflow, Underrun}`. 20 unit tests covering the
+  constructor reject paths, the `(N, 1)` terminator predicate, the
+  walker's happy paths (natural fill, implicit terminator), the
+  overflow / underrun error paths, the empty-block boundary, and an
+  end-to-end hand-crafted sparse-spectrum round-trip.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-wma/releases/tag/v0.0.2) - 2026-05-29
 

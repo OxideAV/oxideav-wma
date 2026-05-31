@@ -11,9 +11,10 @@
 //! * `wma-bitstream-from-patents.md` — a patents-only structural
 //!   trace assembled from the Microsoft USPTO patent corpus
 //!   (Malvar-126/380, Chen-162/171, Thumpudi-180/291/743, Koishida-819).
-//!   Round 2 (this round) lifts the §2 patent-disclosed
-//!   **block-size set `{256, 512, 1024, 2048, 4096}`** out of the
-//!   trace as the [`BlockSize`] typed primitive.
+//!   Round 2 lifted the §2 block-size set out of the trace into the
+//!   [`BlockSize`] primitive; this round (round 3) lifts the §5
+//!   sum/difference stereo transform into [`stereo`] and the §6
+//!   run-level pairing model into [`runlevel`].
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -29,6 +30,12 @@
 //!   sizes for WMA Standard (`{256, 512, 1024, 2048, 4096}` samples),
 //!   sourced from US7,930,171 (Chen-171) Background. Drawn from
 //!   `docs/audio/wma/wma-bitstream-from-patents.md` §2.
+//! * [`stereo`] — sum/difference (mid/side) two-channel transform
+//!   for WMA Standard, sourced from §5 of the patent trace
+//!   (US7,930,171 / US7,502,743).
+//! * [`runlevel`] — typed `(R, L)` pairing primitive and
+//!   sequence-walker for the spectral entropy stage, sourced from §6
+//!   of the patent trace (US6,223,162 / US7,885,819).
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 
@@ -36,6 +43,8 @@
 
 pub mod block;
 pub mod header;
+pub mod runlevel;
+pub mod stereo;
 
 pub use block::BlockSize;
 pub use header::{Version, WmaHeader};

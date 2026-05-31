@@ -21,8 +21,8 @@ multimedia.cx wiki snapshot at `docs/audio/wma/wiki/Windows_Media_Audio.wiki`:
 
 Round 1 ships 21 tests behind [`WmaHeader::parse`].
 
-**Round 2** (this round) lifts the §2 patent-disclosed **block-size
-set** out of the patents-only structural trace
+**Round 2** lifts the §2 patent-disclosed **block-size set** out of
+the patents-only structural trace
 (`docs/audio/wma/wma-bitstream-from-patents.md`, citing
 US7,930,171 Chen-171 Background) into a typed
 [`BlockSize`] primitive:
@@ -41,6 +41,31 @@ additional tests; one cross-module test verifies that every
 `WmaHeader::frame_length` Round 1 produces is itself a member of the
 patent set, so future transform code can wrap a header-supplied frame
 length without a redundant lookup.
+
+**Round 3** (this round) lifts two more primitives from the same
+patent trace:
+
+* **§5 sum/difference (mid/side) stereo transform** ([`stereo`]) —
+  the patent's `sum = (L+R)/2`, `diff = (L-R)/2` formulation
+  (US7,930,171 / US7,502,743) as `f64` per-sample helpers
+  `mid` / `side` / `forward` / `inverse`, plus in-place slice
+  helpers `forward_in_place` / `inverse_in_place` for whole-block
+  application. The transform is algebraically invertible and
+  bit-exact for inputs that produce exactly-representable sums.
+* **§6 run-level pairing primitive** ([`runlevel`]) — a typed
+  `RunLevelPair { run: u32, level: NonZeroU32 }` matching
+  US6,223,162 Claim 1 (joint `(R, L)` symbol) and Claim 2 (level
+  non-zero). Constructor enforces `run ≥ 1` per the trace's
+  `{1..Rm}` set. A `coefficient_count()` accessor reports the
+  `run + 1` slots the pair fills, an `is_implicit_terminator_for`
+  predicate detects the patent's `(N, 1)` end-of-block sentinel,
+  and an `expand_into` walker decodes a pair sequence into a
+  sparse coefficient block honouring both termination rules
+  (implicit `(N, 1)` and explicit underrun) with `WalkError`
+  surfacing both `Overflow` and `Underrun`.
+
+Round 3 adds 33 unit tests across the two modules (13 stereo, 20
+runlevel), taking the crate's test count from 36 to 69.
 
 ## What is NOT in this round
 
