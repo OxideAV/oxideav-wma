@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `qmatrix` module — invertible differential-coding helpers for the
+  per-band quantization matrix carriage from §4 of the patent trace
+  (US7,930,171 step 120 / US7,502,743). Public functions
+  `differential_encode` / `differential_decode` (fresh `Vec`) and
+  matching `_in_place` variants over `&mut [i32]`; the transform is
+  bijective under wrapping `i32` arithmetic. A `zero_delta_pad`
+  helper applies the patent's "set unneeded element = next needed
+  element" encoder policy against a `[bool]` needed-mask. 15 unit
+  tests covering empty / single-element / arbitrary round-trip,
+  equal-sequence zero-delta property, monotone and decreasing
+  delta-pattern fingerprints, i32 extreme boundary handling,
+  `zero_delta_pad` substitution semantics including the
+  no-next-needed trailing-run no-op, and a cross-helper
+  in-place-vs-fresh-Vec equivalence check.
+- `entropy_mode` module — `EntropyMode { Level, RunLevel }` enum
+  capturing the patent-disclosed mode-switching primitive from §6
+  of the trace (US6,223,162 mode selector 400 / US7,383,180 entropy
+  encoder 570). `EntropyMode::ALL`, `opposite()` (involutive
+  helper), and `is_level()` / `is_run_level()` predicates. A
+  companion `Partition { total_coeffs, split, adaptive }` carrier
+  with `mode_for(index)`, `level_range_len()`,
+  `run_level_range_len()`, `is_adaptive()` / `is_predetermined()`
+  helpers and a validating `Partition::new` constructor that
+  rejects out-of-block splits with
+  `InvalidPartition::SplitOutOfBlock`. 16 unit tests covering the
+  mode enum's predicate exclusivity and involution, the partition
+  constructor's accept/reject paths (including the boundary cases
+  `split == 0` and `split == total`), `mode_for` lookup for low /
+  high / out-of-range indices, the adaptive-vs-predetermined
+  complement, range-length accounting, and a cross-module check
+  that a partition can be built for every patent-disclosed
+  `BlockSize`.
 - `BlockSize` enum (`block` module) capturing the patent-disclosed
   WMA Standard transform-block-size set `{256, 512, 1024, 2048, 4096}`
   samples from `docs/audio/wma/wma-bitstream-from-patents.md` §2

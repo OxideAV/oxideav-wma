@@ -67,6 +67,36 @@ patent trace:
 Round 3 adds 33 unit tests across the two modules (13 stereo, 20
 runlevel), taking the crate's test count from 36 to 69.
 
+**Round 4** (this round) lifts two more primitives from the same
+patent trace:
+
+* **§4 quantization-matrix differential coding step** ([`qmatrix`]) —
+  the patent's step-120 ("differentially codes the quantized
+  elements relative to preceding elements in the matrix" —
+  US7,930,171 / US7,502,743) as four invertible `i32` helpers:
+  `differential_encode` / `differential_decode` (fresh `Vec`) plus
+  matching `_in_place` variants over a `&mut [i32]`. The transform
+  is bijective under wrapping `i32` arithmetic so the round-trip is
+  exact for any input. A `zero_delta_pad` companion implements the
+  patent's "set unneeded element = next needed element" encoder
+  policy against a `[bool]` needed-mask so that subsequent
+  differential encoding emits a zero delta at every substituted
+  position — the patent's stated efficiency outcome.
+* **§6 entropy-mode selector + sub-range partition descriptor**
+  ([`entropy_mode`]) — `EntropyMode { Level, RunLevel }` matching
+  the patent's "level mode" and "run length/level mode" naming
+  (US6,223,162 mode selector 400 / US7,383,180 entropy encoder 570).
+  `EntropyMode::ALL` locks the low-frequency-first iteration order;
+  `opposite()` is involutive. A `Partition { total_coeffs, split,
+  adaptive }` descriptor exposes `mode_for(index) -> Option<EntropyMode>`,
+  `level_range_len()` / `run_level_range_len()` accessors, plus
+  `is_adaptive()` / `is_predetermined()` predicates for the
+  patent-disclosed boundary signalling choice. `Partition::new`
+  rejects out-of-block splits with `InvalidPartition::SplitOutOfBlock`.
+
+Round 4 adds 31 unit tests across the two modules (15 qmatrix, 16
+entropy_mode), taking the crate's test count from 69 to 100.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

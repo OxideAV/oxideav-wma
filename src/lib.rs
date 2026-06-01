@@ -11,10 +11,11 @@
 //! * `wma-bitstream-from-patents.md` — a patents-only structural
 //!   trace assembled from the Microsoft USPTO patent corpus
 //!   (Malvar-126/380, Chen-162/171, Thumpudi-180/291/743, Koishida-819).
-//!   Round 2 lifted the §2 block-size set out of the trace into the
-//!   [`BlockSize`] primitive; this round (round 3) lifts the §5
-//!   sum/difference stereo transform into [`stereo`] and the §6
-//!   run-level pairing model into [`runlevel`].
+//!   Round 2 lifted the §2 block-size set; Round 3 lifted the §5
+//!   sum/difference stereo transform and the §6 run-level pairing
+//!   model; Round 4 (this round) lifts the §4 quantization-matrix
+//!   differential-coding step into [`qmatrix`] and the §6 mode
+//!   selector / partition descriptor into [`entropy_mode`].
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -36,17 +37,29 @@
 //! * [`runlevel`] — typed `(R, L)` pairing primitive and
 //!   sequence-walker for the spectral entropy stage, sourced from §6
 //!   of the patent trace (US6,223,162 / US7,885,819).
+//! * [`qmatrix`] — invertible differential-coding helpers for the
+//!   per-band quantization matrix carriage, sourced from §4 of the
+//!   patent trace (US7,930,171 step 120 / US7,502,743).
+//! * [`entropy_mode`] — typed level / run-level mode selector and
+//!   sub-range [`Partition`] descriptor, sourced from §6 of the
+//!   patent trace (US6,223,162 mode selector 400 / US7,383,180
+//!   entropy encoder 570).
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
+//!
+//! [`Partition`]: entropy_mode::Partition
 
 #![forbid(unsafe_code)]
 
 pub mod block;
+pub mod entropy_mode;
 pub mod header;
+pub mod qmatrix;
 pub mod runlevel;
 pub mod stereo;
 
 pub use block::BlockSize;
+pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 
 /// Crate-local error type. Concrete variants land as the rebuild
