@@ -13,9 +13,12 @@
 //!   (Malvar-126/380, Chen-162/171, Thumpudi-180/291/743, Koishida-819).
 //!   Round 2 lifted the §2 block-size set; Round 3 lifted the §5
 //!   sum/difference stereo transform and the §6 run-level pairing
-//!   model; Round 4 (this round) lifts the §4 quantization-matrix
-//!   differential-coding step into [`qmatrix`] and the §6 mode
-//!   selector / partition descriptor into [`entropy_mode`].
+//!   model; Round 4 lifted the §4 quantization-matrix differential
+//!   coding step into [`qmatrix`] and the §6 mode selector / partition
+//!   descriptor into [`entropy_mode`]; Round 5 (this round) lifts the
+//!   §4 decoder inverse-quantization step into [`invquant`] and the §7
+//!   per-band coding-policy carrier (noise substitution + high-band
+//!   truncation cutoff) into [`bands`].
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -44,23 +47,42 @@
 //!   sub-range [`Partition`] descriptor, sourced from §6 of the
 //!   patent trace (US6,223,162 mode selector 400 / US7,383,180
 //!   entropy encoder 570).
+//! * [`invquant`] — decoder-side inverse-quantization helpers
+//!   (`q * Q[d] * step`) plus a precomputable [`BandScale`] table that
+//!   folds the per-band weight and per-block step into one
+//!   multiplication, sourced from §4 of the patent trace
+//!   (US7,930,171 / US7,383,180 inverse quantizer-weighter / US6,240,380
+//!   re-weighting at decoder).
+//! * [`bands`] — per-band coding-policy carrier covering the three
+//!   patent-disclosed options ([`BandPolicy::Coded`] / `NoiseSubstituted`
+//!   / `Truncated`) and a [`BandPlan`] descriptor that models the
+//!   patent's high-band truncation as a contiguous cutoff tail, sourced
+//!   from §7 of the patent trace (US7,383,180 noise substitution +
+//!   band truncation / US7,343,291).
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
 //! [`Partition`]: entropy_mode::Partition
+//! [`BandPolicy::Coded`]: bands::BandPolicy::Coded
+//! [`BandPlan`]: bands::BandPlan
+//! [`BandScale`]: invquant::BandScale
 
 #![forbid(unsafe_code)]
 
+pub mod bands;
 pub mod block;
 pub mod entropy_mode;
 pub mod header;
+pub mod invquant;
 pub mod qmatrix;
 pub mod runlevel;
 pub mod stereo;
 
+pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
 pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
+pub use invquant::BandScale;
 
 /// Crate-local error type. Concrete variants land as the rebuild
 /// rounds populate the codec pipeline.

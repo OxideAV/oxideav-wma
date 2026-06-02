@@ -67,8 +67,7 @@ patent trace:
 Round 3 adds 33 unit tests across the two modules (13 stereo, 20
 runlevel), taking the crate's test count from 36 to 69.
 
-**Round 4** (this round) lifts two more primitives from the same
-patent trace:
+**Round 4** lifted two more primitives from the same patent trace:
 
 * **§4 quantization-matrix differential coding step** ([`qmatrix`]) —
   the patent's step-120 ("differentially codes the quantized
@@ -96,6 +95,42 @@ patent trace:
 
 Round 4 adds 31 unit tests across the two modules (15 qmatrix, 16
 entropy_mode), taking the crate's test count from 69 to 100.
+
+**Round 5** (this round) lifts two more decoder-side primitives from
+the same patent trace:
+
+* **§4 inverse-quantization step** ([`invquant`]) — the patent's
+  decoder-side reverse of the per-coefficient quantizer:
+  `coeff_hat[k] = q[k] * Q[d(k)] * step` (US7,930,171 overall
+  step-size description; US7,383,180 inverse quantizer-weighter FIG.6;
+  US6,240,380 re-weighting at decoder). Public `f64` helpers
+  `dequantize_sample` (per-sample) and `dequantize_in_place`
+  (whole-block over a band map) realise the multiplicative
+  arrangement. A `BandScale { scale: Vec<f64> }` carrier precomputes
+  the per-band product `Q[d] * step` once per block so the inner
+  dequant loop multiplies once per coefficient instead of twice; its
+  `apply` whole-block helper is f64-equivalent to the two-factor
+  helper for inputs that hit exact-representable products. The
+  module's dead-zone, linearity-in-q, and factor-commutativity
+  invariants are exercised explicitly.
+* **§7 per-band coding-policy carrier** ([`bands`]) — typed
+  [`BandPolicy`] enum covering the three patent-disclosed
+  per-band alternatives: `Coded` (literal entropy coding;
+  US7,383,180 default), `NoiseSubstituted { energy: f64 }` (decoder
+  module 240's noise generator; US7,383,180 / US7,343,291), and
+  `Truncated` (high-band cutoff; US7,383,180 "completely eliminate
+  the coefficients in certain (high) bands"). A `BandPlan { policies,
+  cutoff }` descriptor exposes the per-band table plus lookups
+  (`policy_of`, `coded_band_count`, `noise_band_count`,
+  `truncated_band_count`). A validating `BandPlan::new_with_cutoff`
+  constructor enforces the patent's stated cutoff shape (truncated
+  bands form a contiguous tail) and reports the cutoff index;
+  `BandPlan::new` accepts arbitrary tables when the shape is not
+  required. A new `InvalidBandPlan::TruncatedNotContiguousTail`
+  variant identifies the offending boundary.
+
+Round 5 adds 36 unit tests across the two modules (18 invquant, 18
+bands), taking the crate's test count from 100 to 136.
 
 ## What is NOT in this round
 

@@ -8,6 +8,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `invquant` module — decoder-side inverse-quantization helpers from
+  §4 of the patent trace (US7,930,171 overall step-size description /
+  US7,383,180 inverse quantizer-weighter FIG.6 / US6,240,380
+  re-weighting at decoder). Public `dequantize_sample` (per-sample
+  `q * weight * step`) and `dequantize_in_place` (whole-block over a
+  band map) helpers, plus a `BandScale { scale: Vec<f64> }` carrier
+  precomputing the per-band `Q[d] * step` product so the inner
+  dequant loop multiplies once per coefficient. 18 unit tests
+  covering the dead-zone identity (q == 0 → 0 for any weight/step),
+  linearity in q, factor commutativity, whole-block per-band
+  threading, length-mismatch / band-index-overflow panic contracts,
+  empty-block boundary, `BandScale` construction + lookup,
+  `BandScale::apply` parity with `dequantize_in_place`, an
+  encoder-quantizer round-trip identity at exact-grid coefficients,
+  and a non-contiguous band-layout case.
+- `bands` module — per-band coding-policy carrier covering the three
+  patent-disclosed §7 alternatives: `BandPolicy::Coded` (literal
+  entropy coding; US7,383,180 default), `BandPolicy::NoiseSubstituted
+  { energy: f64 }` (US7,383,180 / US7,343,291 noise substitution +
+  decoder module 240), and `BandPolicy::Truncated` (US7,383,180
+  high-band truncation cutoff). Public predicates `is_coded`,
+  `is_noise_substituted`, `is_truncated`, plus a `noise_energy`
+  accessor. A `BandPlan { policies, cutoff }` descriptor exposes
+  `policy_of`, `coded_band_count`, `noise_band_count`,
+  `truncated_band_count`, and `cutoff_index`. Two constructors:
+  `BandPlan::new` (no shape promise) and `BandPlan::new_with_cutoff`
+  (enforces the patent's contiguous-tail truncation shape) with the
+  new `InvalidBandPlan::TruncatedNotContiguousTail { at_band }` error
+  variant. 18 unit tests covering the three-way predicate exclusivity,
+  the noise-energy accessor's selectivity, `new_with_cutoff`'s accept
+  paths (no truncation / contiguous tail / all-truncated /
+  single-at-end / empty), reject paths (truncated → coded; truncated
+  → noise), per-band count partition, error display naming, and a
+  cross-module check that the cutoff models the patent's high-band
+  truncation shape.
 - `qmatrix` module — invertible differential-coding helpers for the
   per-band quantization matrix carriage from §4 of the patent trace
   (US7,930,171 step 120 / US7,502,743). Public functions
