@@ -132,6 +132,40 @@ the same patent trace:
 Round 5 adds 36 unit tests across the two modules (18 invquant, 18
 bands), taking the crate's test count from 100 to 136.
 
+**Round 6** (this round) lifts the §6 patent-disclosed **run-level
+codebook construction model** from the same patent trace into a new
+[`codebook`] module:
+
+* The patent's "2-D probability grid over `(R, L)` pairings is built;
+  pairings above a probability threshold get Huffman codewords,
+  pairings below it are excluded to bound table size" (US6,223,162
+  grid 500 / threshold 518 / FIG.6 / Claims 8–10) becomes a typed
+  [`CodebookGrid`] holding a row-major `(rm × ln)` probability table
+  and the cutoff threshold. The constructor
+  [`CodebookGrid::from_probabilities`] enforces `rm >= 1`, `ln >= 1`,
+  the `[0.0, 1.0]` probability range for both the threshold and the
+  per-pair entries, and the `probabilities.len() == rm * ln` invariant.
+* The patent's escape branch ("A pairing that falls below the
+  threshold (not in the code book) is emitted with an escape/special
+  symbol" — US6,223,162 Claim 4 / Claims 5–6) becomes a typed
+  [`Disposition`] enum with `InCodebook` / `Escape` variants;
+  `disposition(pair)`, `is_in_codebook(pair)`, and `is_escape(pair)`
+  report what a downstream entropy stage should do with a given
+  [`runlevel::RunLevelPair`]. Pairings outside the `(rm, ln)`
+  rectangle are reported as `Escape` (they are not represented in the
+  codebook at all).
+* Counting and iteration: `in_codebook_count()`,
+  `escape_count_in_rectangle()`, and `in_codebook_pairs()` walk the
+  above-threshold positions in row-major `(run outer, level inner)`
+  order, materialising each as a [`runlevel::RunLevelPair`].
+
+Round 6 adds 27 unit tests covering the constructor accept/reject
+paths, row-major lookup semantics, the inclusive `>=` threshold rule,
+outside-rectangle escape reporting, count partitioning, iteration
+order, cross-module orthogonality with the patent's `(N, 1)` implicit
+terminator, and consistent error-message naming. The crate's test
+count rises from 136 to 163.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

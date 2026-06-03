@@ -8,6 +8,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `codebook` module — `(R, L)` probability-grid + threshold model for
+  the run-level codebook construction step from §6 of the patent trace
+  (US6,223,162 grid 500 / threshold 518 / FIG.6 / Claims 4–10). Public
+  `CodebookGrid::from_probabilities(rm, ln, threshold, probs)` builder
+  with constructor-side validation of `rm >= 1`, `ln >= 1`, `[0.0, 1.0]`
+  threshold and probability ranges, and `probs.len() == rm * ln`.
+  Lookup via `probability_of(r, l) -> Option<f64>` (`None` outside the
+  `(rm, ln)` rectangle); a typed `Disposition` enum (`InCodebook` /
+  `Escape`) reports the patent-disclosed disposition of a
+  `runlevel::RunLevelPair` via `disposition`, `is_in_codebook`,
+  `is_escape`. Above-threshold counting and iteration:
+  `in_codebook_count`, `escape_count_in_rectangle`, and
+  `in_codebook_pairs()` (row-major run-outer / level-inner order). A new
+  `InvalidGrid` error names every constructor reject path
+  (`ZeroRm`, `ZeroLn`, `ThresholdOutOfRange`, `DimensionsOverflow`,
+  `ProbabilityLengthMismatch`, `ProbabilityOutOfRange`). 27 unit tests
+  cover constructor accept paths, all reject paths (incl. NaN
+  threshold/probability), row-major lookup vs. outside-rectangle
+  `None`, the inclusive `>=` cutoff rule including the at-exact-
+  threshold case, escape on outside-rectangle pairs, count
+  partitioning, row-major iteration order, threshold-0.0 full and
+  threshold-1.0 empty population cases, cross-module orthogonality
+  with the `(N, 1)` implicit terminator from `runlevel`, and consistent
+  `InvalidGrid` Display naming.
 - `invquant` module — decoder-side inverse-quantization helpers from
   §4 of the patent trace (US7,930,171 overall step-size description /
   US7,383,180 inverse quantizer-weighter FIG.6 / US6,240,380

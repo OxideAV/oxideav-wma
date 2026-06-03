@@ -15,10 +15,14 @@
 //!   sum/difference stereo transform and the §6 run-level pairing
 //!   model; Round 4 lifted the §4 quantization-matrix differential
 //!   coding step into [`qmatrix`] and the §6 mode selector / partition
-//!   descriptor into [`entropy_mode`]; Round 5 (this round) lifts the
-//!   §4 decoder inverse-quantization step into [`invquant`] and the §7
-//!   per-band coding-policy carrier (noise substitution + high-band
-//!   truncation cutoff) into [`bands`].
+//!   descriptor into [`entropy_mode`]; Round 5 lifted the §4 decoder
+//!   inverse-quantization step into [`invquant`] and the §7 per-band
+//!   coding-policy carrier (noise substitution + high-band truncation
+//!   cutoff) into [`bands`]; Round 6 (this round) lifts the §6
+//!   patent-disclosed run-level codebook construction model — the 2-D
+//!   `(R, L)` probability grid with a threshold separating in-codebook
+//!   from escape pairings — into [`codebook`] (US6,223,162 grid 500 /
+//!   threshold 518 / Claims 4–10).
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -59,6 +63,11 @@
 //!   patent's high-band truncation as a contiguous cutoff tail, sourced
 //!   from §7 of the patent trace (US7,383,180 noise substitution +
 //!   band truncation / US7,343,291).
+//! * [`codebook`] — `(R, L)` probability-grid + threshold model for the
+//!   run-level codebook construction step, plus a typed [`Disposition`]
+//!   reporting whether a pair is in-codebook or must use the patent's
+//!   escape branch, sourced from §6 of the patent trace (US6,223,162
+//!   grid 500 / threshold 518 / FIG.6 / Claims 4–10).
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -66,11 +75,13 @@
 //! [`BandPolicy::Coded`]: bands::BandPolicy::Coded
 //! [`BandPlan`]: bands::BandPlan
 //! [`BandScale`]: invquant::BandScale
+//! [`Disposition`]: codebook::Disposition
 
 #![forbid(unsafe_code)]
 
 pub mod bands;
 pub mod block;
+pub mod codebook;
 pub mod entropy_mode;
 pub mod header;
 pub mod invquant;
@@ -80,6 +91,7 @@ pub mod stereo;
 
 pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
+pub use codebook::{CodebookGrid, Disposition};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
