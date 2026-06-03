@@ -22,12 +22,19 @@
 //!   run-level codebook construction model — the 2-D `(R, L)`
 //!   probability grid with a threshold separating in-codebook from
 //!   escape pairings — into [`codebook`] (US6,223,162 grid 500 /
-//!   threshold 518 / Claims 4–10); Round 7 (this round) lifts the §3
+//!   threshold 518 / Claims 4–10); Round 7 lifted the §3
 //!   patent-disclosed per-block transient-handling switch as a typed
 //!   carrier that covers both mechanism alternatives the patents
 //!   disclose side-by-side (US6,240,380 / US6,029,126 one-bit
 //!   subband-combining flag and US7,930,171 block-size switching from
-//!   the `{256, 512, 1024, 2048, 4096}` set) — see [`transient`].
+//!   the `{256, 512, 1024, 2048, 4096}` set) — see [`transient`];
+//!   Round 8 (this round) lifts the §4 patent-disclosed
+//!   quantization-band layout — a contiguous coefficient-range
+//!   partition of a transform block, one weight-table index per band
+//!   (US7,930,171 / US8,805,696 quantization-band definition) — into
+//!   [`qband`], with a `band_map` helper that threads the per-band
+//!   weight assignment into the per-coefficient form
+//!   [`invquant::dequantize_in_place`] consumes.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -80,6 +87,12 @@
 //!   with a per-frame [`TransientPlan`] descriptor that pairs each
 //!   block with its decoded switch, sourced from §3 of the patent
 //!   trace.
+//! * [`qband`] — quantization-band layout: a contiguous-range
+//!   partition of a transform block, one weight-table index per band,
+//!   sourced from §4 of the patent trace (US7,930,171 / US8,805,696
+//!   quantization-band definition). The [`qband::QuantBandLayout::band_map`]
+//!   helper threads the patent's per-band weight assignment into the
+//!   per-coefficient form [`invquant::dequantize_in_place`] consumes.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -90,6 +103,7 @@
 //! [`Disposition`]: codebook::Disposition
 //! [`TransientMechanism`]: transient::TransientMechanism
 //! [`TransientPlan`]: transient::TransientPlan
+//! [`qband`]: crate::qband
 
 #![forbid(unsafe_code)]
 
@@ -99,6 +113,7 @@ pub mod codebook;
 pub mod entropy_mode;
 pub mod header;
 pub mod invquant;
+pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
 pub mod stereo;
@@ -110,6 +125,7 @@ pub use codebook::{CodebookGrid, Disposition};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
+pub use qband::{QuantBand, QuantBandLayout};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 
 /// Crate-local error type. Concrete variants land as the rebuild

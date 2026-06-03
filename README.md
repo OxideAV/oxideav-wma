@@ -211,6 +211,51 @@ position 0 and at a later position, the predicate-count partitioning
 invariant, error `Display` formatting and `std::error::Error`
 implementation. The crate's test count rises from 163 to 186.
 
+**Round 8** (this round) lifts the §4 patent-disclosed
+**quantization-band layout** — the structural notion distinct from the
+per-band coding-policy carrier already in [`bands`] — into a new
+[`qband`] module:
+
+* [`QuantBand`] models the patent's "contiguous frequency range of
+  coefficients quantized with the same weighting" definition
+  (US7,930,171 / US8,805,696 quantization-band grouping) as a typed
+  `{ start, length, weight_index }` triple. The constructor enforces
+  the contiguous-range precondition (`length >= 1`) and rejects
+  `start + length` overflow with `InvalidQuantBand::ZeroLength` and
+  `InvalidQuantBand::EndOverflow` variants. Accessors `start`, `end`,
+  `length`, `weight_index`, and `contains(k)` route the band's
+  geometric and reference-index information.
+* [`QuantBandLayout`] is the ordered partition: a `Vec<QuantBand>`
+  that tiles `[0, total_coeffs)` exactly. `QuantBandLayout::new`
+  validates the partition shape — bands start at coefficient 0, abut
+  with no gap or overlap, and cover the declared total exactly — with
+  `InvalidQuantBandLayout` reporting four distinct shape failures
+  (`BandCountMismatchEmptiness`, `LeadingGap`, `Gap`,
+  `CoverageMismatch`). A `for_block(bands, BlockSize)` constructor
+  threads the patent-disclosed transform-block-size set
+  `{256, 512, 1024, 2048, 4096}` directly into the layout's declared
+  total. Accessors expose `band_count`, `total_coeffs`, `is_empty`,
+  `bands()` iteration, `band(i)`, `band_slot_of(k)`,
+  `weight_index_of(k)`, and `bands_referencing_weight(d)` for the
+  patent-allowed case of multiple bands sharing one weight index.
+* [`QuantBandLayout::band_map`] materialises the per-coefficient
+  weight-index vector `d(k)` that [`invquant::dequantize_in_place`]
+  consumes, threading the patent's "one weight per band" arrangement
+  through to the patent's "one weight per coefficient" decoder step
+  with one allocation per layout.
+
+Round 8 adds 27 unit tests covering the constructor accept paths
+(minimal single-band, abutting pair, empty block, full coverage of
+every [`BlockSize::ALL`] entry), all eight reject paths (zero length,
+end overflow, empty/nonempty asymmetry, leading gap, gap between
+bands, overlap between bands, coverage below and above declared
+total), per-band `contains` semantics, `band_map` materialisation and
+round-trip with `weight_index_of`, multi-band shared-weight counting,
+the patent-named contract that the materialised band map drives
+[`invquant::dequantize_in_place`] correctly, and consistent error
+`Display` naming for both error enums. The crate's test count rises
+from 186 to 213.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

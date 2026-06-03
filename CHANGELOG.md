@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `qband` module — quantization-band layout carrier covering the §4
+  patent-disclosed structural notion (US7,930,171 / US8,805,696
+  quantization-band grouping; "contiguous frequency range of
+  coefficients quantized with the same weighting"). Public
+  `QuantBand { start, length, weight_index }` with `QuantBand::new`
+  constructor enforcing `length >= 1` and `start + length` overflow
+  guard via `InvalidQuantBand::{ZeroLength, EndOverflow}`; accessors
+  `start`, `end`, `length`, `weight_index`, and a `contains(k)`
+  membership predicate. `QuantBandLayout` aggregates a `Vec<QuantBand>`
+  partitioning `[0, total_coeffs)`; `QuantBandLayout::new` validates
+  the partition shape with `InvalidQuantBandLayout::{BandCountMismatchEmptiness,
+  LeadingGap, Gap, CoverageMismatch}` reporting the offending position
+  in each case. A `QuantBandLayout::for_block(bands, BlockSize)`
+  convenience constructor threads the patent's transform-block-size
+  set directly into the declared total. Accessors expose
+  `band_count`, `total_coeffs`, `is_empty`, `bands()`, `band(i)`,
+  `band_slot_of(k)`, `weight_index_of(k)`, and a
+  `bands_referencing_weight(d)` count for the patent-allowed case of
+  multiple bands sharing one weight index. The `band_map()` helper
+  materialises the per-coefficient weight-index vector `d(k)`
+  consumed by `invquant::dequantize_in_place`, threading the patent's
+  per-band weight assignment into the per-coefficient dequant loop.
+  27 unit tests cover the constructor accept paths (minimal
+  single-band, abutting pair, empty block, every member of
+  `BlockSize::ALL`), all reject paths (zero length, end overflow,
+  empty/nonempty asymmetry, leading gap, gap, overlap, coverage
+  below/above declared total), `contains` semantics, accessor lookup
+  for in-range and out-of-range coefficients, `band_map`
+  materialisation and round-trip with `weight_index_of`, multi-band
+  shared-weight counting, an end-to-end check that the materialised
+  map drives `invquant::dequantize_in_place` correctly, and
+  `InvalidQuantBand` / `InvalidQuantBandLayout` `Display` naming.
 - `transient` module — per-block transient-handling switch carrier
   from §3 of the patent trace. Public `TransientMechanism` enum names
   both patent-disclosed mechanisms side-by-side: `SubbandCombineFlag`
