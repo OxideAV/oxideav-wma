@@ -166,6 +166,51 @@ order, cross-module orthogonality with the patent's `(N, 1)` implicit
 terminator, and consistent error-message naming. The crate's test
 count rises from 136 to 163.
 
+**Round 7** (this round) lifts §3 of the same patent trace — the
+patent-disclosed **per-block transient-handling switch** — into a new
+[`transient`] module:
+
+* The trace doc explicitly states that the *existence* of a per-block
+  transient-handling switch signalled as side information is
+  patent-backed, but the v1/v2 choice between the two patent-disclosed
+  mechanisms is `[GAP]`. The new [`TransientMechanism`] enum names
+  both alternatives side-by-side:
+  * `SubbandCombineFlag` — the one-bit per-block side-information
+    flag that switches high-frequency subband combining on/off,
+    computed *after* the MLT so no window/block-size change is needed
+    (US6,240,380 FIG.12 boxes 1210–1250 / US6,029,126 FIG.12).
+  * `BlockSizeSwitch` — the alternative mechanism in which the
+    encoder picks a block size from the patent-disclosed
+    `{256, 512, 1024, 2048, 4096}` set based on transient detection
+    (US7,930,171 Background).
+* [`TransientSwitch`] is the typed per-block carrier whose two
+  variants mirror [`TransientMechanism`]. `SubbandCombineFlag` carries
+  the decoded one-bit `combine_high_subbands` value; `BlockSizeSwitch`
+  carries the chosen `BlockSize`. Accessors `mechanism`, `block_size`,
+  `subband_combine_flag`, and `is_transient_handled` route on the
+  variant. For the block-size mechanism, `is_transient_handled` is
+  `true` iff the chosen block size is *not* the longest member
+  (`S4096`) — encoder-shortened blocks are the patent-named
+  transient path per §2.
+* [`TransientPlan`] is the per-frame carrier: a fixed
+  [`TransientMechanism`] plus a `Vec<TransientSwitch>` whose every
+  switch must share that mechanism. `TransientPlan::new` rejects
+  mixed-mechanism populations via a new
+  `InvalidTransientPlan::MechanismMismatch` error variant that
+  reports the offending block index. Accessors expose `len`,
+  `is_empty`, `switch_of`, `switches()` iteration, and the predicate
+  counts `transient_handled_block_count` / `non_transient_block_count`.
+
+Round 7 adds 23 unit tests covering both mechanism alternatives, both
+switch variants, the `is_transient_handled` partition for both
+mechanisms, accessor coverage including the per-variant `None`
+returns, plan construction accept paths (empty, homogeneous subband,
+homogeneous block-size including iteration over all five
+`BlockSize::ALL` entries), the mismatch reject at first-offender
+position 0 and at a later position, the predicate-count partitioning
+invariant, error `Display` formatting and `std::error::Error`
+implementation. The crate's test count rises from 163 to 186.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

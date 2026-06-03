@@ -18,11 +18,16 @@
 //!   descriptor into [`entropy_mode`]; Round 5 lifted the §4 decoder
 //!   inverse-quantization step into [`invquant`] and the §7 per-band
 //!   coding-policy carrier (noise substitution + high-band truncation
-//!   cutoff) into [`bands`]; Round 6 (this round) lifts the §6
-//!   patent-disclosed run-level codebook construction model — the 2-D
-//!   `(R, L)` probability grid with a threshold separating in-codebook
-//!   from escape pairings — into [`codebook`] (US6,223,162 grid 500 /
-//!   threshold 518 / Claims 4–10).
+//!   cutoff) into [`bands`]; Round 6 lifted the §6 patent-disclosed
+//!   run-level codebook construction model — the 2-D `(R, L)`
+//!   probability grid with a threshold separating in-codebook from
+//!   escape pairings — into [`codebook`] (US6,223,162 grid 500 /
+//!   threshold 518 / Claims 4–10); Round 7 (this round) lifts the §3
+//!   patent-disclosed per-block transient-handling switch as a typed
+//!   carrier that covers both mechanism alternatives the patents
+//!   disclose side-by-side (US6,240,380 / US6,029,126 one-bit
+//!   subband-combining flag and US7,930,171 block-size switching from
+//!   the `{256, 512, 1024, 2048, 4096}` set) — see [`transient`].
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -68,6 +73,13 @@
 //!   reporting whether a pair is in-codebook or must use the patent's
 //!   escape branch, sourced from §6 of the patent trace (US6,223,162
 //!   grid 500 / threshold 518 / FIG.6 / Claims 4–10).
+//! * [`transient`] — per-block transient-handling switch carrier
+//!   covering both patent-disclosed mechanisms ([`TransientMechanism`]
+//!   `::SubbandCombineFlag` from US6,240,380 FIG.12 / US6,029,126
+//!   FIG.12 and `::BlockSizeSwitch` from US7,930,171 Background),
+//!   with a per-frame [`TransientPlan`] descriptor that pairs each
+//!   block with its decoded switch, sourced from §3 of the patent
+//!   trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -76,6 +88,8 @@
 //! [`BandPlan`]: bands::BandPlan
 //! [`BandScale`]: invquant::BandScale
 //! [`Disposition`]: codebook::Disposition
+//! [`TransientMechanism`]: transient::TransientMechanism
+//! [`TransientPlan`]: transient::TransientPlan
 
 #![forbid(unsafe_code)]
 
@@ -88,6 +102,7 @@ pub mod invquant;
 pub mod qmatrix;
 pub mod runlevel;
 pub mod stereo;
+pub mod transient;
 
 pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
@@ -95,6 +110,7 @@ pub use codebook::{CodebookGrid, Disposition};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
+pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 
 /// Crate-local error type. Concrete variants land as the rebuild
 /// rounds populate the codec pipeline.

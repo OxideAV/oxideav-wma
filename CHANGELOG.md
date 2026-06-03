@@ -8,6 +8,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `transient` module — per-block transient-handling switch carrier
+  from §3 of the patent trace. Public `TransientMechanism` enum names
+  both patent-disclosed mechanisms side-by-side: `SubbandCombineFlag`
+  (one-bit per-block side-information flag, US6,240,380 FIG.12 boxes
+  1210–1250 / US6,029,126 FIG.12) and `BlockSizeSwitch` (selection
+  from the patent-disclosed `{256, 512, 1024, 2048, 4096}` set,
+  US7,930,171 Background). `TransientSwitch` variants mirror the
+  mechanisms and carry their patent-named payloads
+  (`combine_high_subbands: bool` and `block_size: BlockSize`), with
+  `mechanism`, `block_size`, `subband_combine_flag`, and
+  `is_transient_handled` accessors. `TransientPlan` aggregates a
+  per-frame `Vec<TransientSwitch>` behind a single declared
+  `TransientMechanism`, validating homogeneity at construction;
+  `InvalidTransientPlan::MechanismMismatch { at_block, expected, got }`
+  reports the offending block index. Plan accessors expose `len`,
+  `is_empty`, `switch_of`, `switches()` iteration, and the
+  `transient_handled_block_count` / `non_transient_block_count`
+  partition. 23 unit tests cover both mechanism alternatives, both
+  switch variants, the `is_transient_handled` partition for both
+  mechanisms (block-size variant treats every non-`S4096` size as
+  transient-handled), variant-specific accessor `None` returns, plan
+  construction over empty / homogeneous subband / all-five
+  `BlockSize::ALL` populations, mismatch rejection at first-offender
+  position 0 and at a later index, the count-partitioning invariant,
+  and the `InvalidTransientPlan` `Display` + `std::error::Error`
+  implementation.
 - `codebook` module — `(R, L)` probability-grid + threshold model for
   the run-level codebook construction step from §6 of the patent trace
   (US6,223,162 grid 500 / threshold 518 / FIG.6 / Claims 4–10). Public
