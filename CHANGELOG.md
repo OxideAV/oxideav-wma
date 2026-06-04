@@ -8,6 +8,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `terminator` module — end-of-block terminator selector for the
+  spectral-coefficient stream, covering both patent-disclosed
+  alternatives the §6 trace names side-by-side (US6,223,162
+  end-of-stream discussion: "either a special ending signal… or a
+  special event such as `(N, 1)` because the decoder knows the total
+  coefficient count for the block"). Public `TerminatorMechanism`
+  enum with `ExplicitEndingSignal` and `ImplicitNL1Event` variants,
+  `TerminatorMechanism::ALL`, `is_explicit_ending_signal`,
+  `is_implicit_n_l1_event`, `opposite`, and a patent-faithful
+  `is_compatible_with(pair, total_coeffs)` predicate. Per-block
+  `TerminatorDecision` enum mirroring the mechanism with an
+  `ImplicitNL1Event { terminator_pair }` payload; `new_explicit()`
+  is payload-free (the symbol pattern is `[GAP]`),
+  `new_implicit(pair, total_coeffs)` enforces the patent's `(N, 1)`
+  predicate via `InvalidTerminator::PairNotNL1 { run, level, total_coeffs }`.
+  Cross-module: composes with
+  `runlevel::RunLevelPair::is_implicit_terminator_for` so the
+  implicit branch and the runlevel walker share the patent's `(N, 1)`
+  shape. Re-exports: `TerminatorDecision`, `TerminatorMechanism`.
+  Adds 21 unit tests; crate total rises from 213 to 234.
 - `qband` module — quantization-band layout carrier covering the §4
   patent-disclosed structural notion (US7,930,171 / US8,805,696
   quantization-band grouping; "contiguous frequency range of

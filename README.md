@@ -256,6 +256,59 @@ the patent-named contract that the materialised band map drives
 `Display` naming for both error enums. The crate's test count rises
 from 186 to 213.
 
+**Round 9** (this round) lifts the §6 patent-disclosed **end-of-block
+terminator selector** for the spectral-coefficient stream into a new
+[`terminator`] module. The trace doc gives both alternatives
+side-by-side, without pinning the v1/v2 choice:
+
+> "Termination uses *either a special ending signal* … *or a special
+> event such as `(N, 1)`* because the decoder knows the total
+> coefficient count for the block."
+> — [PATENT US6,223,162 — end-of-stream discussion]
+
+The new module models that selector exactly:
+
+* [`terminator::TerminatorMechanism`] is the typed two-alternative
+  selector: `ExplicitEndingSignal` (the patent's "special ending
+  signal" branch — symbol pattern is `[GAP]`) and `ImplicitNL1Event`
+  (the patent's coefficient-count-driven `(N, 1)` event branch).
+  `TerminatorMechanism::ALL` locks the iteration order; `opposite`
+  is involutive; `is_compatible_with(pair, total_coeffs)` is the
+  patent-compatibility predicate, returning `true` unconditionally
+  for the explicit branch (the patent places no structural
+  constraint on the final `(R, L)` for that branch) and gating the
+  implicit branch on the runlevel-module's
+  `is_implicit_terminator_for` predicate.
+* [`terminator::TerminatorDecision`] is the per-block carrier whose
+  two variants mirror [`terminator::TerminatorMechanism`].
+  `ExplicitEndingSignal` is payload-free (the symbol pattern is
+  `[GAP]`); `ImplicitNL1Event { terminator_pair }` carries the
+  `(R, L)` the upstream reader recognised as the implicit terminator.
+  Accessors `mechanism`, `terminator_pair`,
+  `is_explicit_ending_signal`, and `is_implicit_n_l1_event` route
+  on the variant.
+* [`terminator::TerminatorDecision::new_implicit`] is the
+  patent-faithful constructor for the implicit branch: it enforces
+  the patent's `(N, 1)` predicate against the block's `total_coeffs`,
+  surfacing `terminator::InvalidTerminator::PairNotNL1 { run, level,
+  total_coeffs }` when the candidate fails.
+  [`terminator::TerminatorDecision::new_explicit`] is the matching
+  constructor for the explicit branch — no validation is needed
+  because the explicit-branch structural shape lives entirely in
+  the (still-`[GAP]`) symbol pattern.
+
+Round 9 adds 21 unit tests covering both mechanism variants,
+mechanism iteration / opposite involution, accessor coverage
+including the per-variant `None` returns, `is_compatible_with`
+acceptance (any pair on the explicit branch; only the patent's
+`(N, 1)` on the implicit branch — and across every block size in
+[`block::BlockSize::ALL`]), `new_implicit` reject paths (level
+above one, run below remaining, run above remaining, empty-block
+case), cross-module composition with [`runlevel`] confirming both
+layers agree on the `(N, 1)` shape, error-`Display` naming, and
+`std::error::Error` implementation. The crate's test count rises
+from 213 to 234.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

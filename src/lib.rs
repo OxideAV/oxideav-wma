@@ -28,13 +28,19 @@
 //!   disclose side-by-side (US6,240,380 / US6,029,126 one-bit
 //!   subband-combining flag and US7,930,171 block-size switching from
 //!   the `{256, 512, 1024, 2048, 4096}` set) — see [`transient`];
-//!   Round 8 (this round) lifts the §4 patent-disclosed
+//!   Round 8 lifts the §4 patent-disclosed
 //!   quantization-band layout — a contiguous coefficient-range
 //!   partition of a transform block, one weight-table index per band
 //!   (US7,930,171 / US8,805,696 quantization-band definition) — into
 //!   [`qband`], with a `band_map` helper that threads the per-band
 //!   weight assignment into the per-coefficient form
-//!   [`invquant::dequantize_in_place`] consumes.
+//!   [`invquant::dequantize_in_place`] consumes; Round 9 (this round)
+//!   lifts the §6 patent-disclosed end-of-block terminator selector
+//!   — two patent-backed alternatives, an "explicit ending signal"
+//!   and the implicit `(N, 1)` event — into [`terminator`], with a
+//!   patent-faithful constructor that rejects an implicit-branch
+//!   commitment whose final `(R, L)` does not satisfy the `(N, 1)`
+//!   predicate.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -93,6 +99,14 @@
 //!   quantization-band definition). The [`qband::QuantBandLayout::band_map`]
 //!   helper threads the patent's per-band weight assignment into the
 //!   per-coefficient form [`invquant::dequantize_in_place`] consumes.
+//! * [`terminator`] — end-of-block terminator selector for the
+//!   spectral-coefficient stream: both patent-disclosed alternatives
+//!   ([`terminator::TerminatorMechanism::ExplicitEndingSignal`] and
+//!   [`terminator::TerminatorMechanism::ImplicitNL1Event`]) named
+//!   side-by-side, with a per-block [`terminator::TerminatorDecision`]
+//!   carrier whose patent-faithful constructor enforces the `(N, 1)`
+//!   predicate against the block's total coefficient count. Sourced
+//!   from §6 of the patent trace (US6,223,162).
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -117,6 +131,7 @@ pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
 pub mod stereo;
+pub mod terminator;
 pub mod transient;
 
 pub use bands::{BandPlan, BandPolicy};
@@ -126,6 +141,7 @@ pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use qband::{QuantBand, QuantBandLayout};
+pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 
 /// Crate-local error type. Concrete variants land as the rebuild
