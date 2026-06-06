@@ -34,13 +34,23 @@
 //!   (US7,930,171 / US8,805,696 quantization-band definition) — into
 //!   [`qband`], with a `band_map` helper that threads the per-band
 //!   weight assignment into the per-coefficient form
-//!   [`invquant::dequantize_in_place`] consumes; Round 9 (this round)
+//!   [`invquant::dequantize_in_place`] consumes; Round 9
 //!   lifts the §6 patent-disclosed end-of-block terminator selector
 //!   — two patent-backed alternatives, an "explicit ending signal"
 //!   and the implicit `(N, 1)` event — into [`terminator`], with a
 //!   patent-faithful constructor that rejects an implicit-branch
 //!   commitment whose final `(R, L)` does not satisfy the `(N, 1)`
-//!   predicate.
+//!   predicate;
+//!   Round 10 (this round) lifts the §4 patent-disclosed
+//!   **per-block overall step size** — the single-`f64` quantization
+//!   factor that multiplies the per-band matrix weight `Q[d]` to
+//!   give the per-coefficient quantizer factor (US7,930,171
+//!   "single overall step size for the whole block"; US7,383,180
+//!   "one quantization factor per tile") — into [`step_size`], with
+//!   a typed [`OverallStepSize`] carrier that enforces positivity,
+//!   finiteness, and non-NaN at construction, and a [`PerBlockStep`]
+//!   that pairs it with a [`BlockSize`] and folds into a [`BandScale`]
+//!   via `fold_with_weights`.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -107,6 +117,14 @@
 //!   carrier whose patent-faithful constructor enforces the `(N, 1)`
 //!   predicate against the block's total coefficient count. Sourced
 //!   from §6 of the patent trace (US6,223,162).
+//! * [`step_size`] — typed per-block overall step-size carrier for the
+//!   patent's "single overall step size for the whole block"
+//!   (US7,930,171) / "one quantization factor per tile"
+//!   (US7,383,180 quantizer 560) arrangement. [`OverallStepSize`]
+//!   enforces positivity, finiteness, and non-NaN at construction;
+//!   [`PerBlockStep`] pairs a [`BlockSize`] with the step and folds
+//!   into a [`BandScale`] via `fold_with_weights`. Sourced from §4 of
+//!   the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -118,6 +136,8 @@
 //! [`TransientMechanism`]: transient::TransientMechanism
 //! [`TransientPlan`]: transient::TransientPlan
 //! [`qband`]: crate::qband
+//! [`OverallStepSize`]: step_size::OverallStepSize
+//! [`PerBlockStep`]: step_size::PerBlockStep
 
 #![forbid(unsafe_code)]
 
@@ -130,6 +150,7 @@ pub mod invquant;
 pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
+pub mod step_size;
 pub mod stereo;
 pub mod terminator;
 pub mod transient;
@@ -141,6 +162,7 @@ pub use entropy_mode::{EntropyMode, Partition};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use qband::{QuantBand, QuantBandLayout};
+pub use step_size::{OverallStepSize, PerBlockStep};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 

@@ -309,6 +309,52 @@ layers agree on the `(N, 1)` shape, error-`Display` naming, and
 `std::error::Error` implementation. The crate's test count rises
 from 213 to 234.
 
+**Round 10** (this round) lifts the §4 patent-disclosed **per-block
+overall step size** into a new [`step_size`] module:
+
+* The §4 trace states "Each coefficient is quantized by the
+  **product of its band's matrix weight `Q[c][d]` and a single
+  overall step size** for the whole block" (US7,930,171) and
+  "an **adaptive, uniform, scalar quantizer that computes one
+  quantization factor per tile**" (US7,383,180 quantizer 560).
+  The new [`OverallStepSize`] is the typed carrier for that
+  per-block factor: a single `f64` validated at construction to be
+  finite, non-NaN, and strictly positive — the patent-implied
+  preconditions for the forward step
+  `q = round(coeff / (Q[d] * step))` and the decoder inverse
+  `coeff_hat = q * Q[d] * step` to be well-defined and sign-faithful.
+* [`OverallStepSize::new`] reports rejection via a typed
+  [`step_size::InvalidStepSize`] enum (`NotANumber`, `NotFinite`,
+  `NotPositive`); the type implements [`std::error::Error`].
+  Accessors expose [`OverallStepSize::value`] (the `f64` for
+  [`invquant::BandScale::from_weights`] consumption),
+  [`OverallStepSize::apply_to_weight`] (the patent's per-band
+  `Q[d] * step` factor for a single band), and
+  [`OverallStepSize::band_scale_from_weights`] (build a
+  [`BandScale`] sized to a slice of per-band weights).
+* [`PerBlockStep`] pairs a [`BlockSize`] with an
+  [`OverallStepSize`] to model the patent's "one step per tile"
+  arrangement; `coefficient_count()` re-exposes the block-size's
+  sample count for the per-coefficient dequant loop;
+  `fold_with_weights()` materialises the patent's per-band
+  `Q[d] * step` folded scale via [`BandScale`].
+* Cross-module: an end-to-end test threads
+  `PerBlockStep::fold_with_weights` into [`BandScale::apply`] and
+  confirms the result matches [`invquant::dequantize_in_place`]
+  given the same opaque step.
+
+Round 10 adds 26 unit tests covering constructor accept/reject paths
+(typical positive, smallest subnormal positive; zero, negative zero,
+negative finite, ±∞, NaN), accessor coverage, the
+`apply_to_weight` ↔ `value()` commutativity, the
+`band_scale_from_weights` ↔ free-function equivalence, the
+[`PerBlockStep`] coverage across every [`BlockSize::ALL`] entry, the
+`fold_with_weights` ↔ free-function equivalence end-to-end against
+[`invquant::dequantize_in_place`], `PartialEq` differentiating on
+both block and step, and `Display` naming for both the carrier and
+each [`step_size::InvalidStepSize`] variant. The crate's test count
+rises from 234 to 260.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

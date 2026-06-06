@@ -8,6 +8,43 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `step_size` module — typed per-block overall step-size carrier
+  for the §4 patent-disclosed arrangement that pairs the per-band
+  quantization matrix with a single block-wide step (US7,930,171
+  "single overall step size for the whole block"; US7,383,180
+  "adaptive, uniform, scalar quantizer that computes one
+  quantization factor per tile"; US7,343,291 "step size is varied
+  across a rate-control loop"). Public `OverallStepSize` newtype
+  carries a single non-zero finite positive `f64`; `new(step)`
+  rejects `NaN` / `±∞` / zero / negative inputs via a typed
+  `InvalidStepSize` enum (`NotANumber`, `NotFinite { given }`,
+  `NotPositive { given }`) that implements `std::error::Error`.
+  Accessors `value()`, `apply_to_weight(weight)`, and
+  `band_scale_from_weights(weights) -> BandScale` thread the typed
+  carrier through to the patent's per-coefficient factor
+  `q * Q[d] * step` without re-extracting the inner `f64`.
+  Per-block `PerBlockStep { block_size, step }` pairs a `BlockSize`
+  with the typed step, exposes `block_size()`, `step()`,
+  `coefficient_count()` (re-exporting the block-size sample count
+  for the per-coefficient dequant loop), and `fold_with_weights()`
+  which materialises the patent's per-band `Q[d] * step` folded
+  scale as `BandScale`. Cross-module composition: end-to-end test
+  drives `PerBlockStep::fold_with_weights` through
+  `BandScale::apply` and confirms the result matches
+  `invquant::dequantize_in_place` given the same opaque step.
+  Re-exports: `OverallStepSize`, `PerBlockStep`. 26 unit tests
+  cover constructor accept paths (typical positive, smallest
+  subnormal positive), all reject paths (zero, negative zero,
+  negative finite, ±∞, NaN), accessor coverage, the
+  `apply_to_weight` ↔ `value()` commutativity, the
+  `band_scale_from_weights` ↔ free-function equivalence, the
+  `PerBlockStep` per-`BlockSize::ALL` coverage, the
+  `fold_with_weights` ↔ free-function end-to-end equivalence
+  against `invquant::dequantize_in_place`, `PartialEq`
+  differentiating on both block and step, and `Display` naming
+  for both `OverallStepSize` and each `InvalidStepSize` variant.
+  Crate test count: 234 → 260.
+
 - `terminator` module — end-of-block terminator selector for the
   spectral-coefficient stream, covering both patent-disclosed
   alternatives the §6 trace names side-by-side (US6,223,162
