@@ -8,6 +8,46 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `escape` module — typed escape-symbol literal payload carrier for
+  the §6 patent-disclosed run-level entropy stage (US6,223,162
+  Claim 4: "the entropy code is an escape code"; Claims 5–6:
+  decoder recovers `R` and `L` from the literal trailer). Public
+  `EscapeLiteral { run: u32, level: NonZeroU32 }` represents the
+  literal payload that follows the escape symbol when an `(R, L)`
+  pair was excluded from the probability-thresholded codebook.
+  Two construction paths: `EscapeLiteral::new(run, level)` checks
+  the Claim-1 / Claim-2 predicates (`run ≥ 1`, `level ≥ 1`) via
+  the existing `RunLevelPair::new` and reports
+  `EscapeError::InvalidPair(InvalidPair)` on rejection;
+  `EscapeLiteral::for_pair(&grid, pair)` consults a
+  `CodebookGrid` and admits the pair to the carrier precisely
+  when `grid.disposition(pair) == Disposition::Escape` (Claim 4),
+  returning `EscapeError::InCodebook` otherwise. Accessors
+  `run() -> u32`, `level() -> NonZeroU32`, and
+  `level_raw() -> u32` expose the carried fields, and
+  `as_run_level_pair() -> RunLevelPair` realises the Claim-5/6
+  decoder side by rebuilding the codebook-domain pair the literal
+  represents. `EscapeError` implements `std::error::Error`;
+  `InCodebook`'s `Display` cites Claim 4 directly so an upstream
+  reader can surface the patent-named failure mode without
+  string-matching. Run / level field widths are kept at `u32` —
+  the patent fixes the structural presence of the literal payload
+  but leaves the bit widths as `[GAP]` in the §6 trace, so the
+  carrier hosts whatever value the upstream entropy reader
+  recovers. Re-exports: `EscapeLiteral`, `EscapeError`. 18 unit
+  tests cover the constructor accept paths (minimum (1, 1), large
+  values, `u32::MAX` boundary on both run and level), all reject
+  paths (`run == 0`, `level == 0`, both zero), the `for_pair`
+  cross-check against a 2×2 codebook grid (in-codebook pair
+  rejected; below-threshold escape pair accepted; outside-rectangle
+  pair accepted), accessor coverage including `Copy`/`Eq`,
+  round-trip through `as_run_level_pair` for both constructors and
+  at the `u32::MAX` boundary, error `Display` strings (`InvalidPair`
+  mentions "run", `InCodebook` mentions "US6,223,162" and "Claim
+  4"), and a structural-invariant test that walks every cell of a
+  3×3 grid and confirms `for_pair` accepts every escape disposition
+  and rejects every in-codebook disposition.
+
 - `step_size` module — typed per-block overall step-size carrier
   for the §4 patent-disclosed arrangement that pairs the per-band
   quantization matrix with a single block-wide step (US7,930,171

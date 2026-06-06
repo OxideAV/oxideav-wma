@@ -41,7 +41,7 @@
 //!   patent-faithful constructor that rejects an implicit-branch
 //!   commitment whose final `(R, L)` does not satisfy the `(N, 1)`
 //!   predicate;
-//!   Round 10 (this round) lifts the §4 patent-disclosed
+//!   Round 10 lifts the §4 patent-disclosed
 //!   **per-block overall step size** — the single-`f64` quantization
 //!   factor that multiplies the per-band matrix weight `Q[d]` to
 //!   give the per-coefficient quantizer factor (US7,930,171
@@ -50,7 +50,19 @@
 //!   a typed [`OverallStepSize`] carrier that enforces positivity,
 //!   finiteness, and non-NaN at construction, and a [`PerBlockStep`]
 //!   that pairs it with a [`BlockSize`] and folds into a [`BandScale`]
-//!   via `fold_with_weights`.
+//!   via `fold_with_weights`;
+//!   Round 11 (this round) lifts the §6 patent-disclosed
+//!   **escape-symbol literal payload** — the typed carrier for the
+//!   literal trailer that follows the patent's escape symbol when an
+//!   `(R, L)` pair was excluded from the probability-thresholded
+//!   codebook (US6,223,162 Claim 4: "the entropy code is an escape
+//!   code"; Claims 5–6: the decoder recovers `R` and `L` from the
+//!   literal trailer) — into [`escape`], with a typed
+//!   [`EscapeLiteral`] whose `new` rejects the Claim-1 / Claim-2
+//!   violations (`run == 0` / `level == 0`) and whose `for_pair`
+//!   cross-checks the [`CodebookGrid`] disposition so the carrier is
+//!   only inhabited by pairings whose escape branch is the right
+//!   emission.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -125,6 +137,15 @@
 //!   [`PerBlockStep`] pairs a [`BlockSize`] with the step and folds
 //!   into a [`BandScale`] via `fold_with_weights`. Sourced from §4 of
 //!   the patent trace.
+//! * [`escape`] — typed escape-symbol literal payload carrier for the
+//!   §6 entropy stage. [`EscapeLiteral::new`] rejects the patent's
+//!   `run == 0` / `level == 0` violations (US6,223,162 Claim 1 / Claim
+//!   2); [`EscapeLiteral::for_pair`] takes a [`CodebookGrid`] +
+//!   [`runlevel::RunLevelPair`] and produces the literal precisely
+//!   when the grid reports [`Disposition::Escape`] (US6,223,162 Claim
+//!   4). The Claim-5/6 decoder side is realised as
+//!   [`EscapeLiteral::as_run_level_pair`], which rebuilds the
+//!   `(R, L)` pair the literal carries.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -138,6 +159,10 @@
 //! [`qband`]: crate::qband
 //! [`OverallStepSize`]: step_size::OverallStepSize
 //! [`PerBlockStep`]: step_size::PerBlockStep
+//! [`EscapeLiteral`]: escape::EscapeLiteral
+//! [`EscapeLiteral::new`]: escape::EscapeLiteral::new
+//! [`EscapeLiteral::for_pair`]: escape::EscapeLiteral::for_pair
+//! [`EscapeLiteral::as_run_level_pair`]: escape::EscapeLiteral::as_run_level_pair
 
 #![forbid(unsafe_code)]
 
@@ -145,6 +170,7 @@ pub mod bands;
 pub mod block;
 pub mod codebook;
 pub mod entropy_mode;
+pub mod escape;
 pub mod header;
 pub mod invquant;
 pub mod qband;
@@ -159,6 +185,7 @@ pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
 pub use codebook::{CodebookGrid, Disposition};
 pub use entropy_mode::{EntropyMode, Partition};
+pub use escape::{EscapeError, EscapeLiteral};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use qband::{QuantBand, QuantBandLayout};

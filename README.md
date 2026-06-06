@@ -309,7 +309,7 @@ layers agree on the `(N, 1)` shape, error-`Display` naming, and
 `std::error::Error` implementation. The crate's test count rises
 from 213 to 234.
 
-**Round 10** (this round) lifts the §4 patent-disclosed **per-block
+**Round 10** lifts the §4 patent-disclosed **per-block
 overall step size** into a new [`step_size`] module:
 
 * The §4 trace states "Each coefficient is quantized by the
@@ -354,6 +354,58 @@ negative finite, ±∞, NaN), accessor coverage, the
 both block and step, and `Display` naming for both the carrier and
 each [`step_size::InvalidStepSize`] variant. The crate's test count
 rises from 234 to 260.
+
+**Round 11** (this round) lifts the §6 patent-disclosed
+**escape-symbol literal payload** into a new [`escape`] module. The
+trace doc records the patent's structural disclosure as:
+
+> "A pairing that falls below the threshold (not in the code book) is
+> emitted with an **escape/special symbol** followed by enough
+> literal information to identify the zero-run length and the
+> non-zero sample value."
+> — [PATENT US6,223,162 — escape symbol; Claim 4; Claims 5–6]
+
+The new module realises the typed carrier for that literal trailer:
+
+* [`escape::EscapeLiteral`] is the typed payload — `{ run: u32,
+  level: NonZeroU32 }` — that follows the patent's escape symbol on
+  the wire. The constructor [`escape::EscapeLiteral::new`] reuses
+  [`runlevel::RunLevelPair::new`] to enforce the patent's Claim-1
+  (`run ≥ 1`) and Claim-2 (`level ≥ 1`) predicates and reports
+  failures via a typed [`escape::EscapeError::InvalidPair`] wrapping
+  the [`runlevel::InvalidPair`] reason.
+* [`escape::EscapeLiteral::for_pair`] is the grid-checked variant.
+  It takes a [`CodebookGrid`] + [`runlevel::RunLevelPair`] and
+  produces the typed literal **only** when
+  `grid.disposition(pair) == Disposition::Escape` — the patent's
+  Claim 4 condition for entering the escape branch. An in-codebook
+  pair surfaces as [`escape::EscapeError::InCodebook`], whose
+  `Display` cites US6,223,162 Claim 4 directly.
+* The Claim-5/6 decoder side is realised as
+  [`escape::EscapeLiteral::as_run_level_pair`], which rebuilds the
+  [`runlevel::RunLevelPair`] the literal carries. Together with
+  the constructor, this gives an exact round-trip
+  `pair → EscapeLiteral → pair` for any escape-branch pair.
+* The literal's `run` and `level` widths are deliberately wide
+  (`u32` each). The patent fixes the structural presence of the
+  literal payload but leaves the bit widths as `[GAP]` in the §6
+  trace, so the carrier accepts whatever value the upstream
+  entropy reader recovers — including the `u32::MAX` boundary,
+  exercised by tests.
+
+Round 11 adds 18 unit tests covering the constructor accept paths
+(minimum (1, 1), large values, `u32::MAX` on both fields), all
+reject paths (`run == 0`, `level == 0`, both zero), the `for_pair`
+cross-check against a 2×2 codebook grid (in-codebook pair rejected;
+below-threshold escape pair accepted; outside-rectangle pair
+accepted), accessor coverage, round-trip through
+`as_run_level_pair` for both constructors and at the `u32::MAX`
+boundary, error `Display` strings (`InvalidPair` mentions "run";
+`InCodebook` mentions "US6,223,162" and "Claim 4"), and a
+structural-invariant test that walks every cell of a 3×3 grid and
+confirms `for_pair` accepts every escape disposition and rejects
+every in-codebook disposition. The crate's test count rises from
+260 to 278.
 
 ## What is NOT in this round
 
