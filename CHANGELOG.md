@@ -8,6 +8,43 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `overlap_add` module — stateful decoder-side overlap-add
+  (overlapper/adder) carrier for the §3 patent-disclosed
+  reconstruction stage (US7,383,180 decoder FIG.6 overlapper/adder;
+  US6,029,126 / US6,240,380 oddly-stacked TDAC filter bank, 2M
+  windowing over M-length blocks). Public `OverlapAdd` is parameterised
+  by a `BlockSize` `M`, enforces the patent-fixed `2M`-sample input
+  contract per call via `OverlapAdd::step(input)` (returns
+  `InvalidInputLen { expected, got }` on mismatch), and sums the
+  previous block's right-half tail with the current block's left half
+  to produce `M` time-domain output samples while saving the new
+  right half as the tail for the next call. Accessors `block_size`,
+  `output_len` (= `M`), `input_len` (= `2M`), `tail_len`, and a
+  read-only `tail()` view expose the carrier's state for inspection.
+  `reset()` returns the tail to all-zero (e.g. after a seek or
+  decoder flush). `flush()` drains the trailing-edge tail to recover
+  the last `M` samples a finite stream would otherwise leave buffered,
+  then zeroes the internal tail. The carrier takes a *post-windowed*
+  inverse-MLT block as input — the synthesis-window shape
+  (sine / MLBT / NMLBT) is patent-disclosed as a separate decision
+  whose typed carrier is `[GAP]` until a future round stages it; this
+  module covers only the patent's overlap-add semantics. Re-exports:
+  `OverlapAdd`, `InvalidInputLen`. 23 unit tests cover constructor
+  state for every `BlockSize::ALL` variant, the `output_len` /
+  `input_len` / `tail_len` invariants, the input-length contract
+  (too-short, too-long, empty, mis-sized-for-block rejections, and
+  the no-mutation-on-error guarantee that preserves the carried tail),
+  the leading-edge first-call behaviour (zeroed tail → output equals
+  left half; right half saved as new tail), the defining
+  prev-right + curr-left summation rule, a three-block chain that
+  verifies the overlap arithmetic stays correct across multiple
+  calls, per-`BlockSize` output-length matching, `reset` semantics,
+  `flush` semantics including the trailing-edge return and tail
+  zeroing, an end-to-end two-blocks-plus-flush sequence that
+  produces the patent-arithmetic `3M` total output samples for `2`
+  input blocks, error `Display` formatting, and `Clone`
+  state-independence. Crate test count: 278 → 301.
+
 - `escape` module — typed escape-symbol literal payload carrier for
   the §6 patent-disclosed run-level entropy stage (US6,223,162
   Claim 4: "the entropy code is an escape code"; Claims 5–6:

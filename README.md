@@ -355,7 +355,7 @@ both block and step, and `Display` naming for both the carrier and
 each [`step_size::InvalidStepSize`] variant. The crate's test count
 rises from 234 to 260.
 
-**Round 11** (this round) lifts the §6 patent-disclosed
+**Round 11** lifts the §6 patent-disclosed
 **escape-symbol literal payload** into a new [`escape`] module. The
 trace doc records the patent's structural disclosure as:
 
@@ -406,6 +406,65 @@ structural-invariant test that walks every cell of a 3×3 grid and
 confirms `for_pair` accepts every escape disposition and rejects
 every in-codebook disposition. The crate's test count rises from
 260 to 278.
+
+**Round 12** (this round) lifts the §3 patent-disclosed **decoder-side
+overlap-add (overlapper/adder) stage** into a new [`overlap_add`]
+module. The trace doc names the patent's reconstruction-side
+arrangement directly:
+
+> "Reconstruction at the decoder is an inverse transform followed by
+> an **overlap-add (overlapper/adder)** stage."
+> — [PATENT US7,383,180 — decoder FIG.6]
+>
+> "The MLT is, in DSP terms, the same transform commonly called the
+> **MDCT** (oddly-stacked TDAC cosine-modulated filter bank with 50%
+> overlap and 2M-length windowing over M-length blocks)."
+> — [PATENT US6,029,126 / US6,240,380 — MLT defined as the
+>   oddly-stacked TDAC filter bank, basis = windowed DCT-IV, FIG.7]
+
+The new module realises a typed stateful carrier for that stage:
+
+* [`overlap_add::OverlapAdd`] is parameterised at construction by a
+  [`BlockSize`] `M` and carries an internal `M`-sample tail buffer that
+  starts zeroed (modelling the patent's leading-edge behaviour: the
+  first block has no predecessor to overlap with, so its left half
+  emits unchanged).
+* Each call to [`overlap_add::OverlapAdd::step`] accepts a `2M`-sample
+  post-windowed inverse-MLT block, sums the previous tail with the
+  block's left half to produce `M` output samples, and saves the
+  block's right half as the new tail for the next call. Mis-sized
+  input surfaces as [`overlap_add::InvalidInputLen { expected, got }`]
+  *without* mutating the carried tail, so a malformed call cannot
+  corrupt the carrier's downstream state.
+* [`overlap_add::OverlapAdd::flush`] drains the trailing-edge tail to
+  recover the final `M` samples that would otherwise stay buffered at
+  end-of-stream, then zeroes the internal tail. The flushed length
+  plus the per-block emission accounts for the patent's `3M` total
+  output samples for a `2`-block sequence (a defining 50%-overlap
+  arithmetic check covered by the end-to-end test).
+* Accessors `block_size`, `output_len` (= `M`), `input_len` (= `2M`),
+  `tail_len` (= `M`), and a read-only `tail()` view expose the
+  carrier's state; [`overlap_add::OverlapAdd::reset`] zeroes the tail
+  without reallocating (for use at a seek or decoder flush).
+* The carrier takes a *post-windowed* block: the synthesis-window
+  shape (sine / MLBT / NMLBT — US6,240,380) is patent-disclosed as a
+  separate decision whose typed carrier is `[GAP]` until a future
+  round stages the window-pair primitive. The forward inverse MLT
+  itself is likewise out of scope here; this module is the adder
+  downstream of it.
+
+Round 12 adds 23 unit tests covering the constructor state for every
+`BlockSize::ALL` variant, the `output_len` / `input_len` / `tail_len`
+invariants, the input-length contract (too-short, too-long, empty,
+mis-sized-for-block) including the no-mutation-on-error guarantee, the
+leading-edge first-call behaviour, the defining
+`prev_right + curr_left` summation rule, a three-block chain that
+verifies the overlap arithmetic stays correct across multiple calls,
+per-`BlockSize` output-length matching, `reset` and `flush` semantics
+including the trailing-edge tail return and zeroing, an end-to-end
+two-blocks-plus-flush sequence that produces the patent's `3M` total
+output for `2` input blocks, error `Display` formatting, and `Clone`
+state-independence. The crate's test count rises from 278 to 301.
 
 ## What is NOT in this round
 

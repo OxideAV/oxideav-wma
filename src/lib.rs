@@ -51,7 +51,7 @@
 //!   finiteness, and non-NaN at construction, and a [`PerBlockStep`]
 //!   that pairs it with a [`BlockSize`] and folds into a [`BandScale`]
 //!   via `fold_with_weights`;
-//!   Round 11 (this round) lifts the §6 patent-disclosed
+//!   Round 11 lifts the §6 patent-disclosed
 //!   **escape-symbol literal payload** — the typed carrier for the
 //!   literal trailer that follows the patent's escape symbol when an
 //!   `(R, L)` pair was excluded from the probability-thresholded
@@ -62,7 +62,17 @@
 //!   violations (`run == 0` / `level == 0`) and whose `for_pair`
 //!   cross-checks the [`CodebookGrid`] disposition so the carrier is
 //!   only inhabited by pairings whose escape branch is the right
-//!   emission.
+//!   emission;
+//!   Round 12 (this round) lifts the §3 patent-disclosed
+//!   **decoder-side overlap-add (overlapper/adder) stage** — the
+//!   reconstruction step that closes the inverse-MLT pipeline by
+//!   summing the previous block's right half with the current block's
+//!   left half (US7,383,180 decoder FIG.6 overlapper/adder; US6,029,126
+//!   / US6,240,380 oddly-stacked TDAC filter bank, 2M windowing over
+//!   M-length blocks) — into [`overlap_add`], with a stateful
+//!   [`OverlapAdd`] carrier parameterised by a [`BlockSize`] `M`,
+//!   a `2M`-sample input-length contract enforced per call, and a
+//!   `flush` method that drains the trailing-edge tail.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -146,6 +156,17 @@
 //!   4). The Claim-5/6 decoder side is realised as
 //!   [`EscapeLiteral::as_run_level_pair`], which rebuilds the
 //!   `(R, L)` pair the literal carries.
+//! * [`overlap_add`] — stateful decoder-side overlap-add
+//!   (overlapper/adder) stage for the inverse-MLT output blocks, per
+//!   the patent's reconstruction pipeline (US7,383,180 decoder FIG.6
+//!   overlapper/adder; US6,029,126 / US6,240,380 oddly-stacked TDAC
+//!   filter bank with 2M-length windowing over M-length blocks). The
+//!   typed [`OverlapAdd`] carrier is parameterised by a [`BlockSize`]
+//!   `M`, enforces the patent-fixed `2M`-sample input contract per
+//!   call, sums the previous block's right-half tail with the current
+//!   block's left half to emit `M` time-domain output samples, and
+//!   exposes [`OverlapAdd::flush`] to drain the trailing-edge tail.
+//!   Sourced from §3 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -163,6 +184,8 @@
 //! [`EscapeLiteral::new`]: escape::EscapeLiteral::new
 //! [`EscapeLiteral::for_pair`]: escape::EscapeLiteral::for_pair
 //! [`EscapeLiteral::as_run_level_pair`]: escape::EscapeLiteral::as_run_level_pair
+//! [`OverlapAdd`]: overlap_add::OverlapAdd
+//! [`OverlapAdd::flush`]: overlap_add::OverlapAdd::flush
 
 #![forbid(unsafe_code)]
 
@@ -173,6 +196,7 @@ pub mod entropy_mode;
 pub mod escape;
 pub mod header;
 pub mod invquant;
+pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
@@ -188,6 +212,7 @@ pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
+pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
