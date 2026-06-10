@@ -63,7 +63,7 @@
 //!   cross-checks the [`CodebookGrid`] disposition so the carrier is
 //!   only inhabited by pairings whose escape branch is the right
 //!   emission;
-//!   Round 12 (this round) lifts the §3 patent-disclosed
+//!   Round 12 lifts the §3 patent-disclosed
 //!   **decoder-side overlap-add (overlapper/adder) stage** — the
 //!   reconstruction step that closes the inverse-MLT pipeline by
 //!   summing the previous block's right half with the current block's
@@ -72,7 +72,19 @@
 //!   M-length blocks) — into [`overlap_add`], with a stateful
 //!   [`OverlapAdd`] carrier parameterised by a [`BlockSize`] `M`,
 //!   a `2M`-sample input-length contract enforced per call, and a
-//!   `flush` method that drains the trailing-edge tail.
+//!   `flush` method that drains the trailing-edge tail;
+//!   Round 13 (this round) lifts the §3 patent-disclosed
+//!   **analysis/synthesis window-pair primitive** — the `2M`-sample
+//!   windowing the patents define the MLT by ("a DCT modulated by the
+//!   sine window function(s)", US7,383,180 frequency transformer 530;
+//!   `ha(n)` / `hs(n)` window pair and the MLBT / NMLBT biorthogonal
+//!   generalization, US6,240,380 Eqns.1–2 / element 510) — into
+//!   [`window`], with a [`WindowShape`] enum naming all three
+//!   patent-disclosed shape alternatives (only the sine shape is
+//!   realizable; the MLBT / NMLBT parametric forms are `[GAP]`), a
+//!   [`Window`] carrier holding the `2M` sine coefficients with a
+//!   TDAC power-complementarity predicate, and a [`WindowPair`]
+//!   carrier for the patent's analysis/synthesis arrangement.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -167,6 +179,16 @@
 //!   block's left half to emit `M` time-domain output samples, and
 //!   exposes [`OverlapAdd::flush`] to drain the trailing-edge tail.
 //!   Sourced from §3 of the patent trace.
+//! * [`window`] — analysis/synthesis window-pair primitive for the
+//!   MLT stage: [`WindowShape`] names the three patent-disclosed
+//!   alternatives (sine per US7,383,180; MLBT / NMLBT per US6,240,380
+//!   — parametric forms `[GAP]`, named but not realizable);
+//!   [`Window`] carries the `2M` sine-window coefficients for a
+//!   [`BlockSize`] `M` with `apply_in_place` / `windowed` helpers and
+//!   a TDAC power-complementarity predicate; [`WindowPair`] models the
+//!   patent's `ha(n)` / `hs(n)` arrangement with a block-size-match
+//!   constructor and an `orthogonal_sine` convenience pair. Sourced
+//!   from §3 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -186,6 +208,9 @@
 //! [`EscapeLiteral::as_run_level_pair`]: escape::EscapeLiteral::as_run_level_pair
 //! [`OverlapAdd`]: overlap_add::OverlapAdd
 //! [`OverlapAdd::flush`]: overlap_add::OverlapAdd::flush
+//! [`WindowShape`]: window::WindowShape
+//! [`Window`]: window::Window
+//! [`WindowPair`]: window::WindowPair
 
 #![forbid(unsafe_code)]
 
@@ -204,6 +229,7 @@ pub mod step_size;
 pub mod stereo;
 pub mod terminator;
 pub mod transient;
+pub mod window;
 
 pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
@@ -217,6 +243,7 @@ pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
+pub use window::{Window, WindowPair, WindowShape};
 
 /// Crate-local error type. Concrete variants land as the rebuild
 /// rounds populate the codec pipeline.

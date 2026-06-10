@@ -407,7 +407,7 @@ confirms `for_pair` accepts every escape disposition and rejects
 every in-codebook disposition. The crate's test count rises from
 260 to 278.
 
-**Round 12** (this round) lifts the §3 patent-disclosed **decoder-side
+**Round 12** lifts the §3 patent-disclosed **decoder-side
 overlap-add (overlapper/adder) stage** into a new [`overlap_add`]
 module. The trace doc names the patent's reconstruction-side
 arrangement directly:
@@ -465,6 +465,78 @@ including the trailing-edge tail return and zeroing, an end-to-end
 two-blocks-plus-flush sequence that produces the patent's `3M` total
 output for `2` input blocks, error `Display` formatting, and `Clone`
 state-independence. The crate's test count rises from 278 to 301.
+
+**Round 13** (this round) lifts the §3 patent-disclosed
+**analysis/synthesis window-pair primitive** — the carrier Round 12's
+[`overlap_add`] explicitly left as the next `[GAP]` to stage — into a
+new [`window`] module. The trace doc's load-bearing citations:
+
+> The frequency transform is a **Modulated Lapped Transform (MLT)** —
+> "a time-varying Modulated Lapped Transform [MLT]" that "operates
+> like a DCT modulated by the **sine window function(s)**."
+> — [PATENT US7,383,180 — frequency transformer 530, FIG.5]
+>
+> "Malvar's patents define the analysis/synthesis windows `ha(n)`,
+> `hs(n)` and the biorthogonal generalization (**MLBT / NMLBT**) where
+> analysis and synthesis windows may differ to raise stopband
+> attenuation."
+> — [PATENT US6,240,380 — Eqns.1–2, window params; NMLBT element 510,
+>   FIG.5]
+
+The new module realises the typed carriers for that disclosure:
+
+* [`window::WindowShape`] names the three patent-disclosed shape
+  alternatives side-by-side: `Sine` (the window US7,383,180 says the
+  MLT is modulated by), `Mlbt`, and `Nmlbt` (the US6,240,380
+  biorthogonal generalizations). `WindowShape::ALL` locks the
+  iteration order; `is_realizable()` reports that only the sine shape
+  can be constructed — the MLBT / NMLBT parametric forms live in
+  US6,240,380 Eqns.1–2, which the trace cites but does not reproduce,
+  so they stay `[GAP]` and no coefficient values are fabricated;
+  `is_biorthogonal()` partitions the plain-MLT sine case from the
+  ha≠hs generalizations.
+* [`window::Window`] is the `2M`-coefficient carrier for a
+  [`BlockSize`] `M`, per the patent's "2M-length windowing over
+  M-length blocks" framing (US6,029,126 / US6,240,380).
+  `Window::sine(block_size)` is the one realizable constructor; the
+  sample values follow the general public DSP definition of the
+  MLT/MDCT sine window (`h(n) = sin((n + ½)·π / 2M)`) — the trace
+  doc's own `[DSP]` framing tier, used to realise the patent-named
+  shape, not as a WMA-specific fact. `apply_in_place` / `windowed`
+  enforce the `2M` input-length contract (mis-size surfaces as
+  `InvalidWindowLen { expected, got }` without mutating the block),
+  and `is_power_complementary(tol)` verifies the defining
+  50 %-overlap TDAC perfect-reconstruction condition
+  `h(n)² + h(n+M)² = 1` the patents define the MLT by.
+* [`window::WindowPair`] models the patent's `ha(n)` / `hs(n)`
+  arrangement. `WindowPair::new` rejects a pair whose halves disagree
+  on the block size
+  (`InvalidWindowPair::BlockSizeMismatch { analysis, synthesis }`);
+  `WindowPair::orthogonal_sine` builds the orthogonal-MLT pair
+  (`ha = hs =` sine); `is_orthogonal()` distinguishes it from a
+  future biorthogonal population. Which shape shipping v1/v2 uses
+  remains `[GAP]` per the trace.
+* Cross-module: a weighted-overlap-add test threads a constant signal
+  through analysis windowing → synthesis windowing →
+  [`overlap_add::OverlapAdd`] and confirms unity gain in every
+  steady-state frame — the power-complementarity property composing
+  with Round 12's adder exactly as the patent's decoder FIG.6 chains
+  them.
+
+Round 13 adds 23 unit tests covering the shape enum (order,
+realizability, biorthogonal partition), sine construction for every
+`BlockSize::ALL` entry (length `2M`, unit-interval bounds, closed-form
+first coefficient, rise/fall shape, symmetry), the TDAC
+power-complementarity predicate (acceptance for every block size plus
+detection of a corrupted coefficient), the windowing helpers
+(sample-wise multiply, fresh-Vec/in-place equivalence, all mis-size
+reject paths with the no-mutation guarantee), the pair carrier
+(orthogonal-sine construction, matching-size acceptance,
+mismatched-size rejection), the unity-gain cross-module composition
+with [`overlap_add`], the `2M` window-length ↔ overlap-add
+input-length contract match, error `Display` naming, and
+`std::error::Error` implementations. The crate's test count rises
+from 301 to 324.
 
 ## What is NOT in this round
 

@@ -8,6 +8,49 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `window` module — analysis/synthesis window-pair primitive for the
+  §3 patent-disclosed MLT windowing stage (US7,383,180 frequency
+  transformer 530: the MLT "operates like a DCT modulated by the sine
+  window function(s)"; US6,029,126 / US6,240,380: 2M-length windowing
+  over M-length blocks, oddly-stacked TDAC filter bank; US6,240,380
+  Eqns.1–2 / NMLBT element 510: the `ha(n)` / `hs(n)` analysis/
+  synthesis pair and the MLBT / NMLBT biorthogonal generalization).
+  Public `WindowShape` enum names the three patent-disclosed shape
+  alternatives (`Sine`, `Mlbt`, `Nmlbt`) with `WindowShape::ALL`,
+  `is_realizable()` (only `Sine` — the MLBT / NMLBT parametric forms
+  are cited but not reproduced by the trace, so they remain `[GAP]`
+  and no coefficient values are fabricated), and `is_biorthogonal()`.
+  `Window` carries the `2M` coefficients for a `BlockSize` `M`;
+  `Window::sine` realises the patent-named sine shape via the general
+  public DSP definition `h(n) = sin((n + ½)·π / 2M)` (the trace doc's
+  `[DSP]` framing tier); accessors `shape`, `block_size`, `len`,
+  `is_empty`, `coeffs`, `coeff(n)`; `apply_in_place` / `windowed`
+  enforce the patent-fixed `2M` input-length contract via
+  `InvalidWindowLen { expected, got }` (no mutation on error); and
+  `is_power_complementary(tol)` verifies the defining 50%-overlap
+  TDAC perfect-reconstruction condition `h(n)² + h(n+M)² = 1`.
+  `WindowPair` models the patent's `ha(n)` / `hs(n)` arrangement:
+  `new` rejects block-size disagreement via
+  `InvalidWindowPair::BlockSizeMismatch { analysis, synthesis }`,
+  `orthogonal_sine` builds the orthogonal-MLT pair, and
+  `is_orthogonal()` reports whether `ha = hs`. Which window shape
+  shipping WMA v1/v2 uses remains `[GAP]` per the trace. Re-exports:
+  `Window`, `WindowPair`, `WindowShape`. 23 unit tests cover the
+  shape enum (iteration order, realizability, biorthogonal
+  partition), sine construction for every `BlockSize::ALL` entry
+  (length `2M`, unit-interval bounds, closed-form first coefficient,
+  rise/fall monotonicity, symmetry), power-complementarity acceptance
+  for every block size plus corrupted-coefficient detection, the
+  windowing helpers (sample-wise multiply, in-place ↔ fresh-Vec
+  equivalence, every mis-size reject path with the no-mutation
+  guarantee), the pair carrier (orthogonal-sine, matching-size
+  acceptance, mismatch rejection), a cross-module weighted-overlap-add
+  unity-gain test composing the sine pair with `overlap_add::OverlapAdd`
+  (constant in → constant out across every steady-state frame), the
+  window-length ↔ overlap-add input-length contract match, error
+  `Display` naming, and `std::error::Error` implementations. Crate
+  test count: 301 → 324.
+
 - `overlap_add` module — stateful decoder-side overlap-add
   (overlapper/adder) carrier for the §3 patent-disclosed
   reconstruction stage (US7,383,180 decoder FIG.6 overlapper/adder;
