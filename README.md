@@ -466,7 +466,7 @@ two-blocks-plus-flush sequence that produces the patent's `3M` total
 output for `2` input blocks, error `Display` formatting, and `Clone`
 state-independence. The crate's test count rises from 278 to 301.
 
-**Round 13** (this round) lifts the §3 patent-disclosed
+**Round 13** lifts the §3 patent-disclosed
 **analysis/synthesis window-pair primitive** — the carrier Round 12's
 [`overlap_add`] explicitly left as the next `[GAP]` to stage — into a
 new [`window`] module. The trace doc's load-bearing citations:
@@ -537,6 +537,71 @@ with [`overlap_add`], the `2M` window-length ↔ overlap-add
 input-length contract match, error `Display` naming, and
 `std::error::Error` implementations. The crate's test count rises
 from 301 to 324.
+
+**Round 14** (this round) lifts the §3 patent-disclosed **MLT
+forward/inverse transform** itself — the primitive Rounds 12 and 13
+both explicitly deferred — into a new [`mlt`] module. The trace doc's
+load-bearing citations:
+
+> The frequency transform is a **Modulated Lapped Transform (MLT)** —
+> "a time-varying Modulated Lapped Transform [MLT]" that "operates
+> like a DCT modulated by the sine window function(s)."
+> — [PATENT US7,383,180 — frequency transformer 530, FIG.5;
+>   PATENT US7,930,171 — WMA7 applies an MLT to variable-size
+>   transform blocks]
+>
+> "The MLT is, in DSP terms, the same transform commonly called the
+> **MDCT** (oddly-stacked TDAC cosine-modulated filter bank with 50%
+> overlap and 2M-length windowing over M-length blocks)."
+> — [PATENT US6,029,126 / US6,240,380 — MLT defined as the
+>   oddly-stacked TDAC filter bank, basis = windowed DCT-IV, FIG.7]
+
+The new module realises the patent-named filter bank via the general
+public DSP form of the oddly-stacked TDAC basis — the trace doc's
+`[DSP]` framing tier, used exactly as Round 13 used it for the sine
+window (to realise the patent-named transform, not as a WMA-specific
+fact):
+
+* [`mlt::Mlt`] is the per-[`BlockSize`] transform carrier (stateless
+  apart from `M`; the lapped arrangement's inter-block state lives in
+  [`overlap_add`]). The basis is
+  `cos((π/M)·(n + ½ + M/2)·(k + ½))` — the `(n + ½ + M/2)` phase is
+  what makes the bank *oddly stacked* and produces the defining
+  time-domain-aliasing shape the 50 %-overlap-add cancels.
+* [`mlt::Mlt::forward`] consumes a `2M`-sample analysis-windowed time
+  frame and produces `M` spectral coefficients;
+  [`mlt::Mlt::inverse`] consumes `M` coefficients and produces the
+  `2M`-sample pre-synthesis-window frame [`overlap_add`] folds. Both
+  enforce their length contracts via
+  `mlt::InvalidMltLen { expected, got }`. The window is applied
+  upstream/downstream by [`window`], mirroring how US7,383,180 FIG.6
+  chains the decoder stages.
+* The inverse carries the `2/M` normalization that makes the complete
+  chain — analysis window → forward → inverse → synthesis window →
+  overlap-add — exactly unity-gain for a power-complementary pair.
+  Two defining algebraic identities are pinned by tests:
+  `inverse(forward(u))` returns `u` plus its time-domain alias
+  (`u[n] − u[M−1−n]` left half, `u[n] + u[3M−1−n]` right half — a
+  lapped transform is *not* invertible block-wise), and
+  `forward(inverse(X)) = 2·X` (the 50 %-redundancy projector scaling
+  on the alias-invariant subspace).
+* The realization is the direct `O(M·2M)` summation — a reference
+  realization of the patent-named bank; a fast factorization is a
+  later optimization round and must stay bit-compatible with it.
+
+Round 14 adds 24 unit tests covering the accessors for every
+`BlockSize::ALL` entry, the cross-module `2M` frame-length agreement
+with [`window`] and [`overlap_add`], every forward/inverse
+length-contract reject path (short, long, empty, and the
+opposite-direction-size mix-up), output lengths, zeros-to-zeros,
+forward and inverse linearity, the defining oddly-stacked alias
+structure (first-half antisymmetry, second-half symmetry, the exact
+`inverse∘forward` alias identity, and the `forward∘inverse = 2·X`
+projector identity), end-to-end perfect reconstruction through the
+full window → MLT → overlap-add chain at S256 and S512 (unity gain in
+every steady-state sample over a pseudo-random signal), error
+`Display` naming, the `std::error::Error` implementation, and
+`Copy`/`Eq` semantics. The crate's test count rises from 324 to 348.
 
 ## What is NOT in this round
 

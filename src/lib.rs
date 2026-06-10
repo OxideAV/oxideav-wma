@@ -84,7 +84,20 @@
 //!   realizable; the MLBT / NMLBT parametric forms are `[GAP]`), a
 //!   [`Window`] carrier holding the `2M` sine coefficients with a
 //!   TDAC power-complementarity predicate, and a [`WindowPair`]
-//!   carrier for the patent's analysis/synthesis arrangement.
+//!   carrier for the patent's analysis/synthesis arrangement;
+//!   Round 14 (this round) lifts the §3 patent-disclosed **MLT
+//!   forward/inverse transform** itself — the primitive Rounds 12 and
+//!   13 both explicitly deferred — into [`mlt`]: the oddly-stacked
+//!   TDAC cosine bank ("basis = windowed DCT-IV", US6,029,126 /
+//!   US6,240,380 FIG.7; US7,383,180 frequency transformer 530 /
+//!   decoder FIG.6; US7,930,171 WMA7 MLT over variable-size blocks)
+//!   realised via the general public DSP form of that filter bank
+//!   (the trace's `[DSP]` tier), with an [`Mlt`] carrier per
+//!   [`BlockSize`] whose `forward` maps a `2M`-sample
+//!   analysis-windowed frame to `M` coefficients and whose `inverse`
+//!   maps `M` coefficients back to the `2M`-sample
+//!   pre-synthesis-window frame, normalized so the full
+//!   window → transform → overlap-add chain is unity-gain.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -189,6 +202,19 @@
 //!   patent's `ha(n)` / `hs(n)` arrangement with a block-size-match
 //!   constructor and an `orthogonal_sine` convenience pair. Sourced
 //!   from §3 of the patent trace.
+//! * [`mlt`] — the MLT forward/inverse transform: the oddly-stacked
+//!   TDAC cosine filter bank the patents define the transform stage by
+//!   (US6,029,126 / US6,240,380 FIG.7 basis = windowed DCT-IV;
+//!   US7,383,180 frequency transformer 530 / decoder FIG.6;
+//!   US7,930,171). [`Mlt`] is parameterised by a [`BlockSize`] `M`;
+//!   [`Mlt::forward`] consumes a `2M`-sample analysis-windowed frame
+//!   and produces `M` spectral coefficients, [`Mlt::inverse`] produces
+//!   the `2M`-sample pre-synthesis-window frame, both enforcing their
+//!   length contracts via [`InvalidMltLen`]. The inverse `2/M`
+//!   normalization makes the [`window`] → [`mlt`] → [`overlap_add`]
+//!   chain unity-gain for a power-complementary window pair (covered
+//!   by a cross-module perfect-reconstruction test). Sourced from §3
+//!   of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -211,6 +237,10 @@
 //! [`WindowShape`]: window::WindowShape
 //! [`Window`]: window::Window
 //! [`WindowPair`]: window::WindowPair
+//! [`Mlt`]: mlt::Mlt
+//! [`Mlt::forward`]: mlt::Mlt::forward
+//! [`Mlt::inverse`]: mlt::Mlt::inverse
+//! [`InvalidMltLen`]: mlt::InvalidMltLen
 
 #![forbid(unsafe_code)]
 
@@ -221,6 +251,7 @@ pub mod entropy_mode;
 pub mod escape;
 pub mod header;
 pub mod invquant;
+pub mod mlt;
 pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
@@ -238,6 +269,7 @@ pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
+pub use mlt::{InvalidMltLen, Mlt};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};

@@ -8,6 +8,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `mlt` module — the §3 patent-disclosed MLT forward/inverse
+  transform, the primitive the `overlap_add` (Round 12) and `window`
+  (Round 13) modules both explicitly deferred (US6,029,126 /
+  US6,240,380: MLT = oddly-stacked TDAC cosine-modulated filter bank,
+  basis = windowed DCT-IV, FIG.7; US7,383,180 frequency transformer
+  530 / decoder FIG.6; US7,930,171: WMA7 applies an MLT to
+  variable-size transform blocks). The patent-named bank is realised
+  via its general public DSP form (the trace doc's `[DSP]` framing
+  tier, as Round 13 did for the sine window): basis
+  `cos((π/M)·(n + ½ + M/2)·(k + ½))`. Public `Mlt` carrier per
+  `BlockSize` `M`: `Mlt::forward` maps a `2M`-sample
+  analysis-windowed frame to `M` spectral coefficients; `Mlt::inverse`
+  maps `M` coefficients to the `2M`-sample pre-synthesis-window frame,
+  with the `2/M` normalization that makes the full
+  window → MLT → overlap-add chain unity-gain for a
+  power-complementary pair. Both directions enforce their length
+  contracts via `InvalidMltLen { expected, got }`. Accessors
+  `block_size`, `coeff_len` (= `M`), `time_len` (= `2M`).
+  Re-exports: `Mlt`, `InvalidMltLen`. 24 unit tests cover accessors
+  for every `BlockSize::ALL` entry, the cross-module frame-length
+  agreement with `window` / `overlap_add`, every length-contract
+  reject path in both directions, zeros-to-zeros, linearity, the
+  defining oddly-stacked alias structure (first-half antisymmetry,
+  second-half symmetry, the exact `inverse∘forward` alias identity,
+  `forward∘inverse = 2·X`), end-to-end perfect reconstruction through
+  the complete window → MLT → overlap-add chain at S256 / S512, error
+  `Display` naming, the `std::error::Error` implementation, and
+  `Copy`/`Eq` semantics. Crate test count: 324 → 348.
+
 - `window` module — analysis/synthesis window-pair primitive for the
   §3 patent-disclosed MLT windowing stage (US7,383,180 frequency
   transformer 530: the MLT "operates like a DCT modulated by the sine
