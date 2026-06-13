@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `excitation` module — the §4 patent-disclosed energy-derived
+  quantization matrix `Q[c][d] = E[d]` (US7,930,171 WMA7 formula,
+  Background: "coefficient values are squared to get energies, then
+  energies are summed within each band"; formula (3): "adjusts the
+  matrix by band size … divide by the coefficient count `Card{B[d]}`
+  raised to an experimentally-derived exponent"). Public
+  `coefficient_energy(c) = c*c` (step 1), `band_raw_energy(&[f64])`
+  (steps 1–2 over one band's coefficients), `band_excitation(&[f64],
+  exponent)` (full per-band formula incl. the `Card^exponent`
+  adjustment), and the layout-level `band_energies(coeffs, &layout)` /
+  `excitation_pattern(coeffs, &layout, exponent)` that partition a
+  block through a `qband::QuantBandLayout` and emit one weight per
+  band. The patent's "experimentally-derived" exponent is a
+  caller-supplied `[GAP]` value — never fabricated — with `0.0` (raw
+  summed energy) and `1.0` (mean per-coefficient energy) the two
+  closed-form endpoints. Per the patent `Q[c][d] = E[d]`, so the
+  output feeds `invquant::BandScale::from_weights` as the per-band
+  `Q[d]`. 24 unit tests cover the squaring convention and its
+  sign-independence, raw-energy summation over empty / mixed-sign /
+  all-zero slices, the exponent-0 (raw) and exponent-1 (mean)
+  endpoints, single-coefficient exponent-independence, the
+  half-exponent sqrt(Card) case, the empty-band zero-not-NaN
+  defensive boundary, the proportional-to-energy spreading property,
+  layout-level partition correctness and the per-band-primitive
+  equivalence, the zero-block all-zeros case, count-mismatch panic
+  contracts for both layout helpers, a full S256 block-coverage case,
+  and a cross-module thread through `invquant::BandScale` confirming
+  the excitation pattern is the quantization matrix the decoder folds.
+  Crate test count: 348 → 372.
+
 - `mlt` module — the §3 patent-disclosed MLT forward/inverse
   transform, the primitive the `overlap_add` (Round 12) and `window`
   (Round 13) modules both explicitly deferred (US6,029,126 /

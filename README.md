@@ -603,6 +603,55 @@ every steady-state sample over a pseudo-random signal), error
 `Display` naming, the `std::error::Error` implementation, and
 `Copy`/`Eq` semantics. The crate's test count rises from 324 to 348.
 
+**Round 15** (this round) lifts the §4 patent-disclosed
+**energy-derived quantization matrix** — the formula that derives the
+per-band weights `Q[c][d]` the rest of the §4 pipeline (differential
+coding in [`qmatrix`], inverse quantization in [`invquant`]) already
+operate on — into a new [`excitation`] module. The trace doc's
+load-bearing citation:
+
+> For WMA7 the matrix is computed per channel as `Q[c][d] = E[d]`,
+> where `E[d]` is an excitation pattern: coefficient values are squared
+> to get energies, then energies are summed within each band; the
+> matrix "spreads distortion between bands in proportion to the
+> energies of the bands."
+> — [PATENT US7,930,171 — WMA7 formula, Background]
+>
+> Because bands differ in size, WMA7 adjusts the matrix by band size
+> (divide by the coefficient count `Card{B[d]}` raised to an
+> experimentally-derived exponent).
+> — [PATENT US7,930,171 — formula (3)]
+
+The new module realises that formula step by step:
+
+* [`excitation::coefficient_energy`] squares one coefficient (step 1);
+  [`excitation::band_raw_energy`] sums the squared coefficients of one
+  band (steps 1–2 without the size adjustment).
+* [`excitation::band_excitation`] applies the full per-band formula —
+  raw energy divided by `Card{B[d]}` raised to the patent's
+  experimentally-derived exponent. That exponent is a `[GAP]` value in
+  the trace (it is an encoder analysis constant the patents do not
+  disclose), so it is a **caller-supplied parameter**, never
+  fabricated. Two endpoints have closed-form meaning the patent text
+  frames directly: `exponent == 0.0` (`Card^0 == 1`) leaves the raw
+  summed energy unchanged — the un-normalised baseline the patent then
+  "adjusts by band size"; `exponent == 1.0` divides by `Card{B[d]}`
+  exactly, giving the band's mean per-coefficient energy.
+* [`excitation::band_energies`] and [`excitation::excitation_pattern`]
+  walk a [`qband::QuantBandLayout`] (which supplies the band boundaries
+  and the per-band `Card{B[d]}`) and emit the per-band raw-energy /
+  excitation vector for a whole block. Per the patent `Q[c][d] = E[d]`,
+  so the excitation vector **is** the quantization matrix; a
+  cross-module test threads it into [`invquant::BandScale::from_weights`]
+  as the per-band `Q[d]` the decoder folds with the overall step.
+
+The encoder's Bark-scale masking model (which shapes the final
+weighting on top of the excitation pattern) and the exponent constant
+both stay out of scope — the patent marks their values as encoder
+analysis, and this module computes only the energy-derived pattern the
+masking model starts from. Round 15 adds 24 unit tests; the crate's
+test count rises from 348 to 372.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

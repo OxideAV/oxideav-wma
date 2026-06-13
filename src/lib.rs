@@ -98,6 +98,15 @@
 //!   maps `M` coefficients back to the `2M`-sample
 //!   pre-synthesis-window frame, normalized so the full
 //!   window → transform → overlap-add chain is unity-gain.
+//!   Round 15 (this round) lifts the §4 patent-disclosed
+//!   **energy-derived quantization matrix** — `Q[c][d] = E[d]` where
+//!   the excitation pattern `E[d]` squares the band's MLT
+//!   coefficients, sums the energies within the band, and divides by
+//!   `Card{B[d]}` raised to the patent's experimentally-derived
+//!   exponent (US7,930,171 WMA7 formula / formula (3)) — into
+//!   [`excitation`], computing the per-band weight vector a
+//!   [`qband::QuantBandLayout`] partitions a block into, with the
+//!   `[GAP]` exponent supplied by the caller (never fabricated).
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -215,6 +224,18 @@
 //!   chain unity-gain for a power-complementary window pair (covered
 //!   by a cross-module perfect-reconstruction test). Sourced from §3
 //!   of the patent trace.
+//! * [`excitation`] — the §4 patent-disclosed energy-derived
+//!   quantization matrix: `Q[c][d] = E[d]` where the excitation
+//!   pattern `E[d]` squares the band's MLT coefficients, sums the
+//!   energies within the band, and divides by `Card{B[d]}` raised to
+//!   the patent's experimentally-derived exponent (US7,930,171 WMA7
+//!   formula / formula (3)). [`excitation::excitation_pattern`]
+//!   computes the whole-block per-band weight vector over a
+//!   [`qband::QuantBandLayout`]; the exponent is a caller-supplied
+//!   `[GAP]` value (never fabricated), with `0.0` (raw summed energy)
+//!   and `1.0` (mean per-coefficient energy) the two closed-form
+//!   endpoints. The output feeds [`invquant::BandScale`] as the
+//!   per-band `Q[d]` weights. Sourced from §4 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -249,6 +270,7 @@ pub mod block;
 pub mod codebook;
 pub mod entropy_mode;
 pub mod escape;
+pub mod excitation;
 pub mod header;
 pub mod invquant;
 pub mod mlt;
