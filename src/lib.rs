@@ -98,7 +98,7 @@
 //!   maps `M` coefficients back to the `2M`-sample
 //!   pre-synthesis-window frame, normalized so the full
 //!   window → transform → overlap-add chain is unity-gain.
-//!   Round 15 (this round) lifts the §4 patent-disclosed
+//!   Round 15 lifts the §4 patent-disclosed
 //!   **energy-derived quantization matrix** — `Q[c][d] = E[d]` where
 //!   the excitation pattern `E[d]` squares the band's MLT
 //!   coefficients, sums the energies within the band, and divides by
@@ -107,6 +107,16 @@
 //!   [`excitation`], computing the per-band weight vector a
 //!   [`qband::QuantBandLayout`] partitions a block into, with the
 //!   `[GAP]` exponent supplied by the caller (never fabricated).
+//!   Round 16 (this round) assembles the §3 patent-disclosed
+//!   **decoder-side time-domain reconstruction stage** — the FIG.6
+//!   chain *inverse transform → synthesis window → overlapper/adder*
+//!   (US7,383,180 decoder FIG.6) — into [`synthesis`], wiring the three
+//!   primitives Rounds 12–14 already landed ([`mlt`], [`window`],
+//!   [`overlap_add`]) into one stateful [`Synthesis`] stage that maps
+//!   `M` dequantized coefficients to `M` reconstructed time samples per
+//!   block, carrying the overlap-add tail across calls; it adds no
+//!   arithmetic of its own (a test pins block-for-block equality with
+//!   the hand-wired chain).
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -236,6 +246,19 @@
 //!   and `1.0` (mean per-coefficient energy) the two closed-form
 //!   endpoints. The output feeds [`invquant::BandScale`] as the
 //!   per-band `Q[d]` weights. Sourced from §4 of the patent trace.
+//! * [`synthesis`] — the §3 patent-disclosed decoder-side time-domain
+//!   reconstruction stage: the FIG.6 chain *inverse transform →
+//!   synthesis window → overlapper/adder* (US7,383,180 decoder FIG.6)
+//!   assembled into one stateful [`Synthesis`] carrier over a
+//!   [`BlockSize`] `M`. [`Synthesis::block`] consumes `M` dequantized
+//!   coefficients, applies [`Mlt::inverse`] (`M` → `2M`), the pair's
+//!   synthesis window `hs(n)` ([`Window::windowed`]), and
+//!   [`OverlapAdd::step`] (`2M` → `M`) in the patent-fixed order, and
+//!   carries the overlap-add tail across calls; [`Synthesis::flush`]
+//!   drains the trailing edge and [`Synthesis::reset`] clears the carry
+//!   at a discontinuity. The stage adds no arithmetic beyond sequencing
+//!   the three existing primitives. Sourced from §3 of the patent
+//!   trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -255,6 +278,12 @@
 //! [`EscapeLiteral::as_run_level_pair`]: escape::EscapeLiteral::as_run_level_pair
 //! [`OverlapAdd`]: overlap_add::OverlapAdd
 //! [`OverlapAdd::flush`]: overlap_add::OverlapAdd::flush
+//! [`OverlapAdd::step`]: overlap_add::OverlapAdd::step
+//! [`Window::windowed`]: window::Window::windowed
+//! [`Synthesis`]: synthesis::Synthesis
+//! [`Synthesis::block`]: synthesis::Synthesis::block
+//! [`Synthesis::flush`]: synthesis::Synthesis::flush
+//! [`Synthesis::reset`]: synthesis::Synthesis::reset
 //! [`WindowShape`]: window::WindowShape
 //! [`Window`]: window::Window
 //! [`WindowPair`]: window::WindowPair
@@ -280,6 +309,7 @@ pub mod qmatrix;
 pub mod runlevel;
 pub mod step_size;
 pub mod stereo;
+pub mod synthesis;
 pub mod terminator;
 pub mod transient;
 pub mod window;
@@ -295,6 +325,7 @@ pub use mlt::{InvalidMltLen, Mlt};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};
+pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 pub use window::{Window, WindowPair, WindowShape};

@@ -603,7 +603,7 @@ every steady-state sample over a pseudo-random signal), error
 `Display` naming, the `std::error::Error` implementation, and
 `Copy`/`Eq` semantics. The crate's test count rises from 324 to 348.
 
-**Round 15** (this round) lifts the §4 patent-disclosed
+**Round 15** lifts the §4 patent-disclosed
 **energy-derived quantization matrix** — the formula that derives the
 per-band weights `Q[c][d]` the rest of the §4 pipeline (differential
 coding in [`qmatrix`], inverse quantization in [`invquant`]) already
@@ -651,6 +651,55 @@ both stay out of scope — the patent marks their values as encoder
 analysis, and this module computes only the energy-derived pattern the
 masking model starts from. Round 15 adds 24 unit tests; the crate's
 test count rises from 348 to 372.
+
+**Round 16** (this round) assembles the §3 patent-disclosed
+**decoder-side time-domain reconstruction stage** — the FIG.6
+reconstruction chain the patents draw for the synthesis side — into a
+new [`synthesis`] module. The trace doc's load-bearing citation:
+
+> Reconstruction at the decoder is an inverse transform followed by an
+> **overlap-add (overlapper/adder)** stage.
+> — [PATENT US7,383,180 — decoder FIG.6]
+
+and the same chain in §8's decoder pipeline diagram (inverse MLT →
+overlap-add). §3's MLT discussion names the full inner ordering the
+patent draws: *inverse transform → synthesis window `hs(n)` →
+overlapper/adder*, with the synthesis window applied between the
+inverse MLT (which returns the `2M`-sample *pre-synthesis-window*
+frame) and the overlap-add (which consumes the *post-windowed* `2M`
+frame).
+
+This round is an **assembler**, not new math. The three primitives it
+chains all already exist from earlier rounds — the inverse MLT
+([`mlt`], Round 14), the analysis/synthesis window pair ([`window`],
+Round 13), and the overlap-add carrier ([`overlap_add`], Round 12) —
+so the module adds no arithmetic of its own; it sequences them in the
+patent-fixed order:
+
+* [`synthesis::Synthesis::new`] pairs a [`BlockSize`] `M` with a
+  [`WindowPair`], validating that the pair, the MLT, and the
+  overlap-add carrier all agree on `M` (a mismatch returns
+  [`synthesis::MismatchedBlockSize`]).
+* [`synthesis::Synthesis::block`] consumes `M` dequantized
+  coefficients and emits `M` reconstructed time-domain samples by
+  applying inverse MLT (`M` → `2M`), the synthesis window `hs(n)`
+  (`2M` → `2M`), and overlap-add (`2M` → `M`) in that order; it is
+  stateful, carrying the overlap-add tail across calls exactly as the
+  patent's overlapper/adder buffers the previous block's right half.
+* [`synthesis::Synthesis::flush`] drains the trailing-edge tail after
+  the last block and [`synthesis::Synthesis::reset`] clears the carry
+  at a discontinuity (seek / decoder flush), both delegating to the
+  underlying [`overlap_add`] carrier.
+
+A test pins block-for-block equality between the stage and the
+hand-wired chain (proving the stage adds no arithmetic), and a
+steady-state perfect-reconstruction test confirms a constant signal
+pushed through the analysis chain and back through this synthesis stage
+reproduces in the overlap-add interior. The dequantization upstream
+([`invquant`]), the noise-substituted / truncated band fills (§7, the
+noise generator's construction stays `[GAP]`), and block-size-transition
+frames (`[GAP]` at the patent level) all stay out of scope. Round 16
+adds 12 unit tests; the crate's test count rises from 372 to 384.
 
 ## What is NOT in this round
 
