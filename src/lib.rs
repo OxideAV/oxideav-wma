@@ -117,6 +117,17 @@
 //!   block, carrying the overlap-add tail across calls; it adds no
 //!   arithmetic of its own (a test pins block-for-block equality with
 //!   the hand-wired chain).
+//!   Round 17 (this round) lifts the §5 patent-disclosed **open-loop
+//!   stereo (channel-coding) decision** — the encoder-side choice
+//!   between coding the two channels independently and jointly as
+//!   sum/difference, made "based on inter-channel energy separation and
+//!   the disparity of excitation patterns" (US7,502,743) — into
+//!   [`channel_decision`], computing both patent-named analysis
+//!   quantities exactly from the input while leaving the combining-rule
+//!   thresholds (the encoder's `[GAP]` tuning) and the v1/v2 mode flag
+//!   (`[GAP]` bitstream layout) caller-supplied / out of scope, exactly
+//!   as Round 15's [`excitation`] handled the `[GAP]` band-size
+//!   exponent.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -135,6 +146,18 @@
 //! * [`stereo`] — sum/difference (mid/side) two-channel transform
 //!   for WMA Standard, sourced from §5 of the patent trace
 //!   (US7,930,171 / US7,502,743).
+//! * [`channel_decision`] — the §5 open-loop stereo decision that
+//!   selects [`ChannelMode::Independent`] vs.
+//!   [`ChannelMode::SumDifference`] from the two patent-named analysis
+//!   quantities: [`channel_decision::inter_channel_energy_separation`]
+//!   (the fraction of stereo energy the sum/difference transform places
+//!   in the side channel) and
+//!   [`channel_decision::excitation_pattern_disparity`] (the normalised
+//!   `L1` distance between the channels' §4 excitation shapes). The
+//!   [`OpenLoopDecision`] carrier holds the two `[GAP]` tuning
+//!   thresholds (caller-supplied, never fabricated) and combines them
+//!   per the patent's stated rationale (joint coding iff both criteria
+//!   favour it). Sourced from §5 of the patent trace (US7,502,743).
 //! * [`runlevel`] — typed `(R, L)` pairing primitive and
 //!   sequence-walker for the spectral entropy stage, sourced from §6
 //!   of the patent trace (US6,223,162 / US7,885,819).
@@ -296,6 +319,7 @@
 
 pub mod bands;
 pub mod block;
+pub mod channel_decision;
 pub mod codebook;
 pub mod entropy_mode;
 pub mod escape;
@@ -316,6 +340,7 @@ pub mod window;
 
 pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
+pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};

@@ -701,6 +701,51 @@ noise generator's construction stays `[GAP]`), and block-size-transition
 frames (`[GAP]` at the patent level) all stay out of scope. Round 16
 adds 12 unit tests; the crate's test count rises from 372 to 384.
 
+**Round 17** (this round) lifts the §5 patent-disclosed **open-loop
+stereo (channel-coding) decision** — the encoder-side choice, made
+*before* the rate/distortion loop, between coding the two channels
+independently and jointly as sum/difference — into a new
+[`channel_decision`] module. The trace doc's load-bearing citation:
+
+> The decision to code channels independently vs. jointly is an
+> **open-loop decision** based on inter-channel energy separation and
+> the disparity of excitation patterns.
+> — [PATENT US7,502,743]
+
+The module computes the two patent-named analysis quantities exactly
+and leaves the encoder's tuning constants as caller-supplied `[GAP]`
+parameters (the same posture Round 15's [`excitation`] used for the
+band-size exponent):
+
+* [`channel_decision::ChannelMode`] is the typed two-alternative
+  selector (`Independent` / `SumDifference`) with `ALL`, an involutive
+  `opposite`, and an `is_joint` predicate.
+* [`channel_decision::inter_channel_energy_separation`] computes the
+  fraction of stereo energy the sum/difference transform places in the
+  side channel, `E_side / (E_mid + E_side)`, using the
+  [`stereo`]-module mid/side energies. It is `0.0` for perfectly
+  correlated channels (`L == R`), `1.0` for perfectly anti-correlated
+  channels (`L == -R`), `0.5` for an independent equal-power pair, and
+  amplitude-scale-invariant. Undefined inputs surface as
+  `InvalidStereoAnalysis::LengthMismatch` / `NoEnergy`.
+* [`channel_decision::excitation_pattern_disparity`] measures the
+  normalised `L1` distance between the two channels' §4 excitation
+  *shapes* (each `L1`-normalised first, so loudness drops out), in
+  `[0.0, 1.0]`: `0.0` for identical shapes (including same-shape /
+  different-loudness), `1.0` for disjoint per-band energy. It reuses
+  [`excitation::excitation_pattern`] over a shared
+  [`qband::QuantBandLayout`].
+* [`channel_decision::OpenLoopDecision`] holds the two `[GAP]`
+  thresholds and combines the quantities per the patent's stated
+  rationale — joint coding iff **both** criteria favour it. `decide`
+  takes pre-computed quantities; `decide_blocks` runs both analyses
+  end-to-end over raw coefficient blocks.
+
+No bitstream flag is emitted or parsed (the v1/v2 mode-flag layout is
+`[GAP]`); the module models only the open-loop analysis the patent
+names. Round 17 adds 27 unit tests; the crate's test count rises from
+384 to 411.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

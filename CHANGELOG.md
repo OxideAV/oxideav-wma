@@ -8,6 +8,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `channel_decision` module — the §5 patent-disclosed open-loop stereo
+  (channel-coding) decision (US7,502,743: "the decision to code
+  channels independently vs. jointly is an open-loop decision based on
+  inter-channel energy separation and the disparity of excitation
+  patterns"). `ChannelMode { Independent, SumDifference }` is the typed
+  selector. `inter_channel_energy_separation(left, right)` computes the
+  side-channel energy fraction `E_side / (E_mid + E_side)` from the
+  `stereo` mid/side energies (`0.0` for `L == R`, `1.0` for `L == -R`,
+  `0.5` for an independent equal-power pair, amplitude-scale-invariant).
+  `excitation_pattern_disparity(left, right, &layout, exponent)`
+  measures the normalised `L1` distance between the channels' §4
+  excitation *shapes* in `[0.0, 1.0]` (`0.0` for identical shape
+  including same-shape/different-loudness; `1.0` for disjoint band
+  energy). `OpenLoopDecision { max_energy_separation,
+  max_excitation_disparity }` holds the two `[GAP]` tuning thresholds
+  (caller-supplied, never fabricated) and combines them per the
+  patent's rationale — joint coding iff both criteria are favourable;
+  `decide` takes pre-computed quantities, `decide_blocks` runs both
+  analyses end-to-end over raw coefficient blocks. No bitstream flag is
+  emitted/parsed (the v1/v2 mode-flag layout is `[GAP]`). 27 unit
+  tests; the crate's test count rises from 384 to 411.
+
 - `excitation` module — the §4 patent-disclosed energy-derived
   quantization matrix `Q[c][d] = E[d]` (US7,930,171 WMA7 formula,
   Background: "coefficient values are squared to get energies, then
