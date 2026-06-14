@@ -128,6 +128,20 @@
 //!   (`[GAP]` bitstream layout) caller-supplied / out of scope, exactly
 //!   as Round 15's [`excitation`] handled the `[GAP]` band-size
 //!   exponent.
+//!   Round 18 (this round) assembles the §4 patent-disclosed
+//!   **decoder-side inverse-quantize + inverse-weighting stage** — the
+//!   §8 FIG.6 decoder step `coeff_hat[k] = q[k] * Q[d(k)] * step`
+//!   (US7,930,171 overall step-size description; US7,383,180 inverse
+//!   quantizer/weighter FIG.6; US6,240,380 re-weighting at decoder) —
+//!   into [`dequant`], wiring the three §4 primitives already landed
+//!   ([`qband::QuantBandLayout`] band map, the per-band weights `Q[d]`,
+//!   and [`step_size::OverallStepSize`]) into one [`DequantStage`] that
+//!   folds `Q[d] * step` once per band into a [`BandScale`], materialises
+//!   the band map once, and maps `M` entropy-decoded integer
+//!   coefficients to `M` dequantized real coefficients per block. Like
+//!   Round 16's [`synthesis`] it adds no arithmetic of its own; its
+//!   output is exactly the input [`synthesis::Synthesis::block`]
+//!   consumes, so the two assemblers chain into the FIG.6 decoder tail.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -282,6 +296,21 @@
 //!   at a discontinuity. The stage adds no arithmetic beyond sequencing
 //!   the three existing primitives. Sourced from §3 of the patent
 //!   trace.
+//! * [`dequant`] — the §4 patent-disclosed decoder-side
+//!   inverse-quantize + inverse-weighting stage: the FIG.6 step
+//!   `coeff_hat[k] = q[k] * Q[d(k)] * step` (US7,930,171 overall
+//!   step-size description; US7,383,180 inverse quantizer/weighter FIG.6;
+//!   US6,240,380 re-weighting at decoder) assembled into one
+//!   [`DequantStage`] over a [`BlockSize`] `M`.
+//!   [`DequantStage::new`] folds the per-band weights `Q[d]` and the
+//!   [`step_size::OverallStepSize`] into a [`invquant::BandScale`]
+//!   (`scale[d] = Q[d] * step`) and materialises the
+//!   [`qband::QuantBandLayout`] band map once; [`DequantStage::block`]
+//!   maps `M` entropy-decoded integer coefficients to `M` dequantized
+//!   real coefficients, the exact input
+//!   [`synthesis::Synthesis::block`] consumes. The stage adds no
+//!   arithmetic beyond sequencing the existing §4 primitives. Sourced
+//!   from §4 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -314,6 +343,9 @@
 //! [`Mlt::forward`]: mlt::Mlt::forward
 //! [`Mlt::inverse`]: mlt::Mlt::inverse
 //! [`InvalidMltLen`]: mlt::InvalidMltLen
+//! [`DequantStage`]: dequant::DequantStage
+//! [`DequantStage::new`]: dequant::DequantStage::new
+//! [`DequantStage::block`]: dequant::DequantStage::block
 
 #![forbid(unsafe_code)]
 
@@ -321,6 +353,7 @@ pub mod bands;
 pub mod block;
 pub mod channel_decision;
 pub mod codebook;
+pub mod dequant;
 pub mod entropy_mode;
 pub mod escape;
 pub mod excitation;
@@ -342,6 +375,7 @@ pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
 pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
+pub use dequant::{DequantStage, InvalidDequant};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use header::{Version, WmaHeader};

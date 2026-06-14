@@ -746,6 +746,52 @@ No bitstream flag is emitted or parsed (the v1/v2 mode-flag layout is
 names. Round 17 adds 27 unit tests; the crate's test count rises from
 384 to 411.
 
+**Round 18** (this round) assembles the §4 patent-disclosed
+**decoder-side inverse-quantize + inverse-weighting stage** — the §8
+FIG.6 decoder step that turns entropy-decoded integer spectral
+coefficients back into weighted real-valued coefficients — into a new
+[`dequant`] module. The trace doc's load-bearing citations:
+
+> Each coefficient is quantized by the **product of its band's matrix
+> weight `Q[c][d]` and a single overall step size** for the whole block.
+> — [PATENT US7,930,171 — overall step-size description]
+>
+> The decoder applies inverse quantization and inverse weighting so that
+> reconstructed coefficients carry quantization noise shaped by the
+> weighting function.
+> — [PATENT US7,383,180 — inverse quantizer/weighter, FIG.6]
+> — [PATENT US6,240,380 — re-weighting at decoder]
+
+Like Round 16's [`synthesis`], this round is an **assembler**, not new
+math. It wires three §4 primitives already landed — the
+[`qband::QuantBandLayout`] band map (Round 8), the per-band weights
+`Q[d]` ([`qmatrix`] carriage / [`excitation`] derivation), and the
+[`step_size::OverallStepSize`] (Round 10) — into one stateless
+[`DequantStage`] over a [`BlockSize`] `M`:
+
+* [`DequantStage::new`] validates that the layout's total coefficient
+  count matches the block size and that every band's weight index
+  addresses a weight slot, then folds `Q[d] * step` once per band into a
+  [`invquant::BandScale`] (`scale[d] = Q[d] * step`, Round 5) and
+  materialises the per-coefficient band map `d(k)` once. Rejections are
+  reported via a typed [`dequant::InvalidDequant`] enum
+  (`BlockSizeMismatch`, `WeightIndexOutOfRange`, `CoeffLenMismatch`).
+* [`DequantStage::block`] maps `M` entropy-decoded integer coefficients
+  to `M` dequantized real coefficients `coeff_hat[k] = q[k] * Q[d(k)] *
+  step` via [`invquant::BandScale::apply`] — one multiplication per
+  coefficient with the band lookup precomputed. The output is exactly the
+  input [`synthesis::Synthesis::block`] consumes, so the two assemblers
+  chain into the FIG.6 decoder tail *inverse quantize/weight → inverse
+  MLT → window → overlap-add* (pinned by a cross-module test).
+
+The entropy decode that produces the integer coefficients (§6), the
+Bark-scale masking model that shaped the weights (§4 encoder analysis),
+the step-size rate-control selection, sign reconstruction (`[GAP]` §6),
+and the noise-substituted / truncated band fills (`[GAP]` §7) all stay
+out of scope — this module adds no arithmetic of its own beyond
+sequencing the existing §4 primitives. Round 18 adds 16 unit tests; the
+crate's test count rises from 411 to 427.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain
