@@ -56,7 +56,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 454 unit tests.
+guessing. The crate carries 468 unit tests.
 
 ### What is NOT implemented
 
