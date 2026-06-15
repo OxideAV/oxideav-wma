@@ -45,8 +45,11 @@ each pinned to the patent it is disclosed in:
   [`terminator`] end-of-block selection.
 * Channel / band policy: [`stereo`] sum/difference transform,
   [`channel_decision`] the open-loop independent-vs-joint analysis,
-  [`bands`] per-band coding policy, [`noisefill`] noise substitution,
-  and [`transient`] the per-block transient-handling switch.
+  [`stereo_synthesis`] the §8 decoder-tail assembler that wires two
+  per-channel [`synthesis`] stages with the conditional inverse
+  sum/difference post-process into the final L/R PCM, [`bands`] per-band
+  coding policy, [`noisefill`] noise substitution, and [`transient`]
+  the per-block transient-handling switch.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision

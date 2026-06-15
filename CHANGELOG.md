@@ -8,6 +8,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `stereo_synthesis` module — the §8 patent-disclosed decoder-side
+  **stereo** time-domain reconstruction tail, the last stage of the
+  FIG.6 decoder pipeline (Thumpudi-180 decoder FIG.6: `... → overlap-add
+  → [inverse sum-difference / multi-channel post-process] → PCM`;
+  US7,502,743 sum/difference). `StereoSynthesis::new(block_size,
+  window_pair)` builds two independent per-channel `synthesis::Synthesis`
+  stages (both channels of a stereo block share one window/block-size
+  decision per the §2 tile note); `StereoSynthesis::block(ch0, ch1,
+  mode)` reconstructs each channel through its own `Synthesis` (inverse
+  MLT → synthesis window → overlap-add) and then applies the §5 inverse
+  sum/difference fold (`stereo::inverse_in_place`) **only** when the
+  per-block `channel_decision::ChannelMode` is `SumDifference`, returning
+  the final left/right PCM as a `StereoBlock { left, right }`; for
+  `Independent` the post-process is bypassed exactly as FIG.6 bypasses
+  the box. The fold runs *after* the per-channel overlap-add — the FIG.6
+  position — so each channel's overlap-add carry advances every call
+  regardless of mode and always sees the per-channel (mid/side or
+  left/right) signal, never the folded output. `flush(mode)` drains both
+  trailing-edge tails (folding them when the trailing block was joint)
+  and `reset()` clears both carries at a discontinuity; `tails()`
+  exposes the two per-channel carries for inspection. The stage adds no
+  arithmetic of its own — it is the stereo analogue of the
+  single-channel `synthesis::Synthesis` assembler, sequencing existing
+  primitives in the patent-fixed order. The v1/v2 channel-mode flag
+  layout is `[GAP]` per §5, so `mode` is a caller-supplied input, never
+  fabricated. Length errors from either channel surface via the existing
+  `synthesis::InvalidCoeffLen`; a mismatched window pair via
+  `synthesis::MismatchedBlockSize`. Sourced from §8 (and §5) of the
+  patent trace.
 - `noisefill` module — the §7 patent-disclosed decoder-side
   noise-substitution fill, the noise generator the `bands` module
   (Round 6) explicitly deferred (US7,383,180 / US7,343,291: "it

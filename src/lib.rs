@@ -311,6 +311,24 @@
 //!   [`synthesis::Synthesis::block`] consumes. The stage adds no
 //!   arithmetic beyond sequencing the existing §4 primitives. Sourced
 //!   from §4 of the patent trace.
+//! * [`stereo_synthesis`] — the §8 patent-disclosed decoder-side
+//!   **stereo** time-domain reconstruction tail: the FIG.6 chain
+//!   *(per channel) inverse MLT → overlap-add → `[inverse
+//!   sum-difference]` → PCM* (Thumpudi-180 decoder FIG.6;
+//!   US7,502,743 sum/difference post-process) assembled into one
+//!   stateful [`StereoSynthesis`] over a [`BlockSize`] `M`.
+//!   [`StereoSynthesis::block`] runs each of the two channels through
+//!   its own [`Synthesis`] stage (each with its own overlap-add carry),
+//!   then applies the §5 inverse sum/difference fold
+//!   ([`stereo::inverse_in_place`]) **only** when the caller-supplied
+//!   per-block [`ChannelMode`] is [`ChannelMode::SumDifference`],
+//!   bypassing the post-process for [`ChannelMode::Independent`]. The
+//!   fold runs after the per-channel overlap-add, exactly where FIG.6
+//!   draws it, producing the final L/R PCM as a [`StereoBlock`]. The
+//!   channel-mode flag layout is `[GAP]` per §5, so the mode is an
+//!   input, never fabricated; the stage adds no arithmetic beyond
+//!   sequencing [`Synthesis`] and [`stereo`]. Sourced from §8 (and §5)
+//!   of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -336,6 +354,14 @@
 //! [`Synthesis::block`]: synthesis::Synthesis::block
 //! [`Synthesis::flush`]: synthesis::Synthesis::flush
 //! [`Synthesis::reset`]: synthesis::Synthesis::reset
+//! [`StereoSynthesis`]: stereo_synthesis::StereoSynthesis
+//! [`StereoSynthesis::block`]: stereo_synthesis::StereoSynthesis::block
+//! [`StereoBlock`]: stereo_synthesis::StereoBlock
+//! [`ChannelMode`]: channel_decision::ChannelMode
+//! [`ChannelMode::Independent`]: channel_decision::ChannelMode::Independent
+//! [`ChannelMode::SumDifference`]: channel_decision::ChannelMode::SumDifference
+//! [`stereo`]: crate::stereo
+//! [`stereo::inverse_in_place`]: crate::stereo::inverse_in_place
 //! [`WindowShape`]: window::WindowShape
 //! [`Window`]: window::Window
 //! [`WindowPair`]: window::WindowPair
@@ -370,6 +396,7 @@ pub mod qmatrix;
 pub mod runlevel;
 pub mod step_size;
 pub mod stereo;
+pub mod stereo_synthesis;
 pub mod synthesis;
 pub mod terminator;
 pub mod transient;
@@ -389,6 +416,7 @@ pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};
+pub use stereo_synthesis::{StereoBlock, StereoSynthesis};
 pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
