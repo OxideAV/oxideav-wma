@@ -792,6 +792,55 @@ out of scope — this module adds no arithmetic of its own beyond
 sequencing the existing §4 primitives. Round 18 adds 16 unit tests; the
 crate's test count rises from 411 to 427.
 
+**Round 19** (this round) lifts the §7 patent-disclosed **decoder-side
+noise-substitution fill** — the noise generator the [`bands`] module
+(Round 6) explicitly deferred ("a future trace pinning the construction
+would extend this module with a fill helper") — into a new
+[`noisefill`] module. The trace doc's load-bearing citation:
+
+> **Noise substitution.** … it signals that a band should be filled with
+> a generated noise pattern **of the appropriate energy**. The decoder's
+> **noise generator** produces the patterns for the indicated bands.
+> — [PATENT US7,383,180 / US7,343,291 — noise substitution; decoder
+> noise generator 240]
+
+The module implements exactly the one quantitative property the patent
+fixes — the **energy contract** — and leaves the generator's
+construction (white vs. coloured spectrum, the PRNG, any seed) as a
+caller-supplied `[GAP]` input, the same posture Round 15's
+[`excitation`] used for the band-size exponent:
+
+* [`noisefill::pattern_energy`] reuses [`excitation::band_raw_energy`]
+  so the patent's squared-sum energy convention stays pinned in one
+  place; [`noisefill::noise_scale`] derives the gain
+  `sqrt(target / pattern)` that rescales a unit noise pattern to the
+  transmitted band energy (band energy is a sum of squares, so it
+  scales as the *square* of a uniform gain). Degenerate inputs
+  (non-positive target or all-zero pattern) yield a silent `0.0` gain
+  rather than a `NaN` / `±∞`.
+* [`noisefill::fill_band`] / `fill_band_in_place` apply that gain to a
+  caller-supplied pattern, producing a band whose energy equals the
+  transmitted value while preserving the pattern's shape (ratios).
+* [`noisefill::NoiseFiller`] pairs a [`bands::BandPlan`] with the
+  matching [`qband::QuantBandLayout`] and walks a coefficient block in
+  band order: [`bands::BandPolicy::Coded`] bands are left untouched
+  (their literal dequantized coefficients stand), `NoiseSubstituted`
+  bands are filled from the per-band pattern rescaled to the band
+  energy, and `Truncated` bands are zeroed (the patent's high-band
+  elimination). It validates the plan/layout band-count agreement, the
+  coefficient-block length, and each noise pattern's length up front so
+  a rejection leaves the block unmodified (no partial fill); failures
+  surface via [`noisefill::InvalidNoiseFill`].
+
+Per the §8 decoder diagram the fill sits *after* inverse-quantize /
+inverse-weight ([`dequant`], Round 18) and *before* the inverse MLT
+([`synthesis`], Round 16) — so this module produces exactly the
+coefficient block [`synthesis::Synthesis::block`] then transforms. The
+per-band noise-substitution *flag encoding* (decoded upstream into the
+[`bands::BandPlan`]) and the generator's own construction both stay
+`[GAP]`. Round 19 adds 27 unit tests; the crate's test count rises from
+427 to 454.
+
 ## What is NOT in this round
 
 The wiki snapshot lists the names of WMA's data tables — the gain

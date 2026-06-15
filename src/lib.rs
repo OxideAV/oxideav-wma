@@ -346,6 +346,9 @@
 //! [`DequantStage`]: dequant::DequantStage
 //! [`DequantStage::new`]: dequant::DequantStage::new
 //! [`DequantStage::block`]: dequant::DequantStage::block
+//! [`NoiseFiller`]: noisefill::NoiseFiller
+//! [`NoiseFiller::fill`]: noisefill::NoiseFiller::fill
+//! [`InvalidNoiseFill`]: noisefill::InvalidNoiseFill
 
 #![forbid(unsafe_code)]
 
@@ -360,6 +363,7 @@ pub mod excitation;
 pub mod header;
 pub mod invquant;
 pub mod mlt;
+pub mod noisefill;
 pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
@@ -381,6 +385,7 @@ pub use escape::{EscapeError, EscapeLiteral};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use mlt::{InvalidMltLen, Mlt};
+pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use step_size::{OverallStepSize, PerBlockStep};

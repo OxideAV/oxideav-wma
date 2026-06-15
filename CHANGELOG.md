@@ -8,6 +8,52 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `noisefill` module — the §7 patent-disclosed decoder-side
+  noise-substitution fill, the noise generator the `bands` module
+  (Round 6) explicitly deferred (US7,383,180 / US7,343,291: "it
+  signals that a band should be filled with a generated noise pattern
+  of the appropriate energy"; decoder noise generator 240). Implements
+  the one quantitative property the patent fixes — the energy contract
+  — and leaves the generator's construction (spectral colour / PRNG /
+  seed) as a caller-supplied `[GAP]` pattern. `pattern_energy(&[f64])`
+  reuses `excitation::band_raw_energy` so the patent's squared-sum
+  energy convention is pinned in one place; `noise_scale(target,
+  pattern_energy)` derives the rescaling gain `sqrt(target /
+  pattern_energy)` (band energy is a sum of squares, so it scales as
+  the square of a uniform gain), returning a silent `0.0` for a
+  non-positive target or an all-zero pattern rather than a `NaN` /
+  `±∞`. `fill_band(target, &[f64])` / `fill_band_in_place(target, &mut
+  [f64])` apply the gain, producing a band at the transmitted energy
+  while preserving the pattern shape. `NoiseFiller { plan, layout }`
+  pairs a `bands::BandPlan` with the matching `qband::QuantBandLayout`
+  and `fill(&mut [f64], &[&[f64]])` walks a coefficient block in band
+  order: `BandPolicy::Coded` bands are left untouched, `NoiseSubstituted`
+  bands are filled from the per-band pattern rescaled to the band
+  energy, and `Truncated` bands are zeroed (the patent's high-band
+  elimination). Plan/layout band-count agreement, coefficient-block
+  length, and each noise pattern's length are validated up front so a
+  rejection leaves the block unmodified (no partial fill); failures
+  surface via `InvalidNoiseFill { BandCountMismatch, CoeffLenMismatch,
+  PatternLenMismatch }`. Per the §8 decoder diagram the fill sits after
+  inverse-quantize/inverse-weight (`dequant`) and before the inverse
+  MLT (`synthesis`), so the output is exactly the block
+  `synthesis::Synthesis::block` consumes. The per-band flag encoding
+  (decoded upstream into the `BandPlan`) and the generator construction
+  both stay `[GAP]`. Re-exports: `NoiseFiller`, `InvalidNoiseFill`.
+  27 unit tests cover the squared-sum energy convention and its
+  agreement with `excitation::band_raw_energy`, the `noise_scale`
+  sqrt-ratio formula and its zero-target / zero-pattern silent
+  boundaries, `fill_band` reaching the target energy / preserving
+  shape / unit-gain identity / empty-slice no-op / in-place ↔ fresh-Vec
+  equivalence, the `NoiseFiller` constructor accept and band-count
+  reject paths, accessor coverage, the coded-untouched /
+  noise-rescaled / truncated-zeroed dispositions both individually and
+  in one mixed block, all three `fill` reject paths with the
+  no-mutation guarantee, a zero-energy noise band silencing, a full
+  single-noise-band block for every `BlockSize::ALL` member, filler
+  reuse across blocks, and `InvalidNoiseFill` `Display` / `std::error::Error`.
+  Crate test count: 427 → 454.
+
 - `channel_decision` module — the §5 patent-disclosed open-loop stereo
   (channel-coding) decision (US7,502,743: "the decision to code
   channels independently vs. jointly is an open-loop decision based on
