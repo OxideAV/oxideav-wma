@@ -8,6 +8,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `spectral` module — the §6 patent-disclosed entropy-stage
+  **spectral-coefficient assembler**, the FIG.6 decoder step *entropy
+  decode (run-level → coefficients)* that sits immediately upstream of
+  the §4 inverse quantizer (US6,223,162 mode selector 400 / FIG.5–6;
+  US7,383,180 entropy encoder 570; §8 decoder pipeline). `SpectralDecode`
+  wraps a decoded `entropy_mode::Partition`; `SpectralDecode::block(
+  levels, pairs)` copies the `split` level-mode head symbols verbatim
+  into `0..split` (US6,223,162 level mode, low-frequency mostly-non-zero
+  range) and expands the run-level `(R, L)` `pairs` over the
+  `split..total` tail window via `runlevel::expand_into` (US6,223,162
+  run-level mode, high-frequency mostly-zero range), honouring the
+  implicit `(N, 1)` terminator **measured against the tail's own
+  remaining-coefficient count**, not the block's. The output is the
+  `M`-coefficient `i32` vector `dequant::DequantStage::block` consumes, so
+  the two assemblers chain into the FIG.6 decoder front-half *entropy
+  decode → inverse quantize/weight* (a test runs an assembled block
+  straight into `DequantStage`). The stage adds no arithmetic of its own:
+  the codeword tables and bit reader are `[GAP]` per §6, so it consumes
+  **already-decoded symbols** exactly as `runlevel::expand_into` does;
+  escape recovery (`escape::EscapeLiteral::as_run_level_pair`) and the
+  partition decision happen upstream. Sign placement is `[GAP]` per §6 —
+  the level-mode head carries already-signed `i32` levels, the run-level
+  tail non-negative magnitudes. Errors: `SpectralError::LevelLenMismatch`
+  (head symbol count ≠ `split`), `SpectralError::RunLevelWalk` (wraps
+  `runlevel::WalkError`), `SpectralError::LevelOverflow` (a magnitude
+  above `i32::MAX`). Sourced from §6 of the patent trace.
 - `stereo_synthesis` module — the §8 patent-disclosed decoder-side
   **stereo** time-domain reconstruction tail, the last stage of the
   FIG.6 decoder pipeline (Thumpudi-180 decoder FIG.6: `... → overlap-add

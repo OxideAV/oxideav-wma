@@ -41,8 +41,10 @@ each pinned to the patent it is disclosed in:
   decoder assembler.
 * Entropy / coding: [`runlevel`] run-level pairing, [`codebook`] the
   `(R, L)` probability-grid construction model, [`escape`] escape-symbol
-  literals, [`entropy_mode`] level vs run-level mode selection, and
-  [`terminator`] end-of-block selection.
+  literals, [`entropy_mode`] level vs run-level mode selection,
+  [`terminator`] end-of-block selection, and [`spectral`] the §6
+  entropy-stage assembler that wires the partition + run-level walker
+  into the `M`-coefficient `i32` vector the [`dequant`] stage consumes.
 * Channel / band policy: [`stereo`] sum/difference transform,
   [`channel_decision`] the open-loop independent-vs-joint analysis,
   [`stereo_synthesis`] the §8 decoder-tail assembler that wires two
@@ -56,7 +58,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 468 unit tests.
+guessing. The crate carries 480 unit tests.
 
 ### What is NOT implemented
 

@@ -311,6 +311,23 @@
 //!   [`synthesis::Synthesis::block`] consumes. The stage adds no
 //!   arithmetic beyond sequencing the existing §4 primitives. Sourced
 //!   from §4 of the patent trace.
+//! * [`spectral`] — the §6 patent-disclosed entropy-stage
+//!   **spectral-coefficient assembler**: the FIG.6 step *entropy decode
+//!   (run-level → coefficients)* (US6,223,162 mode selector 400 /
+//!   FIG.5–6; US7,383,180 entropy encoder 570) assembled into one
+//!   stateless [`SpectralDecode`] over a decoded
+//!   [`entropy_mode::Partition`]. [`SpectralDecode::block`] copies the
+//!   `split` level-mode head symbols verbatim into `0..split` and expands
+//!   the run-level `(R, L)` pairs over the `split..total` tail window via
+//!   [`runlevel::expand_into`] (implicit `(N, 1)` terminator measured
+//!   against the *tail's* remaining count), producing the
+//!   `M`-coefficient `i32` vector the §4 [`dequant::DequantStage::block`]
+//!   consumes — so the two assemblers chain into the FIG.6 decoder
+//!   front-half *entropy decode → inverse quantize/weight*. The codeword
+//!   tables and bit reader are `[GAP]`, so the stage consumes
+//!   already-decoded symbols, exactly as [`runlevel::expand_into`] does;
+//!   it adds no arithmetic of its own. Sourced from §6 of the patent
+//!   trace.
 //! * [`stereo_synthesis`] — the §8 patent-disclosed decoder-side
 //!   **stereo** time-domain reconstruction tail: the FIG.6 chain
 //!   *(per channel) inverse MLT → overlap-add → `[inverse
@@ -372,6 +389,10 @@
 //! [`DequantStage`]: dequant::DequantStage
 //! [`DequantStage::new`]: dequant::DequantStage::new
 //! [`DequantStage::block`]: dequant::DequantStage::block
+//! [`SpectralDecode`]: spectral::SpectralDecode
+//! [`SpectralDecode::block`]: spectral::SpectralDecode::block
+//! [`entropy_mode::Partition`]: crate::entropy_mode::Partition
+//! [`runlevel::expand_into`]: crate::runlevel::expand_into
 //! [`NoiseFiller`]: noisefill::NoiseFiller
 //! [`NoiseFiller::fill`]: noisefill::NoiseFiller::fill
 //! [`InvalidNoiseFill`]: noisefill::InvalidNoiseFill
@@ -394,6 +415,7 @@ pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
+pub mod spectral;
 pub mod step_size;
 pub mod stereo;
 pub mod stereo_synthesis;
@@ -415,6 +437,7 @@ pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
+pub use spectral::{SpectralDecode, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use stereo_synthesis::{StereoBlock, StereoSynthesis};
 pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
