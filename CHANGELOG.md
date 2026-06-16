@@ -8,6 +8,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `decode` module — the §8 patent-disclosed **full single-channel
+  decoder-block chain**, the FIG.6 decoder path *entropy decode →
+  inverse quantize/weight → fill noise-substituted bands (module 240) →
+  inverse MLT → window → overlap-add* (Thumpudi-180 FIG.6). `ChannelDecoder`
+  wires the four decode stages already landed (`spectral::SpectralDecode`,
+  `dequant::DequantStage`, `noisefill::NoiseFiller`,
+  `synthesis::Synthesis`) into one stateful per-channel decoder.
+  `ChannelDecoder::new` cross-checks that all four stages agree on one
+  coefficient count `M` (the disagreeing pair is named in
+  `AssemblyError::CoeffCountMismatch`); `ChannelDecoder::block(levels,
+  pairs, patterns)` runs them in patent order. Its load-bearing addition
+  over the existing pairwise chains is inserting the noise-fill step in
+  its FIG.6-fixed position — between the inverse quantizer and the inverse
+  MLT (US7,383,180 module 240), exactly where both `dequant` and
+  `synthesis` explicitly deferred it. The stage carries the overlap-add
+  tail across calls (`ChannelDecoder::flush` drains it,
+  `ChannelDecoder::reset` clears it at a discontinuity) and adds no
+  arithmetic of its own (a test pins block-for-block equality with the
+  hand-wired four-stage chain; another pins that the noise-fill step
+  genuinely changes the band vs. a chain that skips it). The codeword
+  tables and per-process DEMUX (US7,885,819 FIG.7) are `[GAP]`, so the
+  chain consumes already-demuxed, already-decoded per-stage parameters.
+  Errors propagate per stage via `DecodeError::{Spectral, Dequant,
+  NoiseFill, Synthesis}`. Sourced from §8 of the patent trace.
 - `spectral` module — the §6 patent-disclosed entropy-stage
   **spectral-coefficient assembler**, the FIG.6 decoder step *entropy
   decode (run-level → coefficients)* that sits immediately upstream of

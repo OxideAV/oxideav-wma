@@ -52,13 +52,21 @@ each pinned to the patent it is disclosed in:
   sum/difference post-process into the final L/R PCM, [`bands`] per-band
   coding policy, [`noisefill`] noise substitution, and [`transient`]
   the per-block transient-handling switch.
+* Per-channel pipeline: [`decode`] the §8 FIG.6 single-channel
+  decoder-block assembler that chains [`spectral`] (entropy decode) →
+  [`dequant`] (inverse quantize/weight) → [`noisefill`] (noise/truncation
+  band fill, inserted in its FIG.6-fixed position between the inverse
+  quantizer and the inverse MLT) → [`synthesis`] (inverse MLT → window →
+  overlap-add) into one stateful `ChannelDecoder` mapping a block's
+  already-demuxed parameters to `M` reconstructed time samples; the
+  constructor cross-checks all four stages share one `M`.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 480 unit tests.
+guessing. The crate carries 494 unit tests.
 
 ### What is NOT implemented
 

@@ -142,6 +142,22 @@
 //!   Round 16's [`synthesis`] it adds no arithmetic of its own; its
 //!   output is exactly the input [`synthesis::Synthesis::block`]
 //!   consumes, so the two assemblers chain into the FIG.6 decoder tail.
+//!   Round 19 (this round) assembles the §8 patent-disclosed **full
+//!   single-channel decoder-block chain** — the FIG.6 path *entropy
+//!   decode → inverse quantize/weight → fill noise-substituted bands
+//!   (module 240) → inverse MLT → window → overlap-add* (Thumpudi-180
+//!   FIG.6) — into [`decode`], wiring the four decode stages already
+//!   landed ([`spectral::SpectralDecode`], [`dequant::DequantStage`],
+//!   [`noisefill::NoiseFiller`], [`synthesis::Synthesis`]) into one
+//!   stateful [`ChannelDecoder`] that maps one block's already-demuxed
+//!   per-stage parameters to `M` reconstructed time samples. Its key
+//!   addition over the existing pairwise chains is inserting the
+//!   noise-fill step in its FIG.6-fixed position — between the inverse
+//!   quantizer and the inverse MLT, where both [`dequant`] and
+//!   [`synthesis`] explicitly deferred it; the constructor cross-checks
+//!   that all four stages agree on `M`, and the stage adds no arithmetic
+//!   of its own (a test pins block-for-block equality with the
+//!   hand-wired four-stage chain).
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -346,6 +362,24 @@
 //!   input, never fabricated; the stage adds no arithmetic beyond
 //!   sequencing [`Synthesis`] and [`stereo`]. Sourced from §8 (and §5)
 //!   of the patent trace.
+//! * [`decode`] — the §8 patent-disclosed **full single-channel
+//!   decoder-block chain**: the FIG.6 path *entropy decode → inverse
+//!   quantize/weight → fill noise-substituted bands (module 240) →
+//!   inverse MLT → window → overlap-add* (Thumpudi-180 FIG.6) assembled
+//!   into one stateful [`ChannelDecoder`] over a [`BlockSize`] `M`.
+//!   [`ChannelDecoder::new`] cross-checks that the
+//!   [`spectral::SpectralDecode`], [`dequant::DequantStage`],
+//!   [`noisefill::NoiseFiller`], and [`synthesis::Synthesis`] stages all
+//!   agree on the same coefficient count `M`;
+//!   [`ChannelDecoder::block`] runs them in patent order, inserting the
+//!   noise-fill step in its FIG.6-fixed position between the inverse
+//!   quantizer and the inverse MLT (where both [`dequant`] and
+//!   [`synthesis`] deferred it), and carries the overlap-add tail across
+//!   calls. [`ChannelDecoder::flush`] / [`ChannelDecoder::reset`]
+//!   delegate to the synthesis stage. The codeword tables and the
+//!   per-process DEMUX are `[GAP]`, so the chain consumes already-decoded
+//!   per-stage parameters; it adds no arithmetic of its own. Sourced from
+//!   §8 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -391,6 +425,15 @@
 //! [`DequantStage::block`]: dequant::DequantStage::block
 //! [`SpectralDecode`]: spectral::SpectralDecode
 //! [`SpectralDecode::block`]: spectral::SpectralDecode::block
+//! [`spectral::SpectralDecode`]: crate::spectral::SpectralDecode
+//! [`dequant::DequantStage`]: crate::dequant::DequantStage
+//! [`noisefill::NoiseFiller`]: crate::noisefill::NoiseFiller
+//! [`synthesis::Synthesis`]: crate::synthesis::Synthesis
+//! [`ChannelDecoder`]: decode::ChannelDecoder
+//! [`ChannelDecoder::new`]: decode::ChannelDecoder::new
+//! [`ChannelDecoder::block`]: decode::ChannelDecoder::block
+//! [`ChannelDecoder::flush`]: decode::ChannelDecoder::flush
+//! [`ChannelDecoder::reset`]: decode::ChannelDecoder::reset
 //! [`entropy_mode::Partition`]: crate::entropy_mode::Partition
 //! [`runlevel::expand_into`]: crate::runlevel::expand_into
 //! [`NoiseFiller`]: noisefill::NoiseFiller
@@ -403,6 +446,7 @@ pub mod bands;
 pub mod block;
 pub mod channel_decision;
 pub mod codebook;
+pub mod decode;
 pub mod dequant;
 pub mod entropy_mode;
 pub mod escape;
@@ -428,6 +472,7 @@ pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
 pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
+pub use decode::{AssemblyError, ChannelDecoder, DecodeError, Stage};
 pub use dequant::{DequantStage, InvalidDequant};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
