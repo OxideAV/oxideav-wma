@@ -8,6 +8,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `WmaHeader::long_block_size()` — the bridge from the parsed header to
+  the typed transform-block size. The wiki's `frame_length = 1 <<
+  frame_length_bits` rule fixes the long-block size in samples (512 /
+  1024 / 2048 for `frame_length_bits ∈ {9, 10, 11}`), and every value
+  the decision tree produces is a member of the patent-disclosed set
+  `{256, 512, 1024, 2048, 4096}` (§2, US7,930,171), so this maps the
+  header exponent onto `BlockSize` via `BlockSize::from_log2`. It is the
+  connective tissue a caller uses to construct the per-block
+  `decode::ChannelDecoder` / `stereo_decode::StereoDecoder` (and the
+  `frame` drivers above them) at the header-determined size — for any
+  header from `WmaHeader::parse` it is infallible (the tree only yields
+  9/10/11), with the `Result` kept for hand-built headers and a future
+  variable-block-length path. 2 unit tests pin the per-exponent mapping
+  and that the typed size's sample count equals the header's
+  `frame_length` field. Crate test count: 542 → 544.
+
 - `frame` module — the §2 patent-disclosed **frame loop**, the
   block→frame grouping the patents and wiki both name (Chen-171 FIG.3 /
   Thumpudi-180 module 520: a frame is "partition[ed] into overlapping

@@ -47,6 +47,7 @@
 //! is not specified by any staged document and is therefore not
 //! implemented in this round.
 
+use crate::block::BlockSize;
 use crate::{Error, Result};
 
 /// WMA major version, as identified by the container's codec ID.
@@ -193,6 +194,31 @@ impl WmaHeader {
             frame_length_bits,
             frame_length,
         })
+    }
+
+    /// The MDCT **long-block** transform size for this stream, as a
+    /// typed [`BlockSize`].
+    ///
+    /// The wiki's `frame_length = 1 << frame_length_bits` rule fixes
+    /// the long-block size in samples (512 / 1024 / 2048 for
+    /// `frame_length_bits ∈ {9, 10, 11}`); every value the decision
+    /// tree produces is a member of the patent-disclosed transform-block
+    /// set `{256, 512, 1024, 2048, 4096}` (§2, US7,930,171 Background),
+    /// so this maps the header's exponent directly onto [`BlockSize`]
+    /// via [`BlockSize::from_log2`]. This is the bridge a caller uses to
+    /// build the per-block [`crate::decode::ChannelDecoder`] /
+    /// [`crate::stereo_decode::StereoDecoder`] (and the
+    /// [`crate::frame`] drivers above them) at the header-determined
+    /// size.
+    ///
+    /// Returns [`Error::InvalidBlockSize`] only if `frame_length_bits`
+    /// were ever outside `{8..=12}` — which [`WmaHeader::parse`] never
+    /// produces (its tree yields 9, 10, or 11), so for any header from
+    /// `parse` this is infallible; the `Result` is kept for hand-built
+    /// headers and forward compatibility with a variable-block-length
+    /// path that draws shorter sizes from the set.
+    pub const fn long_block_size(&self) -> Result<BlockSize> {
+        BlockSize::from_log2(self.frame_length_bits)
     }
 }
 
@@ -467,6 +493,35 @@ mod tests {
     }
 
     // ---------- frame_length always matches its exponent ----------
+
+    // ---------- long_block_size bridge ----------
+
+    #[test]
+    fn long_block_size_maps_each_frame_length_bits() {
+        // 9 → 512, 10 → 1024, 11 → 2048, the three values the decision
+        // tree produces; each is a member of the patent BlockSize set.
+        let h9 = WmaHeader::parse(Version::V1, 8_000, 1, 32_000, 0, &[0; 4]).unwrap();
+        assert_eq!(h9.frame_length_bits, 9);
+        assert_eq!(h9.long_block_size().unwrap(), BlockSize::S512);
+
+        let h10 = WmaHeader::parse(Version::V1, 22_050, 1, 64_000, 0, &[0; 4]).unwrap();
+        assert_eq!(h10.frame_length_bits, 10);
+        assert_eq!(h10.long_block_size().unwrap(), BlockSize::S1024);
+
+        let h11 = WmaHeader::parse(Version::V1, 44_100, 2, 128_000, 0, &[0; 4]).unwrap();
+        assert_eq!(h11.frame_length_bits, 11);
+        assert_eq!(h11.long_block_size().unwrap(), BlockSize::S2048);
+    }
+
+    #[test]
+    fn long_block_size_samples_equal_frame_length() {
+        // The typed BlockSize's sample count must equal the header's
+        // frame_length field for every parse result.
+        for sr in [8_000u32, 16_000, 22_050, 44_100] {
+            let h = WmaHeader::parse(Version::V1, sr, 1, 32_000, 0, &[0; 4]).unwrap();
+            assert_eq!(h.long_block_size().unwrap().samples(), h.frame_length);
+        }
+    }
 
     #[test]
     fn frame_length_is_power_of_two_of_bits() {
