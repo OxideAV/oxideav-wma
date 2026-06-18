@@ -158,6 +158,25 @@
 //!   that all four stages agree on `M`, and the stage adds no arithmetic
 //!   of its own (a test pins block-for-block equality with the
 //!   hand-wired four-stage chain).
+//!   Round 20 (this round) assembles the §8 patent-disclosed **full
+//!   two-channel decoder-block chain** — the stereo analogue of Round
+//!   19's [`decode::ChannelDecoder`]: two complete per-channel decode
+//!   chains run front-to-back (entropy decode → inverse quantize/weight →
+//!   noise-fill → inverse MLT → window → overlap-add) and the §8 FIG.6
+//!   `[inverse sum-difference]` multi-channel post-process (US7,502,743)
+//!   folds their two reconstructed time-domain channels back to L/R PCM,
+//!   gated by the per-block [`ChannelMode`] — into [`stereo_decode`].
+//!   Where [`stereo_synthesis::StereoSynthesis`] (Round 17's tail)
+//!   begins at the inverse MLT and consumes already-dequantized
+//!   coefficients, [`stereo_decode::StereoDecoder`] begins one stage
+//!   earlier at the entropy box, so it is the first assembler taking one
+//!   stereo block's already-demuxed per-channel entropy symbols all the
+//!   way to final L/R PCM. The fold runs after each channel's overlap-add
+//!   (its FIG.6-fixed position), so the per-channel overlap-add carriers
+//!   are independent across the block sequence; the constructor
+//!   cross-checks both channels share one `M`, and the stage adds no
+//!   arithmetic of its own (tests pin equality with two hand-wired
+//!   [`decode::ChannelDecoder`] chains for both modes).
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -380,6 +399,25 @@
 //!   per-process DEMUX are `[GAP]`, so the chain consumes already-decoded
 //!   per-stage parameters; it adds no arithmetic of its own. Sourced from
 //!   §8 of the patent trace.
+//! * [`stereo_decode`] — the §8 patent-disclosed **full two-channel
+//!   decoder-block chain**: two complete per-channel
+//!   [`decode::ChannelDecoder`] chains plus the FIG.6 `[inverse
+//!   sum-difference]` multi-channel post-process (US7,502,743) assembled
+//!   into one stateful [`stereo_decode::StereoDecoder`] over a
+//!   [`BlockSize`] `M`. [`stereo_decode::StereoDecoder::new`] cross-checks
+//!   both per-channel decoders share `M`;
+//!   [`stereo_decode::StereoDecoder::block`] runs each channel's full
+//!   decode (entropy → dequant → noise-fill → inverse MLT → window →
+//!   overlap-add), then folds the two reconstructed channels back to L/R
+//!   via [`stereo::inverse_in_place`] only when the per-block
+//!   [`ChannelMode`] is [`ChannelMode::SumDifference`], bypassing the box
+//!   for [`ChannelMode::Independent`] — the fold in its FIG.6-fixed
+//!   position after each channel's overlap-add, so the per-channel carries
+//!   stay independent. It is the stereo analogue of [`decode`] just as
+//!   [`stereo_synthesis`] is the stereo analogue of [`synthesis`]; the
+//!   channel-mode flag layout and DEMUX are `[GAP]`, so both are inputs,
+//!   never fabricated, and the stage adds no arithmetic of its own.
+//!   Sourced from §8 (and §5) of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -408,6 +446,15 @@
 //! [`StereoSynthesis`]: stereo_synthesis::StereoSynthesis
 //! [`StereoSynthesis::block`]: stereo_synthesis::StereoSynthesis::block
 //! [`StereoBlock`]: stereo_synthesis::StereoBlock
+//! [`stereo_synthesis`]: crate::stereo_synthesis
+//! [`stereo_synthesis::StereoSynthesis`]: crate::stereo_synthesis::StereoSynthesis
+//! [`stereo_decode`]: crate::stereo_decode
+//! [`stereo_decode::StereoDecoder`]: crate::stereo_decode::StereoDecoder
+//! [`stereo_decode::StereoDecoder::new`]: crate::stereo_decode::StereoDecoder::new
+//! [`stereo_decode::StereoDecoder::block`]: crate::stereo_decode::StereoDecoder::block
+//! [`decode::ChannelDecoder`]: crate::decode::ChannelDecoder
+//! [`decode`]: crate::decode
+//! [`synthesis`]: crate::synthesis
 //! [`ChannelMode`]: channel_decision::ChannelMode
 //! [`ChannelMode::Independent`]: channel_decision::ChannelMode::Independent
 //! [`ChannelMode::SumDifference`]: channel_decision::ChannelMode::SumDifference
@@ -462,6 +509,7 @@ pub mod runlevel;
 pub mod spectral;
 pub mod step_size;
 pub mod stereo;
+pub mod stereo_decode;
 pub mod stereo_synthesis;
 pub mod synthesis;
 pub mod terminator;
@@ -484,6 +532,7 @@ pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use spectral::{SpectralDecode, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};
+pub use stereo_decode::{StereoAssemblyError, StereoChannel, StereoDecodeError, StereoDecoder};
 pub use stereo_synthesis::{StereoBlock, StereoSynthesis};
 pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};

@@ -60,13 +60,23 @@ each pinned to the patent it is disclosed in:
   overlap-add) into one stateful `ChannelDecoder` mapping a block's
   already-demuxed parameters to `M` reconstructed time samples; the
   constructor cross-checks all four stages share one `M`.
+* Two-channel pipeline: [`stereo_decode`] the §8 FIG.6 **stereo**
+  decoder-block assembler — the stereo analogue of [`decode`] — that runs
+  two full per-channel [`decode`] chains and folds their two reconstructed
+  time-domain channels back to L/R PCM with the §8 `[inverse
+  sum-difference]` post-process, gated by the per-block channel mode (the
+  fold in its FIG.6-fixed position after each channel's overlap-add, so the
+  two overlap-add carriers stay independent). It begins one stage earlier
+  than [`stereo_synthesis`] (the entropy box, not the inverse MLT), so it
+  is the first assembler taking a stereo block's demuxed per-channel
+  entropy symbols all the way to final L/R PCM.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 494 unit tests.
+guessing. The crate carries 509 unit tests.
 
 ### What is NOT implemented
 

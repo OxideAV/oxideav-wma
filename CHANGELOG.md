@@ -8,6 +8,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `stereo_decode` module — the §8 patent-disclosed **full two-channel
+  decoder-block chain**, the stereo analogue of the `decode` module's
+  single-channel `ChannelDecoder`. `StereoDecoder` wires **two** complete
+  per-channel `ChannelDecoder` chains (each running entropy decode →
+  inverse quantize/weight → noise-fill → inverse MLT → window →
+  overlap-add) and closes the pipeline with the §8 FIG.6 `[inverse
+  sum-difference]` multi-channel post-process (US7,502,743), folding the
+  two reconstructed time-domain channels back to left/right PCM via
+  `stereo::inverse_in_place` — but **only** when the caller-supplied
+  per-block `ChannelMode` is `SumDifference` (bypassed for `Independent`,
+  exactly as the FIG.6 box is). Whereas `stereo_synthesis::StereoSynthesis`
+  begins at the inverse MLT and consumes already-dequantized coefficients,
+  `StereoDecoder` begins one stage earlier at the entropy box, so it is
+  the first assembler taking one stereo block's already-demuxed
+  per-channel entropy symbols all the way to final L/R PCM. The fold runs
+  after each channel's overlap-add (its FIG.6-fixed position), so the two
+  per-channel overlap-add carriers stay independent across the block
+  sequence; channel 0 is decoded first so its error surfaces before
+  channel 1's carry advances. `StereoDecoder::new` cross-checks both
+  channels share one `BlockSize` `M` (`StereoAssemblyError::BlockSizeMismatch`
+  otherwise); `StereoDecoder::block` names the failing channel in
+  `StereoDecodeError`; `flush`/`reset` delegate to both per-channel
+  decoders. The channel-mode flag layout (§5) and the per-process DEMUX
+  (§6) are `[GAP]`, so both are inputs, never fabricated; the stage adds
+  no arithmetic of its own (tests pin equality with two hand-wired
+  `ChannelDecoder` chains for both modes, plus a constant-signal
+  sum/difference time-domain round-trip). Sourced from §8 (and §5) of the
+  patent trace.
 - `decode` module — the §8 patent-disclosed **full single-channel
   decoder-block chain**, the FIG.6 decoder path *entropy decode →
   inverse quantize/weight → fill noise-substituted bands (module 240) →
