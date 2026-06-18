@@ -70,25 +70,52 @@ each pinned to the patent it is disclosed in:
   than [`stereo_synthesis`] (the entropy box, not the inverse MLT), so it
   is the first assembler taking a stereo block's demuxed per-channel
   entropy symbols all the way to final L/R PCM.
+* Frame loop: [`frame`] the §2 block→frame assembler one layer above the
+  per-block decoders — [`FrameDecoder`] (mono) and [`StereoFrameDecoder`]
+  (stereo) run a frame's ordered list of already-demuxed per-block
+  parameter sets through the underlying §8 chain and concatenate the
+  per-block PCM into the frame's PCM, threading the overlap-add carrier
+  across frames (flushed once at stream end). Uniform-block-size frames
+  only; the block-size-transition case is `[GAP]`.
+* Stream setup: [`setup`] the wiki "init rate dependent parameters"
+  scalars (`high frequency = sample_rate/2`, `bits/sec = bitrate /
+  (channels·sr)`, `byte offset bits = log2(bps·frame_length/8)+2`, the
+  `use noise coding = 1` default) derived from a parsed [`WmaHeader`],
+  plus the [`WmaHeader::long_block_size`] bridge mapping the header's
+  `frame_length_bits` exponent onto the typed transform [`BlockSize`]
+  that constructs the per-block decoders.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 509 unit tests.
+guessing. The crate carries 544 unit tests.
+
+With the frame loop and stream-setup stages in place, the decode chain
+is assembled **end-to-end from already-demuxed per-block symbols to
+frame PCM**: a caller can parse a [`WmaHeader`], derive its
+[`SetupParams`] and [`BlockSize`], build a per-channel/stereo decoder at
+that size, and drive a whole frame's worth of blocks to PCM. The one
+remaining layer is the bit-level reader (see below).
 
 ### What is NOT implemented
 
-There is **no end-to-end bitstream decode**. The wiki snapshot lists
-the names of WMA's data tables — the gain / LSP / scale / coefficient /
+There is **no bitstream-byte → PCM decode**, because the bit-level layer
+is undocumented in the staged material. The wiki snapshot lists the
+*names* of WMA's data tables — the gain / LSP / scale / coefficient /
 level Huffman tables, the per-rate exponent-band partition tables, and
 the critical-frequency curves — but does not contain the tables
-themselves. Growing the actual MDCT/Huffman decode path requires either
-a spec PDF or a clean-room reverse-engineered trace doc staged under
-`docs/audio/wma/`. The crate is therefore a library of validated
-primitives, not yet a usable codec; the [`oxideav_core`] registration
-will land once the bitstream decode path is implementable.
+themselves, and the patent trace marks the literal codeword tables, the
+per-process DEMUX, the sign-bit placement, the per-band
+noise/cutoff flag encoding, and the superframe/packet byte layout all
+`[GAP]` (§9). Those are the entropy reader's inputs; without them the
+crate cannot turn a real WMA packet's bytes into the per-block symbols
+the assembled chain consumes. Filling them needs either a spec PDF or a
+clean-room binary-side trace staged under `docs/audio/wma/`. The crate
+is therefore a fully-assembled decode chain whose **front-end bit reader
+is the single missing stage**; the [`oxideav_core`] registration will
+land once that stage is implementable.
 
 ## Public surface
 
