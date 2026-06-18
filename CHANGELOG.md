@@ -8,6 +8,43 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `setup` module — the wiki snapshot's **rate-dependent stream-setup
+  parameters**, the deterministic scalars a WMA decoder computes once
+  at stream-open time from the already-parsed `WmaHeader`
+  (`docs/audio/wma/wiki/Windows_Media_Audio.wiki`, "init rate dependent
+  parameters"). `SetupParams::from_header` derives four closed-form
+  values with no fabrication: `high_frequency = sample_rate / 2` (the
+  wiki's "high frequency = sample rate / 2"); `bits_per_sample =
+  bit_rate / (channels * sample_rate)` (the wiki's "bits/sec = bitrate
+  / (channels * sr)", the dimensionless per-sample-per-channel bit
+  budget despite the wiki's "bits/sec" label); `byte_offset_bits =
+  log2(bps * frame_length / 8) + 2` (the wiki's "byte offset bits =
+  log2(bps * frame length / 8) + 2", with `log2` the integer floor
+  logarithm matching the wiki's `frame length bits = log2(frame
+  length)` usage); and `noise_coding`, initialised to the wiki's
+  `use noise coding = 1 as a default`. The wiki separately names a
+  noise-coding *activation* decision "based on channels and sr" but
+  does not spell out its threshold rule, so that selection is a
+  **DOCS-GAP**: the field ships the wiki default and is overridable via
+  `SetupParams::with_noise_coding` (a caller that determined the
+  activation by black-box observation threads it in rather than this
+  module fabricating a threshold). Degenerate container fields clamp
+  instead of panicking — a zero channel count yields
+  `bits_per_sample = 0` (guarded `checked_div`), and a zero
+  `bps * frame_length / 8` product yields `byte_offset_bits = 2`
+  (`floor_log2(0)` defined as `0`). This is the first stage past the
+  Round 1 header parser to consume the parsed header, bridging
+  `WmaHeader` toward a future frame-decode driver; it introduces no
+  codeword tables and no bitstream parsing. 16 unit tests cover the
+  `floor_log2` helper (powers of two, floor-down on non-powers, the
+  zero-is-zero clamp), `high_frequency` as Nyquist, `bits_per_sample`
+  for stereo / per-channel / mono-vs-stereo-halving / zero-channel
+  guard, the `byte_offset_bits` formula and its small-product /
+  zero-product clamps, the `noise_coding` default and override
+  (including the untouched-other-scalars and idempotence properties),
+  an end-to-end derivation through the real `WmaHeader::parse`, and
+  `Copy`/`Eq`. Crate test count: 509 → 525. Re-export: `SetupParams`.
+
 - `stereo_decode` module — the §8 patent-disclosed **full two-channel
   decoder-block chain**, the stereo analogue of the `decode` module's
   single-channel `ChannelDecoder`. `StereoDecoder` wires **two** complete

@@ -177,6 +177,16 @@
 //!   cross-checks both channels share one `M`, and the stage adds no
 //!   arithmetic of its own (tests pin equality with two hand-wired
 //!   [`decode::ChannelDecoder`] chains for both modes).
+//!   Round 21 (this round) lifts the wiki snapshot's "init rate
+//!   dependent parameters" — the deterministic stream-setup scalars a
+//!   decoder computes once at open-time from the parsed header
+//!   (`high frequency = sample rate / 2`; `bits/sec = bitrate /
+//!   (channels * sr)`; `byte offset bits = log2(bps * frame length /
+//!   8) + 2`; `use noise coding = 1 as a default`) — into [`setup`],
+//!   deriving each closed-form scalar from a [`WmaHeader`] with no
+//!   fabrication; the noise-coding *activation override* the wiki
+//!   names but does not specify ("based on channels and sr") stays a
+//!   DOCS-GAP, shipped as the wiki default and overridable.
 //!
 //! Tables (Huffman codebooks, exponent bands, LSP codebook,
 //! critical-frequency curves) are not yet staged so the actual
@@ -418,6 +428,16 @@
 //!   channel-mode flag layout and DEMUX are `[GAP]`, so both are inputs,
 //!   never fabricated, and the stage adds no arithmetic of its own.
 //!   Sourced from §8 (and §5) of the patent trace.
+//! * [`setup`] — the wiki snapshot's rate-dependent stream-setup
+//!   scalars, derived once at open-time from a [`WmaHeader`]:
+//!   [`SetupParams::high_frequency`] (`sample_rate / 2`),
+//!   [`SetupParams::bits_per_sample`] (`bit_rate / (channels *
+//!   sample_rate)`), [`SetupParams::byte_offset_bits`] (`log2(bps *
+//!   frame_length / 8) + 2`), and [`SetupParams::noise_coding`] (the
+//!   `use noise coding = 1` default; its activation override is a
+//!   DOCS-GAP, so the field ships the default and is overridable via
+//!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
+//!   rate dependent parameters" section.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -486,6 +506,13 @@
 //! [`NoiseFiller`]: noisefill::NoiseFiller
 //! [`NoiseFiller::fill`]: noisefill::NoiseFiller::fill
 //! [`InvalidNoiseFill`]: noisefill::InvalidNoiseFill
+//! [`setup`]: crate::setup
+//! [`SetupParams`]: setup::SetupParams
+//! [`SetupParams::high_frequency`]: setup::SetupParams::high_frequency
+//! [`SetupParams::bits_per_sample`]: setup::SetupParams::bits_per_sample
+//! [`SetupParams::byte_offset_bits`]: setup::SetupParams::byte_offset_bits
+//! [`SetupParams::noise_coding`]: setup::SetupParams::noise_coding
+//! [`SetupParams::with_noise_coding`]: setup::SetupParams::with_noise_coding
 
 #![forbid(unsafe_code)]
 
@@ -506,6 +533,7 @@ pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
 pub mod runlevel;
+pub mod setup;
 pub mod spectral;
 pub mod step_size;
 pub mod stereo;
@@ -530,6 +558,7 @@ pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
+pub use setup::SetupParams;
 pub use spectral::{SpectralDecode, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use stereo_decode::{StereoAssemblyError, StereoChannel, StereoDecodeError, StereoDecoder};
