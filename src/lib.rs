@@ -180,7 +180,7 @@
 //!   Round 22 (this round) assembles the §2 patent-disclosed
 //!   **frame loop** — the block→frame grouping the patents and wiki
 //!   both name (Chen-171 FIG.3 / Thumpudi-180 module 520: a frame is
-//!   "partition[ed] into overlapping sub-frame blocks"; wiki: "blocks →
+//!   partitioned into overlapping sub-frame blocks; wiki: "blocks →
 //!   frames (one or more blocks) → superframes") — into [`frame`],
 //!   wiring [`decode::ChannelDecoder`] (mono) and
 //!   [`stereo_decode::StereoDecoder`] (stereo) into the layer above
