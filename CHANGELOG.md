@@ -8,6 +8,49 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `frame` module — the §2 patent-disclosed **frame loop**, the
+  block→frame grouping the patents and wiki both name (Chen-171 FIG.3 /
+  Thumpudi-180 module 520: a frame is "partition[ed] into overlapping
+  sub-frame blocks"; wiki: "blocks → frames (one or more blocks) →
+  superframes"). This is the orchestration layer one above the per-block
+  decoders: `FrameDecoder` wraps a `decode::ChannelDecoder` (mono) and
+  `StereoFrameDecoder` wraps a `stereo_decode::StereoDecoder` (stereo).
+  `FrameDecoder::decode_frame(&[BlockParams])` /
+  `StereoFrameDecoder::decode_frame(&[StereoBlockParams])` run a frame's
+  ordered list of already-demuxed per-block parameter sets through the
+  underlying §8 chain and concatenate the per-block PCM into the frame's
+  PCM (mono: a `Vec<f64>` of `n_blocks * M`; stereo: a `StereoBlock`
+  whose `left`/`right` each hold `n_blocks * M`). `BlockParams { levels,
+  pairs, patterns }` is the owned analogue of `ChannelDecoder::block`'s
+  borrowed argument triple (the noise `patterns` are owned
+  `Vec<Vec<f64>>` reborrowed as `&[&[f64]]` at decode time);
+  `StereoBlockParams { ch0, ch1, mode }` pairs both channels' params
+  with the per-block `ChannelMode` (the §5 independent-vs-sum/difference
+  decision whose v1/v2 flag layout is `[GAP]`, so it is a caller input).
+  The overlap-add carrier threads across frames — `decode_frame` does
+  **not** flush, so a stream's frames decode contiguously; `flush`
+  drains the trailing tail once at stream end, and `reset` clears the
+  carry at a discontinuity. The stage adds no arithmetic of its own
+  (tests pin block-for-block equality with the hand-run per-block chain,
+  and that two `decode_frame` calls equal one call over the concatenated
+  block list — the carry is not reset at the frame boundary). The driver
+  runs a **uniform-block-size** frame (every block at the decoder's `M`,
+  the non-variable-block-length case `frame_length = 1 <<
+  frame_length_bits` describes); block-size-transition frames need
+  window-transition handling whose shape is `[GAP]` per §2/§3 (the same
+  deferral `decode` and `synthesis` record), and the DEMUX / superframe
+  byte layout stay `[GAP]`, so the block count and per-block parameters
+  are caller-supplied inputs, never fabricated. 17 unit tests cover the
+  `BlockParams` / `StereoBlockParams` plumbing, the mono driver
+  (block-len agreement, empty / single / multi-block frame lengths,
+  equality with the manual per-block chain, the cross-frame carry
+  persistence, reset-clears-carry, flush-drains-tail) and the stereo
+  driver (empty-frame two-empty-channels, multi-block per-channel
+  concatenation, equality with the manual stereo chain, the
+  sum/difference-vs-independent fold honoured per block, reset/flush).
+  Crate test count: 525 → 542. Re-exports: `FrameDecoder`,
+  `StereoFrameDecoder`, `BlockParams`, `StereoBlockParams`.
+
 - `setup` module — the wiki snapshot's **rate-dependent stream-setup
   parameters**, the deterministic scalars a WMA decoder computes once
   at stream-open time from the already-parsed `WmaHeader`

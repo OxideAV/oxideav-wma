@@ -177,6 +177,27 @@
 //!   cross-checks both channels share one `M`, and the stage adds no
 //!   arithmetic of its own (tests pin equality with two hand-wired
 //!   [`decode::ChannelDecoder`] chains for both modes).
+//!   Round 22 (this round) assembles the §2 patent-disclosed
+//!   **frame loop** — the block→frame grouping the patents and wiki
+//!   both name (Chen-171 FIG.3 / Thumpudi-180 module 520: a frame is
+//!   "partition[ed] into overlapping sub-frame blocks"; wiki: "blocks →
+//!   frames (one or more blocks) → superframes") — into [`frame`],
+//!   wiring [`decode::ChannelDecoder`] (mono) and
+//!   [`stereo_decode::StereoDecoder`] (stereo) into the layer above
+//!   them: [`FrameDecoder`] / [`StereoFrameDecoder`] run a frame's
+//!   ordered list of already-demuxed per-block parameter sets
+//!   ([`BlockParams`] / [`StereoBlockParams`]) through the underlying
+//!   per-block §8 chain and concatenate the per-block PCM into the
+//!   frame's PCM, carrying the overlap-add tail across frames (flushed
+//!   once at stream end, not per frame). It adds no arithmetic of its
+//!   own (tests pin equality with the hand-run per-block chain). The
+//!   driver runs a **uniform-block-size** frame (the
+//!   non-variable-block-length case `frame_length = 1 <<
+//!   frame_length_bits` describes); block-size-transition frames need
+//!   window-transition handling whose shape is `[GAP]` per §2/§3 (the
+//!   same deferral [`decode`] records), and the DEMUX / superframe byte
+//!   layout stay `[GAP]`, so the per-block parameters and block count
+//!   are caller-supplied inputs, never fabricated.
 //!   Round 21 (this round) lifts the wiki snapshot's "init rate
 //!   dependent parameters" — the deterministic stream-setup scalars a
 //!   decoder computes once at open-time from the parsed header
@@ -428,6 +449,17 @@
 //!   channel-mode flag layout and DEMUX are `[GAP]`, so both are inputs,
 //!   never fabricated, and the stage adds no arithmetic of its own.
 //!   Sourced from §8 (and §5) of the patent trace.
+//! * [`frame`] — the §2 frame-loop assembler above the per-block
+//!   decoders: [`FrameDecoder`] (mono) drives a [`decode::ChannelDecoder`]
+//!   and [`StereoFrameDecoder`] drives a [`stereo_decode::StereoDecoder`]
+//!   over a frame's ordered list of already-demuxed per-block parameter
+//!   sets ([`BlockParams`] / [`StereoBlockParams`]), concatenating the
+//!   per-block PCM into the frame's PCM and threading the overlap-add
+//!   carrier across frames. Runs a uniform-block-size frame; the
+//!   block-size-transition case and the DEMUX / superframe byte layout
+//!   are `[GAP]`, so block count and per-block parameters are inputs.
+//!   Sourced from §2 (and §8) of the patent trace and the wiki block→
+//!   frame→superframe nesting.
 //! * [`setup`] — the wiki snapshot's rate-dependent stream-setup
 //!   scalars, derived once at open-time from a [`WmaHeader`]:
 //!   [`SetupParams::high_frequency`] (`sample_rate / 2`),
@@ -506,6 +538,11 @@
 //! [`NoiseFiller`]: noisefill::NoiseFiller
 //! [`NoiseFiller::fill`]: noisefill::NoiseFiller::fill
 //! [`InvalidNoiseFill`]: noisefill::InvalidNoiseFill
+//! [`frame`]: crate::frame
+//! [`FrameDecoder`]: frame::FrameDecoder
+//! [`StereoFrameDecoder`]: frame::StereoFrameDecoder
+//! [`BlockParams`]: frame::BlockParams
+//! [`StereoBlockParams`]: frame::StereoBlockParams
 //! [`setup`]: crate::setup
 //! [`SetupParams`]: setup::SetupParams
 //! [`SetupParams::high_frequency`]: setup::SetupParams::high_frequency
@@ -525,6 +562,7 @@ pub mod dequant;
 pub mod entropy_mode;
 pub mod escape;
 pub mod excitation;
+pub mod frame;
 pub mod header;
 pub mod invquant;
 pub mod mlt;
@@ -552,6 +590,7 @@ pub use decode::{AssemblyError, ChannelDecoder, DecodeError, Stage};
 pub use dequant::{DequantStage, InvalidDequant};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
+pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use mlt::{InvalidMltLen, Mlt};
