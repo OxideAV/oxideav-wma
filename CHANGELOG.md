@@ -8,6 +8,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `encode` module — the §8 patent-disclosed **full single-channel
+  encoder-block chain**, the forward mirror of `decode` (Thumpudi-180
+  FIG.5 encoder pipeline: *window + forward MLT → uniform scalar
+  quantize (matrix weight × overall step) → run-level entropy code*).
+  `ChannelEncoder` wires the three encode stages this round landed —
+  `analysis::Analysis`, `quant::QuantStage`,
+  `spectral::SpectralEncode` — with the same coefficient-count
+  cross-check `decode::ChannelDecoder::new` applies
+  (`EncodeAssemblyError::CoeffCountMismatch` names the first
+  disagreeing pair; per-stage failures surface via
+  `EncodeError::{Analysis, Quant, Spectral}`).
+  `ChannelEncoder::block` maps `M` fresh time-domain samples to a
+  typed `EncodedBlock { levels, pairs }` — exactly the `(levels,
+  pairs)` argument pair `ChannelDecoder::block` consumes —
+  `ChannelEncoder::flush` closes the stream with the zero block that
+  drains the paired decoder's overlap-add carry, and
+  `EncodedBlock::into_block_params(band_count)` bridges to the `frame`
+  drivers (empty ignored patterns; this chain literal-codes every band
+  — §7 noise/truncation selection is an encoder rate decision left
+  caller-side). The headline cross-module property is pinned by tests:
+  an encoder/decoder pair built from **one parameter set** round-trips
+  — decode(encode(PCM)) reproduces a pseudo-random signal after the
+  chain's `M`-sample leading latency within a small multiple of the
+  §4 quantizer step (S256 + S512), and the worst-case error strictly
+  shrinks when the step is halved (the rate/quality dial the patents
+  describe). 14 unit tests cover assembly accept / both mismatch
+  rejects, the per-stage error paths (wrong sample count;
+  below-structural-floor partition), the adds-no-arithmetic equality
+  with the hand-wired three-stage chain, the two round-trip sizes, the
+  step-halving monotonicity, a sparse-spectrum run-level-branch round
+  trip at the `min_split_for` floor, flush ≡ zero-block encode,
+  reset-equals-fresh, `EncodedBlock` plumbing, and error `Display` /
+  `source`. Crate test count: 602 → 616. Re-exports: `ChannelEncoder`,
+  `EncodedBlock`, `EncodeAssemblyError`, `EncodeError`, `EncodeStage`.
+
 - `analysis` module — the §3 patent-disclosed **encoder-side
   time-domain analysis stage**, the stateful mirror of `synthesis`:
   frame formation (previous `M` samples ‖ fresh `M` samples, the 50%

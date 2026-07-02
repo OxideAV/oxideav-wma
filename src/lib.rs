@@ -470,6 +470,21 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`encode`] — the §8 patent-disclosed **full single-channel
+//!   encoder-block chain**, the forward mirror of [`decode`]
+//!   (Thumpudi-180 FIG.5: window + forward MLT → uniform scalar
+//!   quantize → run-level entropy code). [`ChannelEncoder`] wires
+//!   [`Analysis`] → [`QuantStage`] → [`SpectralEncode`] with the same
+//!   `M` cross-check [`ChannelDecoder::new`] applies; its
+//!   [`EncodedBlock`] output is exactly the `(levels, pairs)` input
+//!   [`ChannelDecoder::block`] consumes (plus an
+//!   [`EncodedBlock::into_block_params`] bridge to the [`frame`]
+//!   drivers). An encoder/decoder pair built from one parameter set
+//!   round-trips: decode(encode(PCM)) reproduces the PCM after the
+//!   chain's `M`-sample latency within the §4 quantizer's error
+//!   bound, and the bound shrinks with the step (both pinned by
+//!   tests). Parameter *selection* (weights, step, partition, noise
+//!   decisions) stays caller-side per the trace's `[GAP]`s.
 //! * [`analysis`] — the §3 encoder-side **time-domain analysis stage**
 //!   run forward: the stateful mirror of [`synthesis`] wiring frame
 //!   formation (previous `M` ‖ fresh `M`, the 50% TDAC overlap),
@@ -580,6 +595,10 @@
 //! [`analysis`]: crate::analysis
 //! [`Analysis`]: analysis::Analysis
 //! [`Analysis::flush`]: analysis::Analysis::flush
+//! [`encode`]: crate::encode
+//! [`ChannelEncoder`]: encode::ChannelEncoder
+//! [`EncodedBlock`]: encode::EncodedBlock
+//! [`EncodedBlock::into_block_params`]: encode::EncodedBlock::into_block_params
 //! [`SpectralEncode`]: spectral::SpectralEncode
 //! [`SpectralEncode::min_split_for`]: spectral::SpectralEncode::min_split_for
 //! [`runlevel::compress`]: crate::runlevel::compress
@@ -600,6 +619,7 @@ pub mod channel_decision;
 pub mod codebook;
 pub mod decode;
 pub mod dequant;
+pub mod encode;
 pub mod entropy_mode;
 pub mod escape;
 pub mod excitation;
@@ -631,6 +651,7 @@ pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
 pub use decode::{AssemblyError, ChannelDecoder, DecodeError, Stage};
 pub use dequant::{DequantStage, InvalidDequant};
+pub use encode::{ChannelEncoder, EncodeAssemblyError, EncodeError, EncodeStage, EncodedBlock};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
