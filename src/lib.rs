@@ -470,6 +470,17 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`quant`] — the §4 patent-disclosed **encoder-side forward
+//!   quantization step**: `q[k] = round(coeff[k] / (Q[d(k)] * step))`
+//!   (US7,930,171 overall step-size description; US7,383,180 quantizer
+//!   560 "adaptive, uniform, scalar quantizer"), the paired forward of
+//!   [`invquant`] / [`dequant`]. [`QuantStage`] mirrors
+//!   [`DequantStage`] field-for-field (same `(layout, weights, step)`
+//!   constructor triple, same validation, same [`BandScale`] fold), so
+//!   an encoder/decoder pair built from one parameter set is
+//!   guaranteed to agree; step-size *selection* stays caller-supplied
+//!   (rate-control tuning per US7,343,291, not a bitstream rule).
+//!   Sourced from §4 of the patent trace.
 //! * [`Error`] — crate-local error type; new variants land as the
 //!   pipeline grows.
 //!
@@ -543,6 +554,8 @@
 //! [`StereoFrameDecoder`]: frame::StereoFrameDecoder
 //! [`BlockParams`]: frame::BlockParams
 //! [`StereoBlockParams`]: frame::StereoBlockParams
+//! [`quant`]: crate::quant
+//! [`QuantStage`]: quant::QuantStage
 //! [`setup`]: crate::setup
 //! [`SetupParams`]: setup::SetupParams
 //! [`SetupParams::high_frequency`]: setup::SetupParams::high_frequency
@@ -570,6 +583,7 @@ pub mod noisefill;
 pub mod overlap_add;
 pub mod qband;
 pub mod qmatrix;
+pub mod quant;
 pub mod runlevel;
 pub mod setup;
 pub mod spectral;
@@ -597,6 +611,7 @@ pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
+pub use quant::{InvalidQuant, QuantStage};
 pub use setup::SetupParams;
 pub use spectral::{SpectralDecode, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};

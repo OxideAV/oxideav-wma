@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `quant` module — the §4 patent-disclosed **encoder-side forward
+  quantization step**, the paired forward of the decoder's `invquant` /
+  `dequant` stages (US7,930,171 overall step-size description:
+  each coefficient quantized by the product of its band's matrix weight
+  and one block-wide step; US7,383,180 quantizer 560: "adaptive,
+  uniform, scalar quantizer"). `quantize_sample(coeff, weight, step)`
+  computes `round(coeff / (weight * step))`; `quantize_in_place` is the
+  whole-block band-map form mirroring `invquant::dequantize_in_place`
+  contract-for-contract (same panics); `QuantStage` mirrors
+  `dequant::DequantStage` field-for-field — same `(block_size, layout,
+  weights, step)` constructor triple, same validation
+  (`InvalidQuant::{BlockSizeMismatch, WeightIndexOutOfRange,
+  CoeffLenMismatch}` variant-for-variant with `InvalidDequant`), same
+  once-folded `BandScale` divisor table — so an encoder/decoder pair
+  built from one parameter set agrees by construction. Step-size
+  *selection* stays a caller-supplied `OverallStepSize` (rate-control
+  tuning per US7,343,291, not a bitstream rule); the rounding tie-rule
+  (`f64::round`, half-away-from-zero) and the degenerate-divisor /
+  saturation boundaries (zero divisor → silent 0; out-of-`i32`-range
+  quotient → saturate) are documented realization details, not claimed
+  WMA facts. 21 unit tests cover the rounding/dead-zone behaviour, the
+  on-grid inverse-of-`dequantize_sample` identity, the uniform-quantizer
+  `|error| ≤ divisor/2` bound (per-sample and whole-stage across every
+  `BlockSize::ALL` member), the zero/non-finite/saturation boundaries,
+  the whole-block helper and its three panic contracts, the stage's
+  constructor accept/reject paths, stage↔helper agreement, the
+  `QuantStage`↔`DequantStage` on-grid round trip, and error `Display` /
+  `std::error::Error`. Crate test count: 544 → 565. Re-exports:
+  `QuantStage`, `InvalidQuant`.
+
 - `WmaHeader::long_block_size()` — the bridge from the parsed header to
   the typed transform-block size. The wiki's `frame_length = 1 <<
   frame_length_bits` rule fixes the long-block size in samples (512 /
