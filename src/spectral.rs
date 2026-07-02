@@ -93,8 +93,22 @@
 //!   encoded) is `[GAP]` per §6; the [`crate::entropy_mode::Partition`]
 //!   arrives already decoded.
 
+//! ## Encoder side
+//!
+//! [`SpectralEncode`] is the same assembler run forward: it splits a
+//! block's `M`-coefficient `i32` vector at the partition boundary,
+//! carries the head verbatim as level-mode symbols, and compresses the
+//! tail into `(R, L)` pairs via [`crate::runlevel::compress`], closing
+//! the block with the implicit `(N, 1)` terminator when trailing zeros
+//! remain (the branch [`SpectralDecode`]'s walker recognises). The
+//! shipping encoder's *tuned* partition rule is `[GAP]` per §6, so the
+//! [`crate::entropy_mode::Partition`] is caller-supplied;
+//! [`SpectralEncode::min_split_for`] exposes the one structural
+//! constraint the patent's `{1..Rm}` run set imposes on that choice
+//! (every tail non-zero needs a preceding zero).
+
 use crate::entropy_mode::Partition;
-use crate::runlevel::{self, RunLevelPair, WalkError};
+use crate::runlevel::{self, CompressError, RunLevelPair, WalkError};
 
 /// Stateless entropy-stage spectral-coefficient assembler for one block,
 /// per §6 of the patent trace (US6,223,162 mode selector 400 / FIG.5–6;
@@ -221,6 +235,197 @@ impl SpectralDecode {
         Ok(out)
     }
 }
+
+/// Stateless entropy-stage spectral-coefficient **encoder** for one
+/// block — the forward of [`SpectralDecode`], per §6 of the patent
+/// trace (US6,223,162 mode selector 400 / FIG.5–6; US7,383,180 entropy
+/// encoder 570 "switches between level and run length/level modes").
+///
+/// One [`SpectralEncode::block`] call consumes a block's
+/// `total`-coefficient `i32` spectral vector (the output of the §4
+/// forward quantizer, [`crate::quant::QuantStage::block`]) and emits
+/// the per-mode symbols the paired [`SpectralDecode::block`] consumes:
+/// the `split` level-mode head symbols verbatim and the run-level
+/// `(R, L)` pairs of the tail, terminator included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpectralEncode {
+    partition: Partition,
+}
+
+impl SpectralEncode {
+    /// Construct the encoder for a block from its [`Partition`] — the
+    /// same caller-supplied boundary the paired [`SpectralDecode`]
+    /// takes (the shipping encoder's tuned partition rule is `[GAP]`
+    /// per §6; see [`SpectralEncode::min_split_for`] for the
+    /// structural lower bound).
+    #[inline]
+    pub const fn new(partition: Partition) -> Self {
+        Self { partition }
+    }
+
+    /// The partition this encoder was built from.
+    #[inline]
+    pub const fn partition(&self) -> Partition {
+        self.partition
+    }
+
+    /// Total coefficient count `M` of the block (the input length).
+    #[inline]
+    pub const fn total_coeffs(&self) -> u32 {
+        self.partition.total_coeffs
+    }
+
+    /// Number of coefficients coded by the level-mode head (`0..split`).
+    #[inline]
+    pub const fn level_range_len(&self) -> u32 {
+        self.partition.level_range_len()
+    }
+
+    /// Number of coefficients coded by the run-level tail
+    /// (`split..total`).
+    #[inline]
+    pub const fn run_level_range_len(&self) -> u32 {
+        self.partition.run_level_range_len()
+    }
+
+    /// The smallest `split` for which `coeffs`' tail is run-level
+    /// representable — the structural constraint the patent's pairing
+    /// set imposes on the mode boundary.
+    ///
+    /// Per US6,223,162 Claim 1 runs are drawn from `{1..Rm}`, so every
+    /// tail non-zero needs at least one preceding zero *inside the
+    /// tail*; and the tail carries magnitudes (sign placement `[GAP]`),
+    /// so negative coefficients must stay in the already-signed head.
+    /// This returns the smallest boundary satisfying both — the
+    /// patent's own rationale for the level mode ("coefficients are
+    /// most likely non-zero at lower frequency ranges") emerging as a
+    /// hard constraint. The shipping encoder's *tuned* choice (which
+    /// may sit higher) is `[GAP]`; this is only the floor.
+    pub fn min_split_for(coeffs: &[i32]) -> u32 {
+        let mut split = 0usize;
+        for (i, &c) in coeffs.iter().enumerate() {
+            if c < 0 {
+                // Signed values live in the head.
+                split = split.max(i + 1);
+            } else if c > 0 && (i == 0 || coeffs[i - 1] != 0) {
+                // A tail non-zero with no preceding zero would need
+                // run 0; push it into the head.
+                split = split.max(i + 1);
+            }
+        }
+        // The tail may not *start* on a non-zero (run 0 again), so
+        // step past any non-zero run the bound landed on.
+        while split < coeffs.len() && coeffs[split] != 0 {
+            split += 1;
+        }
+        split as u32
+    }
+
+    /// Encode one block: split the `total`-coefficient vector at the
+    /// partition boundary into the level-mode head symbols (copied
+    /// verbatim, already signed) and the run-level tail pairs
+    /// (compressed by [`crate::runlevel::compress`], closed with the
+    /// implicit `(N, 1)` terminator when trailing zeros remain).
+    ///
+    /// The output pair feeds [`SpectralDecode::block`] unchanged and
+    /// decodes back to `coeffs` exactly.
+    ///
+    /// # Errors
+    ///
+    /// * [`SpectralEncodeError::CoeffLenMismatch`] if
+    ///   `coeffs.len() != total_coeffs()`.
+    /// * [`SpectralEncodeError::NegativeTailCoefficient`] if a tail
+    ///   coefficient is negative — the run-level tail carries
+    ///   magnitudes (sign placement is `[GAP]` per §6), so signed
+    ///   values must be kept in the head by a wider `split`.
+    /// * [`SpectralEncodeError::TailNotRepresentable`] if a tail
+    ///   non-zero has no preceding zero (its run would be `0`,
+    ///   outside the patent's `{1..Rm}` set) — the mode boundary must
+    ///   widen past it (see [`SpectralEncode::min_split_for`]).
+    pub fn block(
+        &self,
+        coeffs: &[i32],
+    ) -> Result<(Vec<i32>, Vec<RunLevelPair>), SpectralEncodeError> {
+        let split = self.partition.split as usize;
+        let total = self.partition.total_coeffs as usize;
+
+        if coeffs.len() != total {
+            return Err(SpectralEncodeError::CoeffLenMismatch {
+                expected: total,
+                got: coeffs.len(),
+            });
+        }
+
+        // Level-mode head: copied verbatim, signs preserved.
+        let levels = coeffs[..split].to_vec();
+
+        // Run-level tail: magnitudes only (sign is [GAP]).
+        let mut tail = Vec::with_capacity(total - split);
+        for (offset, &c) in coeffs[split..].iter().enumerate() {
+            let mag =
+                u32::try_from(c).map_err(|_| SpectralEncodeError::NegativeTailCoefficient {
+                    index: split + offset,
+                })?;
+            tail.push(mag);
+        }
+        let compressed = runlevel::compress(&tail).map_err(|e| match e {
+            CompressError::NoPrecedingZero { index } => SpectralEncodeError::TailNotRepresentable {
+                index: split + index,
+            },
+        })?;
+
+        Ok((levels, compressed.pairs_with_implicit_terminator()))
+    }
+}
+
+/// Rejection reasons for [`SpectralEncode::block`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpectralEncodeError {
+    /// The supplied coefficient count does not match the partition's
+    /// `total_coeffs`.
+    CoeffLenMismatch {
+        /// Coefficient count the partition requires.
+        expected: usize,
+        /// Coefficient count the caller supplied.
+        got: usize,
+    },
+    /// A run-level-tail coefficient is negative. The tail carries
+    /// magnitudes only (sign placement is `[GAP]` per §6 of the
+    /// trace); signed values belong in the level-mode head.
+    NegativeTailCoefficient {
+        /// Absolute (block-wide) index of the offending coefficient.
+        index: usize,
+    },
+    /// A run-level-tail non-zero has no preceding zero inside the
+    /// tail, so its run would be `0` — outside the patent-disclosed
+    /// `{1..Rm}` run set (US6,223,162 Claim 1). The mode boundary
+    /// must widen past it.
+    TailNotRepresentable {
+        /// Absolute (block-wide) index of the offending coefficient.
+        index: usize,
+    },
+}
+
+impl core::fmt::Display for SpectralEncodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SpectralEncodeError::CoeffLenMismatch { expected, got } => write!(
+                f,
+                "oxideav-wma::spectral: coefficient count {got} does not match partition total {expected}",
+            ),
+            SpectralEncodeError::NegativeTailCoefficient { index } => write!(
+                f,
+                "oxideav-wma::spectral: negative coefficient at index {index} in the run-level tail (tail carries magnitudes; sign placement is [GAP])",
+            ),
+            SpectralEncodeError::TailNotRepresentable { index } => write!(
+                f,
+                "oxideav-wma::spectral: non-zero coefficient at index {index} has no preceding zero in the run-level tail — widen the level-mode head",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpectralEncodeError {}
 
 /// Rejection reasons for [`SpectralDecode::block`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -441,6 +646,192 @@ mod tests {
         assert_eq!(coeff_hat.len(), m);
         assert_eq!(coeff_hat[m - 1], 3.0);
         assert!(coeff_hat[..m - 1].iter().all(|&v| v == 0.0));
+    }
+
+    // ---------- SpectralEncode: accessors ----------
+
+    #[test]
+    fn encode_accessors_mirror_partition() {
+        let se = SpectralEncode::new(part(64, 16));
+        assert_eq!(se.total_coeffs(), 64);
+        assert_eq!(se.level_range_len(), 16);
+        assert_eq!(se.run_level_range_len(), 48);
+        assert_eq!(se.partition(), part(64, 16));
+    }
+
+    // ---------- SpectralEncode: happy paths ----------
+
+    #[test]
+    fn encode_all_level_mode_copies_head_verbatim() {
+        let se = SpectralEncode::new(part(4, 4));
+        let (levels, pairs) = se.block(&[3, -2, 0, 7]).unwrap();
+        assert_eq!(levels, vec![3, -2, 0, 7]);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn encode_splits_head_and_compresses_tail() {
+        // Mirrors the decode test `run_level_tail_expands_over_tail_
+        // window_only` in reverse.
+        let se = SpectralEncode::new(part(8, 2));
+        let (levels, pairs) = se.block(&[9, -9, 0, 4, 0, 0, 0, 7]).unwrap();
+        assert_eq!(levels, vec![9, -9]);
+        assert_eq!(pairs, vec![pair(1, 4), pair(3, 7)]);
+    }
+
+    #[test]
+    fn encode_appends_implicit_terminator_for_trailing_zeros() {
+        let se = SpectralEncode::new(part(8, 4));
+        let (levels, pairs) = se.block(&[1, 1, 1, 1, 0, 5, 0, 0]).unwrap();
+        assert_eq!(levels, vec![1, 1, 1, 1]);
+        // (1, 5) then the (2, 1) terminator for the two trailing zeros.
+        assert_eq!(pairs, vec![pair(1, 5), pair(2, 1)]);
+    }
+
+    #[test]
+    fn encode_whole_block_run_level_when_split_is_zero() {
+        let se = SpectralEncode::new(part(4, 0));
+        let (levels, pairs) = se.block(&[0, 4, 0, 2]).unwrap();
+        assert!(levels.is_empty());
+        assert_eq!(pairs, vec![pair(1, 4), pair(1, 2)]);
+    }
+
+    // ---------- SpectralEncode: error paths ----------
+
+    #[test]
+    fn encode_rejects_wrong_coeff_len() {
+        let se = SpectralEncode::new(part(8, 2));
+        let err = se.block(&[0; 7]).unwrap_err();
+        assert_eq!(
+            err,
+            SpectralEncodeError::CoeffLenMismatch {
+                expected: 8,
+                got: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn encode_rejects_negative_tail_coefficient() {
+        let se = SpectralEncode::new(part(6, 2));
+        let err = se.block(&[1, -1, 0, -4, 0, 0]).unwrap_err();
+        assert_eq!(
+            err,
+            SpectralEncodeError::NegativeTailCoefficient { index: 3 }
+        );
+    }
+
+    #[test]
+    fn encode_rejects_unrepresentable_tail() {
+        // Adjacent non-zeros in the tail: index 4 has no preceding
+        // zero (index 3 is non-zero).
+        let se = SpectralEncode::new(part(6, 2));
+        let err = se.block(&[1, 1, 0, 4, 4, 0]).unwrap_err();
+        assert_eq!(err, SpectralEncodeError::TailNotRepresentable { index: 4 });
+        // A non-zero at the very start of the tail is the same
+        // violation (run 0 relative to the tail window).
+        let err = se.block(&[1, 1, 4, 0, 0, 0]).unwrap_err();
+        assert_eq!(err, SpectralEncodeError::TailNotRepresentable { index: 2 });
+    }
+
+    // ---------- SpectralEncode: min_split_for ----------
+
+    #[test]
+    fn min_split_for_zero_when_tail_representable() {
+        assert_eq!(SpectralEncode::min_split_for(&[0, 4, 0, 2]), 0);
+        assert_eq!(SpectralEncode::min_split_for(&[0, 0, 0, 0]), 0);
+        assert_eq!(SpectralEncode::min_split_for(&[]), 0);
+    }
+
+    #[test]
+    fn min_split_for_pushes_leading_nonzero_into_head() {
+        // coeffs[0] != 0 → run 0 → head must cover it.
+        assert_eq!(SpectralEncode::min_split_for(&[5, 0, 4, 0]), 1);
+    }
+
+    #[test]
+    fn min_split_for_covers_adjacent_nonzeros_and_negatives() {
+        // Adjacent pair at (1, 2) → head through index 2; negative at
+        // index 4 → head through index 4; landing on index 5 (zero) is
+        // valid.
+        assert_eq!(SpectralEncode::min_split_for(&[0, 3, 7, 0, -2, 0, 4, 0]), 5);
+    }
+
+    #[test]
+    fn min_split_for_never_starts_tail_on_a_nonzero() {
+        // The negative at index 1 forces split >= 2, and index 2 is
+        // non-zero with a non-zero predecessor, so the head widens to
+        // 3 — the returned tail never begins on a non-zero.
+        assert_eq!(SpectralEncode::min_split_for(&[0, -1, 7, 0, 4, 0]), 3);
+    }
+
+    #[test]
+    fn min_split_for_yields_an_encodable_partition() {
+        // For a dense-head spectrum, encoding at exactly min_split
+        // succeeds and round-trips.
+        let coeffs = [3, -1, 4, 1, 0, 5, 0, 0, 2, 0, 0, 0];
+        let split = SpectralEncode::min_split_for(&coeffs);
+        let p = Partition::new(coeffs.len() as u32, split, false).unwrap();
+        let (levels, pairs) = SpectralEncode::new(p).block(&coeffs).unwrap();
+        let back = SpectralDecode::new(p).block(&levels, &pairs).unwrap();
+        assert_eq!(back, coeffs.to_vec());
+    }
+
+    // ---------- SpectralEncode ↔ SpectralDecode round trips ----------
+
+    #[test]
+    fn encode_decode_round_trip_various_shapes() {
+        let cases: Vec<(u32, Vec<i32>)> = vec![
+            (4, vec![3, -2, 0, 7]),             // all level mode
+            (2, vec![9, -9, 0, 4, 0, 0, 0, 7]), // natural tail fill
+            (4, vec![1, 1, 1, 1, 0, 5, 0, 0]),  // terminator tail
+            (0, vec![0, 4, 0, 2]),              // whole-block run-level
+            (0, vec![0, 0, 0, 0, 0, 0]),        // silent block
+            (3, vec![-1, 0, 2, 0, 0, 0]),       // trailing zeros only
+        ];
+        for (split, coeffs) in cases {
+            let p = Partition::new(coeffs.len() as u32, split, false).unwrap();
+            let (levels, pairs) = SpectralEncode::new(p).block(&coeffs).unwrap();
+            let back = SpectralDecode::new(p).block(&levels, &pairs).unwrap();
+            assert_eq!(back, coeffs, "split={split} coeffs={coeffs:?}");
+        }
+    }
+
+    #[test]
+    fn encode_decode_round_trip_full_block_size() {
+        // A sparse S256-shaped block at split 32, pseudo-random tail.
+        let m = 256usize;
+        let split = 32u32;
+        let mut coeffs = vec![0i32; m];
+        for (k, c) in coeffs.iter_mut().enumerate().take(split as usize) {
+            *c = (k as i32 % 7) - 3; // dense signed head
+        }
+        let mut state = 0x1234_5678_u32;
+        let mut i = split as usize + 1;
+        while i < m {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            coeffs[i] = ((state >> 26) + 1) as i32; // positive magnitude
+            i += 2 + (state as usize % 6);
+        }
+        let p = Partition::new(m as u32, split, false).unwrap();
+        let (levels, pairs) = SpectralEncode::new(p).block(&coeffs).unwrap();
+        let back = SpectralDecode::new(p).block(&levels, &pairs).unwrap();
+        assert_eq!(back, coeffs);
+    }
+
+    #[test]
+    fn encode_error_display_names_each_variant() {
+        let a = SpectralEncodeError::CoeffLenMismatch {
+            expected: 8,
+            got: 7,
+        };
+        assert!(format!("{a}").contains("partition total 8"));
+        let b = SpectralEncodeError::NegativeTailCoefficient { index: 3 };
+        assert!(format!("{b}").contains("index 3"));
+        let c = SpectralEncodeError::TailNotRepresentable { index: 4 };
+        assert!(format!("{c}").contains("widen the level-mode head"));
+        let dyn_err: &dyn std::error::Error = &c;
+        assert!(dyn_err.source().is_none());
     }
 
     // ---------- error Display / source ----------

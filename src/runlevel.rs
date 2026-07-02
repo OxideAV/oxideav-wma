@@ -245,6 +245,132 @@ pub fn expand_into(
     }
 }
 
+/// The encoder-side product of [`compress`]: the ordinary `(R, L)`
+/// pairs of a sparse coefficient sequence plus the count of zeros left
+/// after its last non-zero coefficient.
+///
+/// The trailing zeros are reported rather than encoded because the
+/// patent names **two** ways to close the block — "either a special
+/// ending signal… or a special event such as `(N, 1)`"
+/// [PATENT US6,223,162 — end-of-stream discussion] — and the choice
+/// between them belongs to the caller (see
+/// [`crate::terminator::TerminatorMechanism`]).
+/// [`Compressed::pairs_with_implicit_terminator`] realises the
+/// implicit-`(N, 1)` branch, the one [`expand_into`] recognises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compressed {
+    /// The ordinary `(R, L)` pairs, in coefficient order.
+    pub pairs: Vec<RunLevelPair>,
+    /// Zero-valued coefficients after the final non-zero one (the
+    /// whole block when no coefficient is non-zero).
+    pub trailing_zeros: u64,
+}
+
+impl Compressed {
+    /// The pair sequence with the patent's implicit `(N, 1)`
+    /// terminator appended when trailing zeros remain — exactly the
+    /// input [`expand_into`] decodes back to the original sequence.
+    ///
+    /// When the last non-zero coefficient falls on the block's final
+    /// slot (`trailing_zeros == 0`) no terminator is needed and the
+    /// ordinary pairs are returned unchanged, matching the walker's
+    /// natural-fill return path.
+    pub fn pairs_with_implicit_terminator(&self) -> Vec<RunLevelPair> {
+        let mut out = self.pairs.clone();
+        if self.trailing_zeros > 0 {
+            // `trailing_zeros` fits u32 for every patent block size
+            // (max 4096); a hand-built larger sequence saturates,
+            // which `debug_assert` guards during development.
+            debug_assert!(self.trailing_zeros <= u32::MAX as u64);
+            let run = u32::try_from(self.trailing_zeros).unwrap_or(u32::MAX);
+            out.push(RunLevelPair {
+                run,
+                level: NonZeroU32::MIN,
+            });
+        }
+        out
+    }
+}
+
+/// Rejection reason for [`compress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompressError {
+    /// The coefficient at `index` is non-zero but no zero precedes it
+    /// (since the block start or the previous non-zero), so its run
+    /// would be `0` — outside the patent-disclosed `{1..Rm}` run set
+    /// (US6,223,162 Claim 1). Per the patent's own rationale this is
+    /// exactly the dense low-frequency statistic the **level mode**
+    /// exists for: the encoder's mode selector must widen the
+    /// level-mode head past this coefficient instead of run-level
+    /// coding it.
+    NoPrecedingZero {
+        /// Zero-based index of the unrepresentable non-zero.
+        index: usize,
+    },
+}
+
+impl core::fmt::Display for CompressError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CompressError::NoPrecedingZero { index } => write!(
+                f,
+                "oxideav-wma::runlevel: non-zero coefficient at index {index} has no preceding zero — run 0 is outside the patent-disclosed {{1..Rm}} set; widen the level-mode head instead",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompressError {}
+
+/// Compress a sparse coefficient sequence (non-negative magnitudes)
+/// into its `(R, L)` pair sequence — the encoder-side inverse of
+/// [`expand_into`].
+///
+/// Walks the sequence once: each non-zero coefficient of magnitude `L`
+/// preceded by `R ≥ 1` zeros (counted since the block start or the
+/// previous non-zero) emits the pair `(R, L)`
+/// [PATENT US6,223,162 — Claim 1: "a run of R first-value symbols and
+/// an adjacent symbol of value L"; Claim 2: "the first value is zero,
+/// and L is non-zero"]. Zeros after the final non-zero are returned as
+/// [`Compressed::trailing_zeros`] for the caller's terminator choice.
+///
+/// Sign handling is out of scope exactly as in [`expand_into`]: the
+/// input carries magnitudes (`u32`), the sign-bit placement being
+/// `[GAP]` per §6 of the trace.
+///
+/// # Errors
+///
+/// [`CompressError::NoPrecedingZero`] if a non-zero coefficient has no
+/// preceding zero — its run would be `0`, outside the patent's
+/// `{1..Rm}` set. Such a coefficient belongs in the level-mode head
+/// (see [`crate::spectral::SpectralEncode`]).
+pub fn compress(coeffs: &[u32]) -> Result<Compressed, CompressError> {
+    let mut pairs = Vec::new();
+    let mut run: u64 = 0;
+    for (index, &c) in coeffs.iter().enumerate() {
+        if c == 0 {
+            run += 1;
+            continue;
+        }
+        if run == 0 {
+            return Err(CompressError::NoPrecedingZero { index });
+        }
+        // `run` counts positions inside one block, so it fits u32 for
+        // every patent block size; saturate defensively for hand-built
+        // oversized inputs.
+        let run_u32 = u32::try_from(run).unwrap_or(u32::MAX);
+        pairs.push(RunLevelPair {
+            run: run_u32,
+            level: NonZeroU32::new(c).expect("checked non-zero above"),
+        });
+        run = 0;
+    }
+    Ok(Compressed {
+        pairs,
+        trailing_zeros: run,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +571,122 @@ mod tests {
     fn expand_into_panics_when_out_is_too_short() {
         let mut out = [0u32; 2];
         let _ = expand_into(&[], 4, &mut out);
+    }
+
+    // ---------- compress: encoder-side inverse of expand_into ----------
+
+    #[test]
+    fn compress_emits_pair_per_isolated_nonzero() {
+        // [0, 4, 0, 0, 2, 0, 0, 0, 0, 9] — the module's round-trip
+        // spectrum — compresses to (1,4) (2,2) (4,9) with no trailing
+        // zeros.
+        let c = compress(&[0, 4, 0, 0, 2, 0, 0, 0, 0, 9]).unwrap();
+        assert_eq!(c.pairs, vec![pair(1, 4), pair(2, 2), pair(4, 9)]);
+        assert_eq!(c.trailing_zeros, 0);
+    }
+
+    #[test]
+    fn compress_reports_trailing_zeros() {
+        let c = compress(&[0, 7, 0, 3, 0, 0, 9, 0]).unwrap();
+        assert_eq!(c.pairs, vec![pair(1, 7), pair(1, 3), pair(2, 9)]);
+        assert_eq!(c.trailing_zeros, 1);
+    }
+
+    #[test]
+    fn compress_all_zero_block_is_all_trailing() {
+        let c = compress(&[0, 0, 0, 0]).unwrap();
+        assert!(c.pairs.is_empty());
+        assert_eq!(c.trailing_zeros, 4);
+    }
+
+    #[test]
+    fn compress_empty_block() {
+        let c = compress(&[]).unwrap();
+        assert!(c.pairs.is_empty());
+        assert_eq!(c.trailing_zeros, 0);
+    }
+
+    #[test]
+    fn compress_rejects_leading_nonzero() {
+        // A non-zero at index 0 has run 0 — outside {1..Rm}.
+        assert_eq!(
+            compress(&[5, 0, 0]),
+            Err(CompressError::NoPrecedingZero { index: 0 })
+        );
+    }
+
+    #[test]
+    fn compress_rejects_adjacent_nonzeros() {
+        // The second of two adjacent non-zeros has run 0.
+        assert_eq!(
+            compress(&[0, 3, 7, 0]),
+            Err(CompressError::NoPrecedingZero { index: 2 })
+        );
+    }
+
+    #[test]
+    fn compress_error_display_cites_the_run_set() {
+        let e = CompressError::NoPrecedingZero { index: 2 };
+        let s = format!("{e}");
+        assert!(s.contains("index 2"));
+        assert!(s.contains("{1..Rm}"));
+        let dyn_err: &dyn std::error::Error = &e;
+        assert!(dyn_err.source().is_none());
+    }
+
+    #[test]
+    fn pairs_with_implicit_terminator_appends_n1_only_when_needed() {
+        // Trailing zeros → an (N, 1) pair is appended.
+        let c = compress(&[0, 5, 0, 0, 0]).unwrap();
+        assert_eq!(c.trailing_zeros, 3);
+        assert_eq!(
+            c.pairs_with_implicit_terminator(),
+            vec![pair(1, 5), pair(3, 1)]
+        );
+        // Natural fill → pairs unchanged.
+        let c = compress(&[0, 5]).unwrap();
+        assert_eq!(c.trailing_zeros, 0);
+        assert_eq!(c.pairs_with_implicit_terminator(), vec![pair(1, 5)]);
+    }
+
+    #[test]
+    fn compress_expand_round_trip() {
+        // compress → (implicit terminator) → expand_into recovers the
+        // original sequence for a spread of shapes.
+        let cases: Vec<Vec<u32>> = vec![
+            vec![0, 4, 0, 0, 2, 0, 0, 0, 0, 9],
+            vec![0, 7, 0, 3, 0, 0, 9, 0],
+            vec![0, 0, 0, 0],
+            vec![0, 1],
+            vec![],
+            vec![0, u32::MAX, 0],
+        ];
+        for original in cases {
+            let c = compress(&original).unwrap();
+            let feed = c.pairs_with_implicit_terminator();
+            let mut out = vec![0u32; original.len()];
+            expand_into(&feed, original.len() as u64, &mut out).unwrap();
+            assert_eq!(out, original, "case {original:?}");
+        }
+    }
+
+    #[test]
+    fn compress_expand_round_trip_pseudorandom_sparse() {
+        // A deterministic pseudo-random sparse sequence: every third
+        // slot at most carries a non-zero, so runs are always >= 1.
+        let mut seq = vec![0u32; 256];
+        let mut state = 0x2545F491_u32;
+        let mut i = 1usize;
+        while i < seq.len() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            seq[i] = (state >> 24) + 1; // non-zero magnitude
+            i += 2 + (state as usize % 5);
+        }
+        let c = compress(&seq).unwrap();
+        let feed = c.pairs_with_implicit_terminator();
+        let mut out = vec![0u32; seq.len()];
+        expand_into(&feed, seq.len() as u64, &mut out).unwrap();
+        assert_eq!(out, seq);
     }
 
     // ---------- Round-trip: encode (manually) → decode (expand_into) ----------

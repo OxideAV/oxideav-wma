@@ -470,6 +470,17 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`SpectralEncode`] (in [`spectral`]) and [`runlevel::compress`] —
+//!   the §6 entropy stage run **forward**: `compress` is the
+//!   encoder-side inverse of `expand_into` (each non-zero of magnitude
+//!   `L` preceded by `R ≥ 1` zeros emits `(R, L)` per US6,223,162
+//!   Claims 1–2, trailing zeros reported for the caller's terminator
+//!   choice), and `SpectralEncode` mirrors [`SpectralDecode`] — head
+//!   copied verbatim as level-mode symbols, tail compressed to pairs
+//!   with the implicit `(N, 1)` terminator appended when trailing
+//!   zeros remain. [`SpectralEncode::min_split_for`] exposes the
+//!   structural floor the `{1..Rm}` run set imposes on the partition
+//!   boundary; the shipping encoder's tuned rule stays `[GAP]`.
 //! * [`quant`] — the §4 patent-disclosed **encoder-side forward
 //!   quantization step**: `q[k] = round(coeff[k] / (Q[d(k)] * step))`
 //!   (US7,930,171 overall step-size description; US7,383,180 quantizer
@@ -556,6 +567,9 @@
 //! [`StereoBlockParams`]: frame::StereoBlockParams
 //! [`quant`]: crate::quant
 //! [`QuantStage`]: quant::QuantStage
+//! [`SpectralEncode`]: spectral::SpectralEncode
+//! [`SpectralEncode::min_split_for`]: spectral::SpectralEncode::min_split_for
+//! [`runlevel::compress`]: crate::runlevel::compress
 //! [`setup`]: crate::setup
 //! [`SetupParams`]: setup::SetupParams
 //! [`SetupParams::high_frequency`]: setup::SetupParams::high_frequency
@@ -613,7 +627,7 @@ pub use overlap_add::{InvalidInputLen, OverlapAdd};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use quant::{InvalidQuant, QuantStage};
 pub use setup::SetupParams;
-pub use spectral::{SpectralDecode, SpectralError};
+pub use spectral::{SpectralDecode, SpectralEncode, SpectralEncodeError, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use stereo_decode::{StereoAssemblyError, StereoChannel, StereoDecodeError, StereoDecoder};
 pub use stereo_synthesis::{StereoBlock, StereoSynthesis};

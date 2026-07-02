@@ -8,6 +8,40 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `runlevel::compress` + `spectral::SpectralEncode` — the §6 entropy
+  stage run **forward**, the paired encoder side of `expand_into` /
+  `SpectralDecode`. `compress` walks a sparse magnitude sequence once
+  and emits one `(R, L)` pair per non-zero preceded by `R ≥ 1` zeros
+  (US6,223,162 Claim 1 "a run of R first-value symbols and an adjacent
+  symbol of value L" / Claim 2 "the first value is zero, and L is
+  non-zero"), returning trailing zeros in a typed `Compressed` carrier
+  rather than encoding them — the patent names two block-closing
+  alternatives, and `Compressed::pairs_with_implicit_terminator`
+  realises the implicit-`(N, 1)` branch the walker recognises. A
+  non-zero with no preceding zero has run `0`, outside the patent's
+  `{1..Rm}` set, and surfaces as `CompressError::NoPrecedingZero` —
+  per the patent's own rationale that dense statistic is what the
+  level mode exists for. `SpectralEncode` mirrors `SpectralDecode`
+  accessor-for-accessor: `block(&[i32])` splits at the caller-supplied
+  `Partition` boundary (the tuned rule is `[GAP]` per §6), copies the
+  head verbatim (already signed), and compresses the tail
+  (magnitudes only — a negative tail coefficient rejects with
+  `NegativeTailCoefficient`, documenting the §6 sign gap).
+  `SpectralEncode::min_split_for` computes the structural **floor**
+  the `{1..Rm}` set imposes on the mode boundary (every tail non-zero
+  needs a preceding zero; signed values stay in the head) — the
+  level-mode rationale emerging as a hard constraint, explicitly not
+  the shipping encoder's tuned choice. 26 unit tests cover the
+  compress walk (isolated non-zeros, trailing zeros, all-zero/empty
+  blocks, both reject paths, terminator-only-when-needed), the
+  compress→expand round trip (hand shapes + pseudo-random sparse
+  S256), the encode accessor mirror, all four encode happy paths,
+  all three encode reject paths, the `min_split_for` floor cases and
+  its encodability guarantee, and full `SpectralEncode`→
+  `SpectralDecode` round trips (shape table + S256 with dense signed
+  head). Crate test count: 565 → 591. Re-exports: `SpectralEncode`,
+  `SpectralEncodeError`.
+
 - `quant` module — the §4 patent-disclosed **encoder-side forward
   quantization step**, the paired forward of the decoder's `invquant` /
   `dequant` stages (US7,930,171 overall step-size description:
