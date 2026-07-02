@@ -470,6 +470,16 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`analysis`] — the §3 encoder-side **time-domain analysis stage**
+//!   run forward: the stateful mirror of [`synthesis`] wiring frame
+//!   formation (previous `M` ‖ fresh `M`, the 50% TDAC overlap),
+//!   the analysis window `ha(n)`, and [`Mlt::forward`] into one
+//!   [`Analysis`] carrier per [`BlockSize`] (US7,930,171 FIG.3
+//!   partition into overlapping blocks; US7,383,180 modules 520/530).
+//!   [`Analysis::flush`] closes the stream with one all-zero block so
+//!   the paired decode chain drains the last real samples; the full
+//!   Analysis → Synthesis chain reproduces the input exactly after an
+//!   `M`-sample leading latency (cross-module tests pin it at 1e-9).
 //! * [`SpectralEncode`] (in [`spectral`]) and [`runlevel::compress`] —
 //!   the §6 entropy stage run **forward**: `compress` is the
 //!   encoder-side inverse of `expand_into` (each non-zero of magnitude
@@ -567,6 +577,9 @@
 //! [`StereoBlockParams`]: frame::StereoBlockParams
 //! [`quant`]: crate::quant
 //! [`QuantStage`]: quant::QuantStage
+//! [`analysis`]: crate::analysis
+//! [`Analysis`]: analysis::Analysis
+//! [`Analysis::flush`]: analysis::Analysis::flush
 //! [`SpectralEncode`]: spectral::SpectralEncode
 //! [`SpectralEncode::min_split_for`]: spectral::SpectralEncode::min_split_for
 //! [`runlevel::compress`]: crate::runlevel::compress
@@ -580,6 +593,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod analysis;
 pub mod bands;
 pub mod block;
 pub mod channel_decision;
@@ -610,6 +624,7 @@ pub mod terminator;
 pub mod transient;
 pub mod window;
 
+pub use analysis::{Analysis, InvalidSampleLen};
 pub use bands::{BandPlan, BandPolicy};
 pub use block::BlockSize;
 pub use channel_decision::{ChannelMode, OpenLoopDecision};

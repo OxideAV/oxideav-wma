@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `analysis` module — the §3 patent-disclosed **encoder-side
+  time-domain analysis stage**, the stateful mirror of `synthesis`:
+  frame formation (previous `M` samples ‖ fresh `M` samples, the 50%
+  overlap the oddly-stacked TDAC bank is defined by) → analysis window
+  `ha(n)` → forward MLT (US7,930,171 FIG.3 "partitions a frame of
+  audio samples into overlapping sub-frame blocks"; US7,383,180
+  partitioner 520 / frequency transformer 530; US6,029,126 /
+  US6,240,380 2M windowing over M-length blocks). `Analysis::block`
+  consumes `M` fresh time-domain samples and emits `M` spectral
+  coefficients, buffering the block across calls — the encoder-side
+  counterpart of the decoder's overlap-add carry; `Analysis::flush`
+  closes the stream with one all-zero block so the last real block's
+  samples enter their trailing frame (an `n`-block signal encodes to
+  `n + 1` coefficient blocks), and `Analysis::reset` clears the buffer
+  at a discontinuity. Constructor reuses `synthesis::MismatchedBlockSize`
+  so a mirrored encoder/decoder pair fails identically; the length
+  contract surfaces as the new `InvalidSampleLen`. The stage adds no
+  arithmetic of its own (a test pins two-block equality with the
+  hand-wired window→forward chain). Block-size *decisions* stay
+  caller-side (§3 transient-switch form is `[GAP]`); the stage runs
+  one uniform `BlockSize`. 11 unit tests cover construction accept /
+  reject, the length contract with its no-mutation guarantee, input
+  buffering, hand-wired-chain equality, flush (zero-block encode +
+  buffer zeroing), reset-equals-fresh, every `BlockSize::ALL` member,
+  error `Display`, and the headline cross-module property: the full
+  Analysis → Synthesis chain reproduces a pseudo-random input exactly
+  (1e-9) after the chain's `M`-sample leading latency, at S256 and
+  S512. Crate test count: 591 → 602. Re-exports: `Analysis`,
+  `InvalidSampleLen`.
+
 - `runlevel::compress` + `spectral::SpectralEncode` — the §6 entropy
   stage run **forward**, the paired encoder side of `expand_into` /
   `SpectralDecode`. `compress` walks a sparse magnitude sequence once
