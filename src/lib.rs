@@ -470,6 +470,21 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`stereo_encode`] — the §8 patent-disclosed **full two-channel
+//!   encoder-block chain**, the stereo analogue of [`encode`] and the
+//!   forward mirror of [`stereo_decode`]: [`StereoEncoder`] applies
+//!   the §5 forward sum/difference fold in its §8-fixed position
+//!   *before* the per-channel chains — gated by the caller-supplied
+//!   per-block [`ChannelMode`], whose flag layout stays `[GAP]` — then
+//!   runs two complete [`ChannelEncoder`] chains (channel 0 first, so
+//!   its error surfaces before channel 1's buffer advances).
+//!   [`StereoEncodedBlock`] feeds
+//!   [`stereo_decode::StereoDecoder::block`] argument-for-argument
+//!   (plus an `into_stereo_block_params` bridge to the [`frame`]
+//!   drivers); constant-mode streams round-trip within the quantizer
+//!   bound for both modes (tests pin it), and the §5 energy-
+//!   concentration rationale is observable (a correlated pair's side
+//!   channel quantizes far sparser than its mid).
 //! * [`encode`] — the §8 patent-disclosed **full single-channel
 //!   encoder-block chain**, the forward mirror of [`decode`]
 //!   (Thumpudi-180 FIG.5: window + forward MLT → uniform scalar
@@ -596,6 +611,9 @@
 //! [`Analysis`]: analysis::Analysis
 //! [`Analysis::flush`]: analysis::Analysis::flush
 //! [`encode`]: crate::encode
+//! [`stereo_encode`]: crate::stereo_encode
+//! [`StereoEncoder`]: stereo_encode::StereoEncoder
+//! [`StereoEncodedBlock`]: stereo_encode::StereoEncodedBlock
 //! [`ChannelEncoder`]: encode::ChannelEncoder
 //! [`EncodedBlock`]: encode::EncodedBlock
 //! [`EncodedBlock::into_block_params`]: encode::EncodedBlock::into_block_params
@@ -638,6 +656,7 @@ pub mod spectral;
 pub mod step_size;
 pub mod stereo;
 pub mod stereo_decode;
+pub mod stereo_encode;
 pub mod stereo_synthesis;
 pub mod synthesis;
 pub mod terminator;
@@ -666,6 +685,7 @@ pub use setup::SetupParams;
 pub use spectral::{SpectralDecode, SpectralEncode, SpectralEncodeError, SpectralError};
 pub use step_size::{OverallStepSize, PerBlockStep};
 pub use stereo_decode::{StereoAssemblyError, StereoChannel, StereoDecodeError, StereoDecoder};
+pub use stereo_encode::{StereoEncodeError, StereoEncodedBlock, StereoEncoder};
 pub use stereo_synthesis::{StereoBlock, StereoSynthesis};
 pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};

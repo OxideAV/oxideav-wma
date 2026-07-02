@@ -147,6 +147,13 @@ impl ChannelEncoder {
         })
     }
 
+    /// Block size `M` for this encoder (the per-call fresh-sample
+    /// input count every stage shares).
+    #[inline]
+    pub const fn block_size(&self) -> crate::block::BlockSize {
+        self.analysis.block_size()
+    }
+
     /// `M`, the per-call fresh-sample input length (equal to the
     /// shared per-stage coefficient count).
     #[inline]

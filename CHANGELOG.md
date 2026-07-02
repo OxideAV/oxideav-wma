@@ -8,6 +8,42 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `stereo_encode` module — the §8 patent-disclosed **full two-channel
+  encoder-block chain**, the stereo analogue of `encode` and the
+  forward mirror of `stereo_decode` (§8 encoder pipeline: `[optional
+  multi-channel pre-process / sum-difference]` drawn *before* the
+  per-channel partition/MLT; US7,930,171 / US7,502,743 sum/difference).
+  `StereoEncoder` wires two complete `ChannelEncoder` chains behind the
+  §5 forward fold (`stereo::forward_in_place`), applied **only** when
+  the caller-supplied per-block `ChannelMode` is `SumDifference` (the
+  flag's v1/v2 layout is `[GAP]`, so the typed mode travels with the
+  emitted block) — under joint coding the two frame buffers carry the
+  mid/side signals, exactly the signals the paired decoder's
+  overlap-add carriers hold. Channel 0 encodes first so its error
+  surfaces before channel 1's buffer advances (the mirror of the
+  decoder's lock-step guarantee), and both input lengths are
+  pre-checked before the fold so a length error never advances either
+  buffer. `StereoEncodedBlock { ch0, ch1, mode }` feeds
+  `StereoDecoder::block` argument-for-argument, with
+  `into_stereo_block_params(band_count)` bridging to the frame
+  drivers; `flush(mode)` closes both channels (an all-zero pair folds
+  to an all-zero pair, so the flush samples are mode-independent);
+  constructor reuses `StereoAssemblyError`, per-block failures surface
+  as the new `StereoEncodeError { channel, source }`. 11 unit tests
+  cover construction accept/reject, both per-channel length pre-checks
+  with the no-advance guarantee, the adds-no-arithmetic equality with
+  the hand-wired fold-plus-two-chains mirror (both modes), constant-
+  mode encode→decode round trips against `StereoDecoder` (Independent
+  + SumDifference, within the quantizer bound after the `M`-sample
+  latency), the §5 energy-concentration rationale observable as the
+  side channel quantizing away for a near-identical pair, flush mode
+  carriage, reset-equals-fresh, `into_stereo_block_params` plumbing,
+  and error `Display`/`source`. Also adds the
+  `ChannelEncoder::block_size()` accessor mirroring
+  `ChannelDecoder::block_size()`. Crate test count: 616 → 628.
+  Re-exports: `StereoEncoder`, `StereoEncodedBlock`,
+  `StereoEncodeError`.
+
 - `encode` module — the §8 patent-disclosed **full single-channel
   encoder-block chain**, the forward mirror of `decode` (Thumpudi-180
   FIG.5 encoder pipeline: *window + forward MLT → uniform scalar
