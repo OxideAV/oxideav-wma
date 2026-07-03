@@ -733,6 +733,7 @@ pub mod excitation;
 pub mod exponent_bands;
 pub mod frame;
 pub mod frame_encode;
+pub mod gain_ladder;
 pub mod header;
 pub mod huffman;
 pub mod invquant;
@@ -776,6 +777,7 @@ pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder
 pub use frame_encode::{
     FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
 };
+pub use gain_ladder::GainLadderError;
 pub use header::{Version, WmaHeader};
 pub use huffman::{HuffmanCode, HuffmanError};
 pub use invquant::BandScale;
