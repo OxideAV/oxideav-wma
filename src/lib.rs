@@ -484,6 +484,15 @@
 //!   decode run over the bit cursors. Codes built here are
 //!   self-consistent, **not** wire-compatible — the literal v1/v2
 //!   tables stay `[GAP]`.
+//! * [`matrix_coding`] — the §4 FIG.1 **matrix side-information chain
+//!   down to bits**: [`MatrixCoder`] assembles US7,930,171's
+//!   direct-compression technique end-to-end — step 110 uniform
+//!   quantize, step 120 differential coding (via [`qmatrix`]), step
+//!   130 Huffman over a caller-supplied bounded delta alphabet (the
+//!   real "scale table (121 entries)" contents are `[GAP]`) — with
+//!   the exact-quantized-grid decoder reconstruction the §4
+//!   side-information contract requires, and the US7,502,743
+//!   zero-delta padding efficiency detail pinned by test.
 //! * [`paircode`] — the §6 entropy back end assembled **end-to-end to
 //!   bits**: [`RunLevelCoder`] derives the codeword alphabet from a
 //!   [`CodebookGrid`] (every in-codebook pairing + one escape symbol
@@ -654,6 +663,8 @@
 //! [`BitWriter`]: bitio::BitWriter
 //! [`BitReader`]: bitio::BitReader
 //! [`HuffmanCode`]: huffman::HuffmanCode
+//! [`matrix_coding`]: crate::matrix_coding
+//! [`MatrixCoder`]: matrix_coding::MatrixCoder
 //! [`paircode`]: crate::paircode
 //! [`RunLevelCoder`]: paircode::RunLevelCoder
 //! [`EscapeWidths`]: paircode::EscapeWidths
@@ -696,6 +707,7 @@ pub mod frame_encode;
 pub mod header;
 pub mod huffman;
 pub mod invquant;
+pub mod matrix_coding;
 pub mod mlt;
 pub mod noisefill;
 pub mod overlap_add;
@@ -734,6 +746,7 @@ pub use frame_encode::{
 pub use header::{Version, WmaHeader};
 pub use huffman::{HuffmanCode, HuffmanError};
 pub use invquant::BandScale;
+pub use matrix_coding::{MatrixCodeError, MatrixCoder};
 pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};

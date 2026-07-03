@@ -8,6 +8,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `matrix_coding` module — the §4 FIG.1 **quantization-matrix
+  side-information chain assembled down to bits**, the most directly
+  bitstream-relevant disclosure in the trace ("the encoder transmits
+  [the matrices] as side information in the bitstream", US7,930,171):
+  `MatrixCoder` runs the direct-compression technique end-to-end —
+  step 110 **uniform quantize** each element (`quant::quantize_sample`
+  at unit weight against a caller step), step 120 **differentially
+  code** relative to preceding elements (`qmatrix::differential_encode`
+  / `differential_decode`, seed explicit), step 130 **Huffman-code**
+  the deltas (US7,930,171 steps 110/120/130; US7,502,743) over a
+  caller-supplied contiguous bounded delta alphabet emitted through
+  `bitio`. The real "scale Huffman table (121 entries)" contents are
+  `[GAP]` per the trace, so range and weights are parameters —
+  self-consistent, not wire-compatible — and a delta outside the
+  alphabet rejects (`DeltaOutOfRange`; no escape convention is
+  fabricated). `compress_matrix` returns the quantized elements so the
+  encoder can mirror the decoder's reconstruction (the §4
+  side-information contract), and `decompress_matrix` reconstructs
+  each element to exactly `q * step` (within half a step of the
+  original). 8 unit tests cover alphabet validation (empty, i32
+  overflow, accessors), the exact steps-120+130 round trip, the
+  out-of-alphabet reject, the US7,502,743 zero-delta-padding
+  efficiency detail (padded mask codes strictly fewer bits than the
+  raw swings), the full-chain half-step reconstruction bound, the
+  exact quantized-grid decoder property, the truncated-stream error
+  path, and error `Display`/`source`. Crate test count: 685 → 693.
+  Re-exports: `MatrixCoder`, `MatrixCodeError`.
+
 - `paircode` module — the §6 entropy back end assembled **end-to-end
   to bits**: `RunLevelCoder` runs the patent's FIG.6 construction on a
   caller-supplied `CodebookGrid` — the codeword alphabet is every
