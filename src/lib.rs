@@ -484,6 +484,17 @@
 //!   decode run over the bit cursors. Codes built here are
 //!   self-consistent, **not** wire-compatible — the literal v1/v2
 //!   tables stay `[GAP]`.
+//! * [`masking`] — the §4 encoder-side **Bark-scale masking model**
+//!   (US6,240,380 FIGS.13–14, box 1318): [`bark_from_hz`] (the
+//!   textbook Bark mapping, `[DSP]` tier), [`bin_frequency`] (MLT
+//!   bin centres), [`SpreadingSlopes`] with the patent-pinned
+//!   `PATENT` pair (25 dB/Bark toward lower frequencies, 10 dB/Bark
+//!   toward higher — masking spreads farther upward) driving the
+//!   max-combined triangular [`spread_masking`] curve, and the
+//!   optional [`partial_whitening`] exponent β (caller-supplied
+//!   tuning) compressing the weighting's dynamic range between the
+//!   β = 1 identity and β = 0 flat endpoints. Encoder analysis only:
+//!   it shapes the §4 matrix, never the bitstream.
 //! * [`matrix_coding`] — the §4 FIG.1 **matrix side-information chain
 //!   down to bits**: [`MatrixCoder`] assembles US7,930,171's
 //!   direct-compression technique end-to-end — step 110 uniform
@@ -663,6 +674,12 @@
 //! [`BitWriter`]: bitio::BitWriter
 //! [`BitReader`]: bitio::BitReader
 //! [`HuffmanCode`]: huffman::HuffmanCode
+//! [`masking`]: crate::masking
+//! [`bark_from_hz`]: masking::bark_from_hz
+//! [`bin_frequency`]: masking::bin_frequency
+//! [`SpreadingSlopes`]: masking::SpreadingSlopes
+//! [`spread_masking`]: masking::spread_masking
+//! [`partial_whitening`]: masking::partial_whitening
 //! [`matrix_coding`]: crate::matrix_coding
 //! [`MatrixCoder`]: matrix_coding::MatrixCoder
 //! [`paircode`]: crate::paircode
@@ -707,6 +724,7 @@ pub mod frame_encode;
 pub mod header;
 pub mod huffman;
 pub mod invquant;
+pub mod masking;
 pub mod matrix_coding;
 pub mod mlt;
 pub mod noisefill;
@@ -746,6 +764,7 @@ pub use frame_encode::{
 pub use header::{Version, WmaHeader};
 pub use huffman::{HuffmanCode, HuffmanError};
 pub use invquant::BandScale;
+pub use masking::SpreadingSlopes;
 pub use matrix_coding::{MatrixCodeError, MatrixCoder};
 pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};

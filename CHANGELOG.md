@@ -8,6 +8,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `masking` module — the §4 encoder-side **Bark-scale masking model**
+  (US6,240,380 FIGS.13–14, box 1318: "the weighting function follows
+  an auditory masking curve computed on the Bark scale, with a
+  simplified asymmetric spreading function (−25 dB/Bark left,
+  +10 dB/Bark right) and an optional partial-whitening exponent β").
+  `bark_from_hz` realises the Bark mapping via the standard public
+  psychoacoustic formula (`[DSP]` tier — the patent pins that the
+  curve lives on the Bark scale, the scale itself is textbook);
+  `bin_frequency` gives the MLT bin centres `(k + ½)·sr/2M` that tile
+  0..Nyquist (the wiki's `high frequency = sr/2` ceiling);
+  `SpreadingSlopes` carries the patent-pinned `PATENT` pair (25
+  dB/Bark toward lower frequencies, 10 toward higher — the disclosed
+  asymmetry, masking spreading farther upward) and `spread_masking`
+  combines every masker's triangular fall-off by per-position maximum;
+  `partial_whitening` / `_in_place` apply the optional exponent β
+  (caller-supplied encoder tuning, never fabricated) with the β = 1
+  identity and β = 0 flat endpoints and zero-stays-zero. Encoder
+  analysis only — it shapes the §4 weighting matrix, is carried by
+  `matrix_coding`, and touches no bitstream field. 15 unit tests cover
+  Bark monotonicity + conventional landmarks, bin-frequency
+  tiling/spacing + zero-M panic, the patent slope values, the
+  single-masker asymmetric triangle, max-combination across maskers,
+  empty/mismatch handling, both whitening endpoints,
+  dynamic-range compression at β = ½, in-place ↔ fresh equivalence,
+  the negative-β / negative-weight panics, and an end-to-end
+  bins → barks → spread → whiten weighting-pipeline shape check.
+  Crate test count: 693 → 708. Re-export: `SpreadingSlopes`.
+
 - `matrix_coding` module — the §4 FIG.1 **quantization-matrix
   side-information chain assembled down to bits**, the most directly
   bitstream-relevant disclosure in the trace ("the encoder transmits
