@@ -84,38 +84,70 @@ each pinned to the patent it is disclosed in:
   plus the [`WmaHeader::long_block_size`] bridge mapping the header's
   `frame_length_bits` exponent onto the typed transform [`BlockSize`]
   that constructs the per-block decoders.
+* **Encoder side (§8 FIG.5 — the forward mirror of every decode
+  stage)**: [`analysis`] (frame formation at 50% TDAC overlap → `ha(n)`
+  window → forward MLT, the stateful mirror of [`synthesis`]),
+  [`quant`] the §4 forward uniform scalar quantizer mirroring
+  [`dequant`] field-for-field, [`runlevel`]`::compress` +
+  [`SpectralEncode`] the §6 entropy stage run forward (with
+  `min_split_for`, the structural floor the `{1..Rm}` run set imposes
+  on the mode boundary), [`ChannelEncoder`] / [`StereoEncoder`] the
+  single/two-channel §8 chains (the §5 sum/difference fold in its
+  pre-analysis position, per-block `ChannelMode` caller-supplied), and
+  [`FrameEncoder`] / [`StereoFrameEncoder`] the §2 frame-loop drivers.
+  Tests pin decode(encode(PCM)) ≡ PCM after the chain's `M`-sample
+  latency within the quantizer's `divisor/2` bound — mono and stereo,
+  block- and frame-level — and that the bound shrinks with the step.
+* **Bit-level entropy machinery**: [`bitio`] MSB-first
+  `BitWriter`/`BitReader` (the packing order of the real bitstream is
+  `[GAP]`; the convention is a documented realization detail with one
+  swap point), [`huffman`] the §6 code-book construction *method*
+  (canonical Huffman from caller-supplied weights; `from_lengths` is
+  the plug-in point for staged real tables, Kraft equality validated),
+  [`paircode`] the grid-driven joint `(R, L)` coder with escape
+  literals at caller-supplied `[GAP]` widths, and [`matrix_coding`]
+  the §4 FIG.1 matrix side-information chain (uniform-quantize →
+  differential → Huffman) down to bits. All of it is self-consistent,
+  **not** wire-compatible: the literal WMA tables stay `[GAP]`.
+* Encoder analysis: [`masking`] the §4 Bark-scale masking model with
+  the patent-pinned asymmetric spreading slopes (25 dB/Bark toward
+  lower frequencies, 10 toward higher) and the optional
+  partial-whitening exponent β.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 544 unit tests.
+guessing. The crate carries 708 unit tests.
 
-With the frame loop and stream-setup stages in place, the decode chain
-is assembled **end-to-end from already-demuxed per-block symbols to
-frame PCM**: a caller can parse a [`WmaHeader`], derive its
-[`SetupParams`] and [`BlockSize`], build a per-channel/stereo decoder at
-that size, and drive a whole frame's worth of blocks to PCM. The one
-remaining layer is the bit-level reader (see below).
+With the encoder mirror in place the crate is a **complete,
+self-consistent codec loop at the typed-symbol level**: PCM → analysis
+→ quantize → run-level symbols → (optionally, self-consistent bits via
+[`paircode`]/[`matrix_coding`]) → entropy decode → dequantize →
+noise-fill → synthesis → PCM, round-tripping within the §4 quantizer
+bound. What separates this from a *WMA* codec is wire compatibility
+(see below).
 
 ### What is NOT implemented
 
-There is **no bitstream-byte → PCM decode**, because the bit-level layer
-is undocumented in the staged material. The wiki snapshot lists the
+There is **no real-WMA bitstream-byte → PCM decode** (and no
+wire-compatible encode), because the literal wire format is
+undocumented in the staged material. The wiki snapshot lists the
 *names* of WMA's data tables — the gain / LSP / scale / coefficient /
 level Huffman tables, the per-rate exponent-band partition tables, and
 the critical-frequency curves — but does not contain the tables
 themselves, and the patent trace marks the literal codeword tables, the
-per-process DEMUX, the sign-bit placement, the per-band
-noise/cutoff flag encoding, and the superframe/packet byte layout all
-`[GAP]` (§9). Those are the entropy reader's inputs; without them the
-crate cannot turn a real WMA packet's bytes into the per-block symbols
-the assembled chain consumes. Filling them needs either a spec PDF or a
-clean-room binary-side trace staged under `docs/audio/wma/`. The crate
-is therefore a fully-assembled decode chain whose **front-end bit reader
-is the single missing stage**; the [`oxideav_core`] registration will
-land once that stage is implementable.
+per-process DEMUX, the bit/byte packing order, the sign-bit placement,
+the per-band noise/cutoff flag encoding, and the superframe/packet byte
+layout all `[GAP]` (§9). The *machinery* for all of it now exists —
+[`bitio`] cursors, [`huffman`]`::from_lengths` as the direct plug-in
+point for real code-length tables, [`paircode`]/[`matrix_coding`] as
+the assembled coders — so filling those gaps is a **data-staging
+problem, not a code problem**: a spec PDF, staged table data, or a
+clean-room binary-side trace under `docs/audio/wma/` slots straight
+in. The [`oxideav_core`] registration will land once the wire format
+is pinned.
 
 ## Public surface
 
