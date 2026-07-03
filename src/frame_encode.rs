@@ -195,7 +195,7 @@ impl FrameEncoder {
     /// * [`FrameEncodeError::Block`] on the first failing block.
     pub fn encode_frame(&mut self, pcm: &[f64]) -> Result<Vec<EncodedBlock>, FrameEncodeError> {
         let m = self.block_len();
-        if !pcm.len().is_multiple_of(m) {
+        if pcm.len() % m != 0 {
             return Err(FrameEncodeError::FrameLen(
                 InvalidFrameLen::NotBlockAligned {
                     block_len: m,
@@ -283,7 +283,7 @@ impl StereoFrameEncoder {
                 },
             ));
         }
-        if !left.len().is_multiple_of(m) {
+        if left.len() % m != 0 {
             return Err(StereoFrameEncodeError::FrameLen(
                 InvalidFrameLen::NotBlockAligned {
                     block_len: m,
