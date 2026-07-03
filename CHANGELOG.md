@@ -8,6 +8,47 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `bitio` + `huffman` modules — the entropy stage's **bit-level
+  machinery**. `bitio` is the format-neutral `[DSP]`-tier prefix-code
+  plumbing the §6/§8 VLC stages run on: an MSB-first append-only
+  `BitWriter` (`write_bit` / `write_bits` / `align_to_byte` /
+  bit-precise `bit_len`) and its exact-inverse `BitReader` cursor
+  (`with_bit_len` excludes final-byte padding; failed reads consume
+  nothing; `BitstreamEnd` reports requested vs remaining). The
+  shipping WMA v1/v2 byte/bit packing order is `[GAP]` per the trace,
+  so the MSB-first convention is documented as a realization detail of
+  this crate's self-consistent coder with a single swap point — not a
+  wire-format claim. `huffman` implements the §6 patent-disclosed
+  code-book construction *method* (US6,223,162 grid 500 / threshold
+  518 / Claims 8–10: "pairings above a probability threshold get
+  Huffman codewords"; US7,885,819 joint 2-D `(R, L)` Huffman;
+  US7,930,171 step 130 Huffman over matrix deltas), realised via the
+  general public Huffman/canonical-code algorithms (`[DSP]` tier):
+  `HuffmanCode::from_weights` merges caller-supplied non-negative
+  weights (zero weights legal — the patent's threshold can sit at 0.0
+  — deterministic tie-breaking, single-symbol degenerate 1-bit code)
+  into an optimal prefix code assigned canonically;
+  `HuffmanCode::from_lengths` rebuilds the canonical code from
+  explicit per-symbol lengths — the plug-in point for staged real
+  tables — validating the Kraft **equality**; `encode_symbol` /
+  `decode_symbol` code over the bit cursors with an `O(max_len)`
+  canonical range decode (per-length first/count/offset tables built
+  once). Codes built here are self-consistent, **not**
+  wire-compatible: the literal v1/v2 tables stay `[GAP]`. 33 unit
+  tests cover the writer (MSB-first fill, cross-byte fields, 64-bit
+  width, alignment padding, overwide panic), the reader (inverse
+  semantics, no-consumption-on-failure, bit-precise lengths,
+  alignment), a 200-field mixed-width write→read round trip, code
+  construction (reject paths, dyadic-weight exact lengths, monotone
+  weight→length shape, prefix-freeness, Kraft equality, canonical
+  (length, symbol) order, incomplete/overfull length rejects),
+  bit-level round trips (weighted alphabet, 500-symbol stream), the
+  truncated-stream and out-of-range error paths, the
+  compression-beats-fixed-width property, and error
+  `Display`/`source`. Crate test count: 640 → 673. Re-exports:
+  `BitWriter`, `BitReader`, `BitstreamEnd`, `HuffmanCode`,
+  `HuffmanError`.
+
 - `frame_encode` module — the §2 **frame-loop encoder drivers**, the
   forward mirror of `frame` (US7,930,171 FIG.3 / US7,383,180 module
   520: "partitions a frame of audio samples into overlapping sub-frame

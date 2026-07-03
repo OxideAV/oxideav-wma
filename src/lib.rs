@@ -470,6 +470,20 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`bitio`] + [`huffman`] — the entropy stage's **bit-level
+//!   machinery**: an MSB-first [`BitWriter`] / [`BitReader`] pair
+//!   (format-neutral `[DSP]` plumbing; the shipping WMA packing order
+//!   is `[GAP]`, so the convention is a documented realization detail
+//!   with one swap point) and [`HuffmanCode`], the §6 patent-disclosed
+//!   code-book construction step run on caller-supplied weights
+//!   (US6,223,162 grid 500 / threshold 518: "pairings above a
+//!   probability threshold get Huffman codewords"; US7,930,171 step
+//!   130 for the §4 matrix deltas). `from_weights` builds the optimal
+//!   prefix code canonically; `from_lengths` is the plug-in point for
+//!   staged real tables (validating the Kraft equality); encode /
+//!   decode run over the bit cursors. Codes built here are
+//!   self-consistent, **not** wire-compatible — the literal v1/v2
+//!   tables stay `[GAP]`.
 //! * [`frame_encode`] — the §2 **frame-loop encoder drivers**, the
 //!   forward mirror of [`frame`]: [`FrameEncoder`] (mono, wrapping a
 //!   [`ChannelEncoder`]) and [`StereoFrameEncoder`] (stereo, wrapping
@@ -623,6 +637,11 @@
 //! [`Analysis`]: analysis::Analysis
 //! [`Analysis::flush`]: analysis::Analysis::flush
 //! [`encode`]: crate::encode
+//! [`bitio`]: crate::bitio
+//! [`huffman`]: crate::huffman
+//! [`BitWriter`]: bitio::BitWriter
+//! [`BitReader`]: bitio::BitReader
+//! [`HuffmanCode`]: huffman::HuffmanCode
 //! [`frame_encode`]: crate::frame_encode
 //! [`FrameEncoder`]: frame_encode::FrameEncoder
 //! [`StereoFrameEncoder`]: frame_encode::StereoFrameEncoder
@@ -647,6 +666,7 @@
 
 pub mod analysis;
 pub mod bands;
+pub mod bitio;
 pub mod block;
 pub mod channel_decision;
 pub mod codebook;
@@ -659,6 +679,7 @@ pub mod excitation;
 pub mod frame;
 pub mod frame_encode;
 pub mod header;
+pub mod huffman;
 pub mod invquant;
 pub mod mlt;
 pub mod noisefill;
@@ -681,6 +702,7 @@ pub mod window;
 
 pub use analysis::{Analysis, InvalidSampleLen};
 pub use bands::{BandPlan, BandPolicy};
+pub use bitio::{BitReader, BitWriter, BitstreamEnd};
 pub use block::BlockSize;
 pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
@@ -694,6 +716,7 @@ pub use frame_encode::{
     FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
 };
 pub use header::{Version, WmaHeader};
+pub use huffman::{HuffmanCode, HuffmanError};
 pub use invquant::BandScale;
 pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
