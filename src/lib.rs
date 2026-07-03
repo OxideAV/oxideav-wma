@@ -209,9 +209,19 @@
 //!   names but does not specify ("based on channels and sr") stays a
 //!   DOCS-GAP, shipped as the wiki default and overridable.
 //!
-//! Tables (Huffman codebooks, exponent bands, LSP codebook,
-//! critical-frequency curves) are not yet staged so the actual
-//! bitstream decode path is intentionally absent.
+//! Round 24 (this round) lands the first **wire-level data**: the
+//! staged numeric-table extraction under `docs/audio/wma/tables/`
+//! (coefficient run-level VLC code lengths for decode modes 1/2/3,
+//! the critical-band and subband Hz partition seeds, and the
+//! 113-step dequantization gain ladder) is transcribed into
+//! [`wire_tables`], each table pinned by invariant tests (Kraft
+//! equality for the complete modes, the documented escape deficit
+//! for mode 2, monotonicity, the ladder's closed form). The same
+//! extraction confirms **no LSP codebook exists** on this decode
+//! path. Still `[GAP]`: the symbol → `(R, L)` mapping, the mode-2
+//! escape enumeration, the scale/gain VLCs, sign-bit placement, and
+//! the frame/superframe bit layout — so the full
+//! bitstream-byte → PCM path remains intentionally absent.
 //!
 //! ## Public surface
 //!
@@ -745,6 +755,7 @@ pub mod synthesis;
 pub mod terminator;
 pub mod transient;
 pub mod window;
+pub mod wire_tables;
 
 pub use analysis::{Analysis, InvalidSampleLen};
 pub use bands::{BandPlan, BandPolicy};
