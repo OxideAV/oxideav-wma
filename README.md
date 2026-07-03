@@ -1,5 +1,7 @@
 # oxideav-wma
 
+[![CI](https://github.com/OxideAV/oxideav-wma/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-wma/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-wma.svg)](https://crates.io/crates/oxideav-wma) [![docs.rs](https://docs.rs/oxideav-wma/badge.svg)](https://docs.rs/oxideav-wma) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust Windows Media Audio codec for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) framework.
 
