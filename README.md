@@ -136,15 +136,16 @@ each pinned to the patent it is disclosed in:
   [`gain_ladder`] maps decoded exponent indices to the §4 `Q[d]`
   weights. [`wire_chain`] assembles it all from a parsed
   [`WmaHeader`]: header → block size → real partitions → ladder
-  weights → the §8 encoder/decoder chains, with PCM round trips over
-  the real geometry pinned by test.
+  weights → the §8 encoder/decoder chains (mono and stereo, with an
+  octave-grid noise-filler option), with PCM round trips over the
+  real geometry pinned by test.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 742 unit tests.
+guessing. The crate carries 745 unit tests.
 
 With the encoder mirror in place the crate is a **complete,
 self-consistent codec loop at the typed-symbol level**: PCM → analysis

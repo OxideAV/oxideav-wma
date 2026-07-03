@@ -41,7 +41,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     + both real partitions from a parsed `WmaHeader` and assembles
     the §8 encoder/decoder chains over that real geometry; PCM round
     trips over the 44.1 kHz/S2048 25-band staged partition are pinned
-    within the §4 bound, shrinking with the step.
+    within the §4 bound, shrinking with the step. Stereo constructors
+    (`stereo_encoder`/`stereo_decoder`, per-channel exponent
+    profiles, both channel modes round-tripped) and
+    `channel_decoder_with_noise_grid` (noise filler over the staged
+    octave grid; all-coded plans decode identically to the exponent
+    grid) complete the assembler.
 - `masking` module — the §4 encoder-side **Bark-scale masking model**
   (US6,240,380 FIGS.13–14, box 1318: "the weighting function follows
   an auditory masking curve computed on the Bark scale, with a
