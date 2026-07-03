@@ -8,6 +8,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `paircode` module — the §6 entropy back end assembled **end-to-end
+  to bits**: `RunLevelCoder` runs the patent's FIG.6 construction on a
+  caller-supplied `CodebookGrid` — the codeword alphabet is every
+  in-codebook pairing (row-major, run-outer) plus one trailing escape
+  symbol weighted by the residual probability mass `max(0, 1 - Σ)`
+  (what the escape codeword stands for: everything the threshold
+  excluded) — builds the joint `(R, L)` canonical Huffman code from
+  the grid's own probabilities (US6,223,162 grid 500 / threshold 518;
+  US7,885,819 joint 2-D `(R, L)` Huffman), and codes pairs over the
+  `bitio` cursors: in-codebook pairs as single codewords, escapes as
+  the escape codeword followed by fixed-width `R` / `L` literals
+  (US6,223,162 Claim 4; the Claims-5/6 decoder side recovers them).
+  The literal widths are the §6 `[GAP]` ("the bit widths are not
+  patent-disclosed"), so they are a typed caller-supplied
+  `EscapeWidths` (validated `1..=32` per field) — never fabricated —
+  with `PairCodeError::EscapeOverflow` rejecting values that do not
+  fit at encode time and `InvalidEscapeLiteral` rejecting a decoded
+  `run == 0` / `level == 0` trailer as stream corruption. Grids and
+  probabilities stay caller-supplied: a coder built here is
+  self-consistent, not wire-compatible, per the `huffman` posture.
+  12 unit tests cover `EscapeWidths` validation/bounds, alphabet
+  construction, the probable-pair-codes-no-longer property,
+  in-codebook and escape round trips (below-threshold and
+  outside-rectangle — the patent's "≥ Rm" tail), escape overflow on
+  both fields, the corrupt-literal and truncated-stream error paths,
+  a mixed 8-pair stream round trip, and the crate's first full §6
+  chain across the bit level: sparse tail → `runlevel::compress` →
+  pair-coded bits → `decode_pair` → `expand_into` reproduces the tail
+  exactly. Crate test count: 673 → 685. Re-exports: `RunLevelCoder`,
+  `EscapeWidths`, `PairCodeError`.
+
 - `bitio` + `huffman` modules — the entropy stage's **bit-level
   machinery**. `bitio` is the format-neutral `[DSP]`-tier prefix-code
   plumbing the §6/§8 VLC stages run on: an MSB-first append-only

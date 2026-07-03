@@ -484,6 +484,18 @@
 //!   decode run over the bit cursors. Codes built here are
 //!   self-consistent, **not** wire-compatible — the literal v1/v2
 //!   tables stay `[GAP]`.
+//! * [`paircode`] — the §6 entropy back end assembled **end-to-end to
+//!   bits**: [`RunLevelCoder`] derives the codeword alphabet from a
+//!   [`CodebookGrid`] (every in-codebook pairing + one escape symbol
+//!   weighted by the residual probability mass), builds the joint
+//!   `(R, L)` Huffman code from the grid's own probabilities
+//!   (US6,223,162 grid 500 / US7,885,819), and codes pairs to/from
+//!   the bit level — in-codebook pairs as single codewords, escapes
+//!   as the escape codeword plus fixed-width `R`/`L` literals whose
+//!   widths are a caller-supplied [`EscapeWidths`] (`[GAP]` per §6).
+//!   Tests pin mixed in-codebook/escape stream round trips and the
+//!   first full §6 chain crossing the bit level: sparse tail →
+//!   `compress` → bits → `decode_pair` → `expand_into` → tail.
 //! * [`frame_encode`] — the §2 **frame-loop encoder drivers**, the
 //!   forward mirror of [`frame`]: [`FrameEncoder`] (mono, wrapping a
 //!   [`ChannelEncoder`]) and [`StereoFrameEncoder`] (stereo, wrapping
@@ -642,6 +654,9 @@
 //! [`BitWriter`]: bitio::BitWriter
 //! [`BitReader`]: bitio::BitReader
 //! [`HuffmanCode`]: huffman::HuffmanCode
+//! [`paircode`]: crate::paircode
+//! [`RunLevelCoder`]: paircode::RunLevelCoder
+//! [`EscapeWidths`]: paircode::EscapeWidths
 //! [`frame_encode`]: crate::frame_encode
 //! [`FrameEncoder`]: frame_encode::FrameEncoder
 //! [`StereoFrameEncoder`]: frame_encode::StereoFrameEncoder
@@ -684,6 +699,7 @@ pub mod invquant;
 pub mod mlt;
 pub mod noisefill;
 pub mod overlap_add;
+pub mod paircode;
 pub mod qband;
 pub mod qmatrix;
 pub mod quant;
@@ -721,6 +737,7 @@ pub use invquant::BandScale;
 pub use mlt::{InvalidMltLen, Mlt};
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
+pub use paircode::{EscapeWidths, PairCodeError, RunLevelCoder};
 pub use qband::{QuantBand, QuantBandLayout};
 pub use quant::{InvalidQuant, QuantStage};
 pub use setup::SetupParams;
