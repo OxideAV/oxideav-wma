@@ -758,6 +758,7 @@ pub mod synthesis;
 pub mod terminator;
 pub mod transient;
 pub mod window;
+pub mod wire_chain;
 pub mod wire_tables;
 
 pub use analysis::{Analysis, InvalidSampleLen};
@@ -799,6 +800,7 @@ pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 pub use window::{Window, WindowPair, WindowShape};
+pub use wire_chain::{WireBlockConfig, WireChainError};
 
 /// Crate-local error type. Concrete variants land as the rebuild
 /// rounds populate the codec pipeline.
