@@ -8,6 +8,40 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Wire-level data pass** over the newly staged
+  `docs/audio/wma/tables/` extraction (numeric tables read as bytes
+  from the vendor WMA Standard decoder module's own PE sections, with
+  per-table `.meta` provenance):
+  - `wire_tables` — the staged tables verbatim: coefficient run-level
+    VLC code lengths for decode modes 1 (666 symbols, Kraft = 1),
+    2 (1016 real symbols; the escape codeword enumeration is the
+    extraction's documented residual — the unassigned code space is
+    pinned exactly as `16502/2^22`), and 3 (476 symbols, Kraft = 1);
+    the 25-edge critical-band Hz partition seed; the 11-edge octave
+    subband seed; and the 113-step `10^(1/16)` (1.25 dB/step)
+    dequantization gain ladder. Invariant tests pin Kraft sums in
+    exact integer arithmetic, monotonicity, octave doubling, the
+    ladder's closed-form tail, and per-row CSV spot values. The same
+    extraction confirms **no LSP codebook exists** on this path.
+  - `coef_vlc` — decode modes 1 and 3 realised as working canonical
+    codes; constructed codewords match the staged CSVs bit-for-bit
+    and full-alphabet symbol streams round-trip through the bit
+    cursors. Mode 2 construction is a typed docs-gap
+    (`Mode2EscapeEnumerationUnstaged`).
+  - `exponent_bands` — the per-block exponent/quantization-band and
+    noise-grid partitions derived from the Hz seeds exactly as the
+    vendor decoder derives them (scale to coefficient bins, clamp at
+    Nyquist, collapse), directly into `QuantBandLayout`. Rounding tie
+    behaviour is the one documented realization detail.
+  - `gain_ladder` — ladder lookups, the scale-free `gain_ratio`
+    (16 steps = one decade, pinned), and `band_weights` mapping
+    per-band exponent indices to the §4 `Q[d]` vector the
+    `DequantStage`/`QuantStage` pair consumes.
+  - `wire_chain` — `WireBlockConfig::from_header` derives block size
+    + both real partitions from a parsed `WmaHeader` and assembles
+    the §8 encoder/decoder chains over that real geometry; PCM round
+    trips over the 44.1 kHz/S2048 25-band staged partition are pinned
+    within the §4 bound, shrinking with the step.
 - `masking` module — the §4 encoder-side **Bark-scale masking model**
   (US6,240,380 FIGS.13–14, box 1318: "the weighting function follows
   an auditory masking curve computed on the Bark scale, with a

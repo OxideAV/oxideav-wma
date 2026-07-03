@@ -14,6 +14,11 @@ under `docs/audio/wma/`:
 * `wma-bitstream-from-patents.md` — a patents-only structural trace
   assembled from the Microsoft USPTO patent corpus (Malvar, Chen,
   Thumpudi, Koishida).
+* `tables/` + `provenance/02-…` — numeric data tables extracted as
+  bytes from the vendor WMA Standard decoder module's own PE data
+  sections (coefficient VLC code lengths, band-partition Hz seeds,
+  the dequantization gain ladder), with per-table `.meta` provenance
+  and self-validating extraction.
 
 ### What works
 
@@ -113,13 +118,33 @@ each pinned to the patent it is disclosed in:
   the patent-pinned asymmetric spreading slopes (25 dB/Bark toward
   lower frequencies, 10 toward higher) and the optional
   partial-whitening exponent β.
+* **Wire-level data (staged tables)**: [`wire_tables`] carries the
+  vendor-module extraction verbatim — the coefficient run-level VLC
+  code-length tables for decode modes 1 (666 symbols, Kraft = 1),
+  2 (1016 real symbols; the 8 escape symbols' codeword enumeration is
+  the extraction's documented residual, deficit pinned exactly), and
+  3 (476 symbols, Kraft = 1), the 25-edge critical-band Hz partition
+  seed, the 11-edge octave subband seed, and the 113-step `10^(1/16)`
+  (1.25 dB/step) dequantization gain ladder. The same extraction
+  **confirms no LSP codebook exists** on this decode path.
+  [`coef_vlc`] realises modes 1/3 as working canonical codes whose
+  codewords match the staged CSVs bit-for-bit (mode 2 is a typed
+  docs-gap). [`exponent_bands`] derives the per-block
+  exponent/quantization-band and noise-grid partitions the vendor
+  decoder computes instead of storing (Hz seed → coefficient bins,
+  round-half-up as the one documented realization detail).
+  [`gain_ladder`] maps decoded exponent indices to the §4 `Q[d]`
+  weights. [`wire_chain`] assembles it all from a parsed
+  [`WmaHeader`]: header → block size → real partitions → ladder
+  weights → the §8 encoder/decoder chains, with PCM round trips over
+  the real geometry pinned by test.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 708 unit tests.
+guessing. The crate carries 742 unit tests.
 
 With the encoder mirror in place the crate is a **complete,
 self-consistent codec loop at the typed-symbol level**: PCM → analysis
@@ -131,23 +156,31 @@ bound. What separates this from a *WMA* codec is wire compatibility
 
 ### What is NOT implemented
 
-There is **no real-WMA bitstream-byte → PCM decode** (and no
-wire-compatible encode), because the literal wire format is
-undocumented in the staged material. The wiki snapshot lists the
-*names* of WMA's data tables — the gain / LSP / scale / coefficient /
-level Huffman tables, the per-rate exponent-band partition tables, and
-the critical-frequency curves — but does not contain the tables
-themselves, and the patent trace marks the literal codeword tables, the
-per-process DEMUX, the bit/byte packing order, the sign-bit placement,
-the per-band noise/cutoff flag encoding, and the superframe/packet byte
-layout all `[GAP]` (§9). The *machinery* for all of it now exists —
-[`bitio`] cursors, [`huffman`]`::from_lengths` as the direct plug-in
-point for real code-length tables, [`paircode`]/[`matrix_coding`] as
-the assembled coders — so filling those gaps is a **data-staging
-problem, not a code problem**: a spec PDF, staged table data, or a
-clean-room binary-side trace under `docs/audio/wma/` slots straight
-in. The [`oxideav_core`] registration will land once the wire format
-is pinned.
+There is **no real-WMA bitstream-byte → PCM decode yet** (and no
+wire-compatible encode). The staged extraction closed the biggest
+data gaps — the coefficient VLC lengths, the band-partition seeds,
+the gain ladder, and the LSP negative are all in-tree now — but the
+remaining wire specifics are still unstaged:
+
+* the **symbol → `(R, L)` mapping** of the coefficient VLCs (the
+  vendor module's companion index-ramp tables were located but their
+  per-column role is not pinned);
+* the **mode-2 escape codeword enumeration** (needs the verified
+  decode-tree walk);
+* the smaller **scale (~121) / gain (~37) VLC tables** that carry the
+  per-band exponent indices;
+* the **sign-bit placement, escape literal widths, per-band
+  noise/cutoff flag encoding, and frame/superframe bit layout**
+  (bit-reader path, needs a validator round over real streams);
+* verification that the vendor decode tree's internal **bit
+  assignment** matches the canonical reconstruction of its exact
+  lengths;
+* how the **decode mode (1/2/3) is selected** from the stream header.
+
+Each is a data-staging item under `docs/audio/wma/`; the machinery on
+this side ([`bitio`], [`huffman`]`::from_lengths`, [`coef_vlc`],
+[`wire_chain`]) is built and waiting. The [`oxideav_core`]
+registration will land once the wire format is pinned.
 
 ## Public surface
 
