@@ -730,6 +730,7 @@ pub mod encode;
 pub mod entropy_mode;
 pub mod escape;
 pub mod excitation;
+pub mod exponent_bands;
 pub mod frame;
 pub mod frame_encode;
 pub mod header;
@@ -770,6 +771,7 @@ pub use dequant::{DequantStage, InvalidDequant};
 pub use encode::{ChannelEncoder, EncodeAssemblyError, EncodeError, EncodeStage, EncodedBlock};
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
+pub use exponent_bands::BandDeriveError;
 pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
 pub use frame_encode::{
     FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
