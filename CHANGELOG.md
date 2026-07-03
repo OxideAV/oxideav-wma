@@ -8,6 +8,38 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `frame_encode` module — the §2 **frame-loop encoder drivers**, the
+  forward mirror of `frame` (US7,930,171 FIG.3 / US7,383,180 module
+  520: "partitions a frame of audio samples into overlapping sub-frame
+  blocks"; wiki blocks → frames → superframes nesting). `FrameEncoder`
+  wraps a `ChannelEncoder` (mono) and `StereoFrameEncoder` wraps a
+  `StereoEncoder` (stereo); `encode_frame` partitions a frame's PCM
+  into consecutive `M`-sample blocks and collects the per-block symbol
+  sets — via the `into_block_params` bridges, exactly the
+  `BlockParams` / `StereoBlockParams` lists `FrameDecoder` /
+  `StereoFrameDecoder` consume. The stereo driver takes a
+  caller-supplied per-block `ChannelMode` plan (`modes[t]` for block
+  `t`; the §5 flag layout is `[GAP]`). The 50%-overlap frame buffer
+  threads across frames — `encode_frame` does **not** flush, so a
+  stream's frames encode contiguously (a test pins two frames ≡ one
+  concatenated frame); `flush` emits the single trailing block at
+  stream end and `reset` clears the buffers. Length contracts reject
+  up front with nothing encoded: `InvalidFrameLen::{NotBlockAligned,
+  ChannelLenMismatch, ModeCountMismatch}` under
+  `FrameEncodeError` / `StereoFrameEncodeError`. Uniform-block-size
+  frames only, matching `frame` (the variable-block-length plan from
+  the upper `flags2` bits and the superframe byte layout stay `[GAP]`
+  per §1/§2/§9). 12 unit tests cover accessors + empty frames, the
+  unaligned / channel-mismatch / mode-count rejects with the
+  no-advance guarantee, equality with the manual per-block loop, the
+  cross-frame buffer persistence, per-block mode honouring against a
+  hand-wired stereo mirror, whole-stream encode→decode round trips
+  through `FrameDecoder` (mono) and `StereoFrameDecoder` (stereo,
+  sum/difference) within the quantizer bound, reset-equals-fresh, and
+  error `Display`/`source`. Crate test count: 628 → 640. Re-exports:
+  `FrameEncoder`, `StereoFrameEncoder`, `InvalidFrameLen`,
+  `FrameEncodeError`, `StereoFrameEncodeError`.
+
 - `stereo_encode` module — the §8 patent-disclosed **full two-channel
   encoder-block chain**, the stereo analogue of `encode` and the
   forward mirror of `stereo_decode` (§8 encoder pipeline: `[optional

@@ -470,6 +470,18 @@
 //!   DOCS-GAP, so the field ships the default and is overridable via
 //!   [`SetupParams::with_noise_coding`]). Sourced from the wiki "init
 //!   rate dependent parameters" section.
+//! * [`frame_encode`] — the §2 **frame-loop encoder drivers**, the
+//!   forward mirror of [`frame`]: [`FrameEncoder`] (mono, wrapping a
+//!   [`ChannelEncoder`]) and [`StereoFrameEncoder`] (stereo, wrapping
+//!   a [`StereoEncoder`] with a caller-supplied per-block
+//!   [`ChannelMode`] plan) partition a frame's PCM into `M`-sample
+//!   blocks and collect the per-block symbol sets the [`frame`]
+//!   decoders consume; the 50%-overlap buffer threads across frames
+//!   (flush once at stream end). Whole-stream encode→decode round
+//!   trips through [`FrameDecoder`] / [`StereoFrameDecoder`] are
+//!   pinned by tests. Uniform-block-size frames only — the
+//!   variable-block-length plan and superframe byte layout stay
+//!   `[GAP]`.
 //! * [`stereo_encode`] — the §8 patent-disclosed **full two-channel
 //!   encoder-block chain**, the stereo analogue of [`encode`] and the
 //!   forward mirror of [`stereo_decode`]: [`StereoEncoder`] applies
@@ -611,6 +623,9 @@
 //! [`Analysis`]: analysis::Analysis
 //! [`Analysis::flush`]: analysis::Analysis::flush
 //! [`encode`]: crate::encode
+//! [`frame_encode`]: crate::frame_encode
+//! [`FrameEncoder`]: frame_encode::FrameEncoder
+//! [`StereoFrameEncoder`]: frame_encode::StereoFrameEncoder
 //! [`stereo_encode`]: crate::stereo_encode
 //! [`StereoEncoder`]: stereo_encode::StereoEncoder
 //! [`StereoEncodedBlock`]: stereo_encode::StereoEncodedBlock
@@ -642,6 +657,7 @@ pub mod entropy_mode;
 pub mod escape;
 pub mod excitation;
 pub mod frame;
+pub mod frame_encode;
 pub mod header;
 pub mod invquant;
 pub mod mlt;
@@ -674,6 +690,9 @@ pub use encode::{ChannelEncoder, EncodeAssemblyError, EncodeError, EncodeStage, 
 pub use entropy_mode::{EntropyMode, Partition};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
+pub use frame_encode::{
+    FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
+};
 pub use header::{Version, WmaHeader};
 pub use invquant::BandScale;
 pub use mlt::{InvalidMltLen, Mlt};
