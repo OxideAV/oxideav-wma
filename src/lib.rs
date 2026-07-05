@@ -747,6 +747,7 @@ pub mod qband;
 pub mod qmatrix;
 pub mod quant;
 pub mod runlevel;
+pub mod runlevel_tables;
 pub mod setup;
 pub mod spectral;
 pub mod step_size;

@@ -36,24 +36,47 @@
 //!   [`crate::huffman::HuffmanCode::from_lengths`] accepts them
 //!   directly; the staged CSVs use the same canonical MSB-first
 //!   `(length, symbol)` codeword convention that constructor realises.
-//! * [`COEF_VLC_MODE2_REAL_LENGTHS`] — decode mode 2's 1016 **real**
-//!   symbols (`0..=1015`), exact lengths. This table is *deliberately
-//!   incomplete*: symbols `1016..=1023` are escape leaves that recur
-//!   at several codeword lengths, and their per-codeword enumeration
-//!   is still unstaged (the extraction's documented residual). The
-//!   missing code space is exactly
-//!   [`COEF_VLC_MODE2_KRAFT_DEFICIT`]` / 2^22`.
+//! * [`COEF_VLC_MODE2_REAL_LENGTHS`] — decode mode 2's 1016 symbols
+//!   (`0..=1015`), exact lengths. The staged watch-pass **correction**
+//!   (docs `provenance/02` §4e): the earlier "8 escape codewords at
+//!   `1016..=1023`" reading was a misinterpretation — those symbols
+//!   are ordinary `(R, L)` pairs. The real end-of-block / escape are
+//!   the **low reserved symbols** [`COEF_EOB_SYMBOL`] (0) and
+//!   [`COEF_ESCAPE_SYMBOL`] (1); the run-level companion tables are
+//!   2-based (`index = symbol - `[`COEF_RUNLEVEL_BASE_SYMBOL`]). The
+//!   mode-2 decode table is a space-shared DAG in which a few high
+//!   symbols (including `1016..=1023`) appear at more than one code
+//!   length, so a single canonical length for them is not statically
+//!   determinable — the flat-scan Kraft sum over `0..=1015` leaves
+//!   [`COEF_VLC_MODE2_KRAFT_DEFICIT`]` / 2^22` unassigned. **No
+//!   codeword is missing**; the residual is the exact per-symbol code
+//!   of those DAG-replicated high symbols only.
+//! * [`COEF_VLC_CLASS1_ALT_LENGTHS`] / [`COEF_VLC_CLASS3_ALT_LENGTHS`]
+//!   — the **alt-variant** coefficient VLCs the vendor module
+//!   registers when its `params+0x380 == 1` configuration flag is set
+//!   (555 / 435 symbols, both Kraft-complete). The class-2 alt table
+//!   is located in the vendor module but not yet staged.
+//! * [`SCALE_VLC_LENGTHS`] — the 121-symbol **scale-factor /
+//!   spectral-envelope exponent delta** VLC (Kraft-complete; matches
+//!   the wiki's "scale Huffman table (121 entries)").
+//! * [`GAIN_VLC_LENGTHS`] — the 37-symbol **gain delta** VLC
+//!   (Kraft-complete; matches the wiki's "gain Huffman table
+//!   (37 entries)").
+//! * The **symbol → `(R, L)` companion maps** for all three decode
+//!   classes are staged too — carried in [`crate::runlevel_tables`].
+//! * The frame/superframe **bit-packing layout** (field order + fixed
+//!   widths) is staged in `docs/audio/wma/frame-bit-layout.md`.
 //!
 //! ## What the staged material does NOT pin (open `[GAP]`s)
 //!
-//! * The **symbol to `(R, L)` mapping** for the three coefficient
-//!   VLCs (the vendor module's companion index-ramp tables were
-//!   located but their per-column role is not pinned), so a decoded
-//!   symbol cannot yet be expanded into a run-level pair.
-//! * The mode-2 **escape codeword enumeration** (above).
-//! * The smaller **scale (~121) / gain (~37) Huffman tables**, the
-//!   sign-bit placement, the escape literal widths, and the
-//!   frame/superframe bit layout.
+//! * The **class-2 alt-variant** coefficient VLC (located at vendor
+//!   RVA `0x20718`, 350+ symbols, not yet extracted).
+//! * The exact per-symbol codes of the mode-2 **DAG-replicated high
+//!   symbols** (blocked statically by decode-DAG space sharing and
+//!   dynamically behind a COM `ProcessOutput` vtable call).
+//! * The **concrete widths** of the runtime-width fields (frame side
+//!   field, escape literals) — their *formulas/sources* are pinned,
+//!   the values are per-stream config.
 //! * The vendor's internal codeword **bit assignment** is stored as a
 //!   decode tree, not as code/length arrays; the staged *lengths* are
 //!   exact data, and the codewords used here are the canonical
@@ -235,18 +258,128 @@ pub const COEF_VLC_MODE3_LENGTHS: [u8; 476] = [
     17, 18, 17, 18, 17, 18, 17, 17, 17, 17, 19,
 ];
 
-/// Decode mode 2's escape symbol range: tree leaves `1016..=1023`
-/// (`0x3fc..=0x3ff`) recur at several codeword lengths each and are
-/// **not** carried in [`COEF_VLC_MODE2_REAL_LENGTHS`] — their
-/// per-codeword enumeration is the extraction's documented residual.
-pub const COEF_VLC_MODE2_ESCAPE_SYMBOLS: core::ops::Range<u16> = 1016..1024;
+/// The coefficient VLC's reserved **end-of-block** symbol.
+///
+/// The staged correction (docs `provenance/02` §4e): the run-level
+/// companion tables are 2-based, so symbols 0 and 1 carry no `(R, L)`
+/// pair — they are the low reserved sentinels. Symbol 0 is the EOB
+/// half of that reserved pair.
+pub const COEF_EOB_SYMBOL: u16 = 0;
 
-/// The code space the mode-2 real symbols leave unassigned, in units
-/// of `2^-22` (the mode's max code length): `Σ 2^(22-len)` over
-/// [`COEF_VLC_MODE2_REAL_LENGTHS`] is `2^22 -` this value. That
-/// missing mass is exactly the room the unstaged escape codewords
-/// occupy.
+/// The coefficient VLC's reserved **escape** symbol.
+///
+/// The vendor decode path treats symbol 1 as the escape: it then
+/// reads a literal run and a literal level with the runtime-signalled
+/// widths (the frame side-field width and `byte_offset_bits`
+/// respectively — sources pinned, concrete values per-stream config).
+pub const COEF_ESCAPE_SYMBOL: u16 = 1;
+
+/// First coefficient VLC symbol that carries a real `(R, L)` pair:
+/// the run-level companion tables are indexed `symbol - 2`.
+pub const COEF_RUNLEVEL_BASE_SYMBOL: u16 = 2;
+
+/// The code space the mode-2 lengths over symbols `0..=1015` leave
+/// unassigned, in units of `2^-22` (the mode's max code length):
+/// `Σ 2^(22-len)` over [`COEF_VLC_MODE2_REAL_LENGTHS`] is `2^22 -`
+/// this value. That mass is where the vendor decode DAG replicates a
+/// few high symbols across several code lengths (no codeword is
+/// *missing* — the exact codes of those replicated symbols are the
+/// documented static residual).
 pub const COEF_VLC_MODE2_KRAFT_DEFICIT: u32 = 16_502;
+
+/// Exact per-symbol code lengths of the **class-1 alt-variant**
+/// coefficient run-level VLC (555 symbols, max length 19, Kraft
+/// equality — a complete prefix code). The vendor module registers
+/// this tree instead of [`COEF_VLC_MODE1_LENGTHS`] when its
+/// `params+0x380 == 1` configuration flag is set.
+///
+/// Staged as
+/// `docs/audio/wma/tables/wma-huffman-coef-class1-alt-codelen.csv`.
+pub const COEF_VLC_CLASS1_ALT_LENGTHS: [u8; 555] = [
+    9, 5, 2, 4, 4, 5, 5, 5, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 9, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 9, 9, 9,
+    9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12,
+    12, 13, 12, 12, 12, 12, 12, 12, 12, 13, 12, 12, 12, 12, 12, 12, 12, 12, 13, 12, 12, 12, 13, 13,
+    13, 13, 12, 12, 12, 12, 12, 12, 13, 12, 13, 13, 13, 13, 13, 13, 13, 14, 14, 13, 13, 13, 13, 13,
+    13, 13, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 13, 14, 13, 13,
+    13, 13, 13, 14, 13, 14, 14, 13, 14, 14, 13, 14, 13, 13, 14, 14, 13, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 15, 14, 14, 14, 14, 15, 15, 15, 14, 14, 13, 13, 12, 12, 13, 13, 13, 14, 14, 15, 14, 15,
+    15, 14, 13, 14, 15, 15, 15, 14, 14, 14, 14, 15, 14, 14, 15, 15, 15, 14, 15, 14, 14, 14, 14, 14,
+    15, 15, 16, 15, 15, 15, 14, 15, 15, 15, 15, 14, 14, 16, 14, 15, 14, 14, 15, 15, 15, 15, 16, 15,
+    14, 15, 15, 15, 16, 15, 15, 14, 14, 14, 4, 7, 8, 8, 9, 9, 9, 9, 10, 10, 11, 11, 11, 11, 11, 11,
+    12, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13,
+    12, 12, 13, 13, 13, 13, 14, 14, 13, 14, 13, 13, 13, 14, 14, 15, 15, 14, 13, 13, 13, 14, 14, 15,
+    15, 15, 16, 14, 15, 17, 17, 15, 15, 15, 15, 15, 14, 16, 14, 16, 16, 16, 16, 16, 16, 15, 15, 17,
+    15, 16, 15, 6, 8, 10, 10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 13, 14, 13, 14, 13, 14, 14, 14,
+    14, 14, 15, 15, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 16, 15, 15, 16, 15, 15, 15, 14, 16, 15,
+    15, 18, 17, 16, 17, 15, 14, 15, 16, 16, 19, 17, 19, 16, 17, 15, 7, 10, 11, 12, 12, 12, 12, 13,
+    13, 13, 14, 15, 14, 15, 15, 16, 15, 14, 14, 15, 16, 15, 16, 16, 16, 16, 15, 15, 7, 11, 12, 13,
+    13, 14, 14, 15, 15, 15, 8, 11, 13, 14, 14, 15, 9, 12, 14, 14, 15, 9, 13, 10, 13, 10, 14, 10,
+    14, 11, 15, 11, 15, 11, 14, 12, 15, 12, 13, 13, 13, 13, 13, 13, 14, 13, 14, 14, 14, 14, 14, 14,
+    15, 14, 15, 16, 15, 14, 15, 16, 15, 15,
+];
+
+/// Exact per-symbol code lengths of the **class-3 alt-variant**
+/// coefficient run-level VLC (435 symbols, max length 18, Kraft
+/// equality — a complete prefix code). The `params+0x380 == 1`
+/// alternative to [`COEF_VLC_MODE3_LENGTHS`].
+///
+/// Staged as
+/// `docs/audio/wma/tables/wma-huffman-coef-class3-alt-codelen.csv`.
+pub const COEF_VLC_CLASS3_ALT_LENGTHS: [u8; 435] = [
+    10, 4, 2, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 7, 8,
+    8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 9, 10, 10, 10, 10, 10, 9, 10, 10,
+    10, 10, 10, 10, 10, 10, 11, 11, 10, 10, 11, 11, 10, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12,
+    11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 12, 12,
+    13, 13, 13, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 14, 14, 14, 14, 13, 13, 13, 13, 13, 14, 14,
+    14, 14, 14, 14, 15, 14, 14, 14, 14, 14, 14, 13, 14, 14, 14, 14, 14, 14, 15, 14, 15, 14, 15, 15,
+    15, 15, 15, 15, 16, 15, 15, 14, 15, 16, 15, 14, 14, 15, 14, 14, 15, 14, 15, 15, 15, 16, 15, 17,
+    16, 15, 15, 15, 15, 16, 16, 16, 16, 17, 15, 16, 14, 16, 16, 17, 16, 16, 16, 16, 16, 15, 15, 15,
+    16, 16, 16, 16, 17, 15, 15, 15, 15, 16, 15, 15, 4, 7, 8, 8, 9, 9, 9, 10, 10, 10, 10, 10, 10,
+    10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 13,
+    13, 13, 13, 12, 13, 14, 14, 15, 15, 14, 14, 14, 14, 14, 14, 14, 15, 14, 14, 14, 15, 15, 15, 14,
+    14, 15, 15, 15, 16, 16, 18, 17, 15, 15, 15, 6, 9, 10, 10, 11, 11, 12, 12, 12, 13, 12, 12, 12,
+    13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 14, 14, 15,
+    16, 15, 14, 14, 15, 7, 10, 11, 12, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15,
+    15, 14, 15, 16, 15, 15, 16, 15, 15, 15, 16, 15, 16, 18, 17, 15, 15, 16, 16, 17, 15, 8, 11, 13,
+    13, 14, 15, 14, 16, 15, 16, 15, 15, 15, 15, 15, 15, 17, 15, 9, 12, 14, 15, 10, 13, 14, 15, 10,
+    13, 11, 14, 11, 14, 11, 15, 12, 15, 12, 12, 13, 15, 13, 14, 13, 14, 14, 14, 14, 14, 15, 15, 15,
+    15, 14, 15, 15, 16, 16, 16, 15, 16, 16, 15, 16, 17, 16,
+];
+
+/// Exact per-symbol code lengths of the **scale-factor /
+/// spectral-envelope exponent delta** VLC (121 symbols, max length
+/// 19, Kraft equality — a complete prefix code; matches the wiki's
+/// "scale Huffman table (121 entries)").
+///
+/// The unique 1-bit codeword sits on symbol 60 — the alphabet's
+/// center, the most-probable zero-delta event of a 121-symbol
+/// `-60..=+60` delta alphabet (a property of the staged data itself).
+///
+/// Staged as `docs/audio/wma/tables/wma-huffman-scale-codelen.csv`.
+pub const SCALE_VLC_LENGTHS: [u8; 121] = [
+    18, 18, 18, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 18, 19, 18, 17, 17,
+    16, 17, 16, 16, 16, 16, 15, 15, 14, 14, 14, 14, 14, 14, 13, 13, 12, 12, 12, 11, 12, 11, 10, 10,
+    10, 9, 9, 8, 8, 8, 7, 6, 6, 5, 4, 3, 1, 4, 4, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 10, 11, 11,
+    11, 11, 12, 12, 13, 13, 13, 14, 14, 16, 15, 16, 15, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19,
+    19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19,
+];
+
+/// Exact per-symbol code lengths of the **gain delta** VLC
+/// (37 symbols, max length 13, Kraft equality — a complete prefix
+/// code; matches the wiki's "gain Huffman table (37 entries)").
+///
+/// The shortest codewords cluster around symbols 13–18 — the small
+/// magnitudes of a delta-shaped alphabet (a property of the staged
+/// data itself).
+///
+/// Staged as `docs/audio/wma/tables/wma-huffman-gain-codelen.csv`.
+pub const GAIN_VLC_LENGTHS: [u8; 37] = [
+    10, 12, 10, 13, 9, 13, 9, 8, 7, 5, 5, 4, 4, 3, 3, 3, 4, 3, 4, 4, 5, 5, 6, 8, 7, 10, 8, 10, 9,
+    8, 9, 9, 13, 10, 13, 13, 13,
+];
 
 #[cfg(test)]
 mod tests {
@@ -349,18 +482,84 @@ mod tests {
     }
 
     #[test]
-    fn mode2_real_lengths_leave_exactly_the_escape_deficit() {
+    fn mode2_real_lengths_leave_exactly_the_documented_dag_deficit() {
         assert_eq!(COEF_VLC_MODE2_REAL_LENGTHS.len(), 1016);
         assert_eq!(*COEF_VLC_MODE2_REAL_LENGTHS.iter().max().unwrap(), 22);
         assert_eq!(*COEF_VLC_MODE2_REAL_LENGTHS.iter().min().unwrap(), 2);
         let (sum, full) = kraft_num(&COEF_VLC_MODE2_REAL_LENGTHS);
-        assert!(sum < full, "mode 2 is documented incomplete");
+        assert!(sum < full, "mode 2's flat scan is documented incomplete");
         assert_eq!(
             full - sum,
             u128::from(COEF_VLC_MODE2_KRAFT_DEFICIT),
-            "unassigned code space must match the documented escape room"
+            "unassigned code space must match the documented DAG-replication room"
         );
-        assert_eq!(COEF_VLC_MODE2_ESCAPE_SYMBOLS, 1016..1024);
+    }
+
+    #[test]
+    fn reserved_sentinel_symbols_precede_the_runlevel_base() {
+        // The staged correction: symbols 0/1 are EOB/escape, the
+        // run-level companion tables start at symbol 2.
+        assert_eq!(COEF_EOB_SYMBOL, 0);
+        assert_eq!(COEF_ESCAPE_SYMBOL, 1);
+        assert_eq!(COEF_RUNLEVEL_BASE_SYMBOL, 2);
+    }
+
+    #[test]
+    fn alt_variant_lengths_form_complete_prefix_codes() {
+        assert_eq!(COEF_VLC_CLASS1_ALT_LENGTHS.len(), 555);
+        assert_eq!(*COEF_VLC_CLASS1_ALT_LENGTHS.iter().max().unwrap(), 19);
+        let (sum, full) = kraft_num(&COEF_VLC_CLASS1_ALT_LENGTHS);
+        assert_eq!(sum, full, "class-1 alt Kraft equality");
+
+        assert_eq!(COEF_VLC_CLASS3_ALT_LENGTHS.len(), 435);
+        assert_eq!(*COEF_VLC_CLASS3_ALT_LENGTHS.iter().max().unwrap(), 18);
+        let (sum, full) = kraft_num(&COEF_VLC_CLASS3_ALT_LENGTHS);
+        assert_eq!(sum, full, "class-3 alt Kraft equality");
+
+        // Both alt tables put the 2-bit shortest code on symbol 2 —
+        // the first real (R, L) symbol — like the primaries.
+        assert_eq!(COEF_VLC_CLASS1_ALT_LENGTHS[2], 2);
+        assert_eq!(COEF_VLC_CLASS3_ALT_LENGTHS[2], 2);
+    }
+
+    #[test]
+    fn scale_lengths_form_a_complete_prefix_code_centered_at_60() {
+        assert_eq!(SCALE_VLC_LENGTHS.len(), 121);
+        assert_eq!(*SCALE_VLC_LENGTHS.iter().max().unwrap(), 19);
+        let (sum, full) = kraft_num(&SCALE_VLC_LENGTHS);
+        assert_eq!(sum, full, "scale Kraft equality");
+        // The unique 1-bit code sits on the center symbol (zero delta).
+        assert_eq!(SCALE_VLC_LENGTHS[60], 1);
+        assert_eq!(
+            SCALE_VLC_LENGTHS.iter().filter(|&&l| l == 1).count(),
+            1,
+            "exactly one 1-bit codeword"
+        );
+    }
+
+    #[test]
+    fn gain_lengths_form_a_complete_prefix_code() {
+        assert_eq!(GAIN_VLC_LENGTHS.len(), 37);
+        assert_eq!(*GAIN_VLC_LENGTHS.iter().max().unwrap(), 13);
+        assert_eq!(*GAIN_VLC_LENGTHS.iter().min().unwrap(), 3);
+        let (sum, full) = kraft_num(&GAIN_VLC_LENGTHS);
+        assert_eq!(sum, full, "gain Kraft equality");
+    }
+
+    #[test]
+    fn new_length_table_spot_pins_from_the_staged_csvs() {
+        // Direct row pins (symbol, length) from the staged CSVs.
+        assert_eq!(GAIN_VLC_LENGTHS[0], 10);
+        assert_eq!(GAIN_VLC_LENGTHS[1], 12);
+        assert_eq!(GAIN_VLC_LENGTHS[18], 4);
+        assert_eq!(GAIN_VLC_LENGTHS[36], 13);
+        assert_eq!(SCALE_VLC_LENGTHS[0], 18);
+        assert_eq!(SCALE_VLC_LENGTHS[61], 4);
+        assert_eq!(SCALE_VLC_LENGTHS[120], 19);
+        assert_eq!(COEF_VLC_CLASS1_ALT_LENGTHS[0], 9);
+        assert_eq!(COEF_VLC_CLASS1_ALT_LENGTHS[554], 15);
+        assert_eq!(COEF_VLC_CLASS3_ALT_LENGTHS[0], 10);
+        assert_eq!(COEF_VLC_CLASS3_ALT_LENGTHS[434], 16);
     }
 
     #[test]
