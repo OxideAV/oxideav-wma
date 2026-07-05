@@ -733,6 +733,7 @@ pub mod escape;
 pub mod excitation;
 pub mod exponent_bands;
 pub mod frame;
+pub mod frame_bits;
 pub mod frame_encode;
 pub mod gain_ladder;
 pub mod header;
@@ -778,6 +779,9 @@ pub use envelope_vlc::{GainVlc, ScaleVlc};
 pub use escape::{EscapeError, EscapeLiteral};
 pub use exponent_bands::BandDeriveError;
 pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
+pub use frame_bits::{
+    BlockPlan, FrameBitsError, FrameFieldWidths, FrameHeaderFields, WireBlock, WireFrame,
+};
 pub use frame_encode::{
     FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
 };
