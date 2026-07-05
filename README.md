@@ -18,9 +18,14 @@ under `docs/audio/wma/`:
   Thumpudi, Koishida).
 * `tables/` + `provenance/02-…` — numeric data tables extracted as
   bytes from the vendor WMA Standard decoder module's own PE data
-  sections (coefficient VLC code lengths, band-partition Hz seeds,
-  the dequantization gain ladder), with per-table `.meta` provenance
-  and self-validating extraction.
+  sections (coefficient VLC code lengths for all five staged trees,
+  the scale/gain delta VLCs, the symbol → run/level companion maps,
+  band-partition Hz seeds, the dequantization gain ladder), with
+  per-table `.meta` provenance and self-validating extraction.
+* `frame-bit-layout.md` — the frame/superframe bit-packing layout
+  traced statically from the vendor decoder's bit-parse call graph
+  (field order, fixed widths, runtime-width formulas, sign/escape
+  placement, sub-stream self-delimiting).
 
 ### What works
 
@@ -122,68 +127,101 @@ each pinned to the patent it is disclosed in:
   partial-whitening exponent β.
 * **Wire-level data (staged tables)**: [`wire_tables`] carries the
   vendor-module extraction verbatim — the coefficient run-level VLC
-  code-length tables for decode modes 1 (666 symbols, Kraft = 1),
-  2 (1016 real symbols; the 8 escape symbols' codeword enumeration is
-  the extraction's documented residual, deficit pinned exactly), and
-  3 (476 symbols, Kraft = 1), the 25-edge critical-band Hz partition
-  seed, the 11-edge octave subband seed, and the 113-step `10^(1/16)`
-  (1.25 dB/step) dequantization gain ladder. The same extraction
-  **confirms no LSP codebook exists** on this decode path.
-  [`coef_vlc`] realises modes 1/3 as working canonical codes whose
-  codewords match the staged CSVs bit-for-bit (mode 2 is a typed
-  docs-gap). [`exponent_bands`] derives the per-block
-  exponent/quantization-band and noise-grid partitions the vendor
-  decoder computes instead of storing (Hz seed → coefficient bins,
-  round-half-up as the one documented realization detail).
-  [`gain_ladder`] maps decoded exponent indices to the §4 `Q[d]`
-  weights. [`wire_chain`] assembles it all from a parsed
-  [`WmaHeader`]: header → block size → real partitions → ladder
-  weights → the §8 encoder/decoder chains (mono and stereo, with an
-  octave-grid noise-filler option), with PCM round trips over the
-  real geometry pinned by test.
+  code-length tables for all five staged trees (decode classes 1/2/3
+  primary — 666 / 1016 / 476 symbols — plus the class-1/3 alt
+  variants, 555 / 435), the scale (121) and gain (37) delta VLC
+  lengths, the 25-edge critical-band Hz partition seed, the 11-edge
+  octave subband seed, and the 113-step `10^(1/16)` (1.25 dB/step)
+  dequantization gain ladder. [`runlevel_tables`] carries the
+  symbol → `(run, |level|)` companion maps for the three primary
+  classes (664 / 1333 / 474 pairs, 2-based indexing). The same
+  extraction **confirms no LSP codebook exists** on this decode path.
+  [`coef_vlc`] realises every staged table as a working canonical
+  code matching the staged CSVs bit-for-bit — including mode 2 under
+  the corrected reading (EOB = symbol 0, escape = symbol 1; the
+  earlier "8 missing escape codewords" premise was overturned by the
+  docs watch pass) — and expands decoded symbols into typed
+  `EndOfBlock` / `Escape` / `(run, |level|)` events. [`envelope_vlc`]
+  realises the scale/gain delta VLCs (the scale table's own data pins
+  its zero-delta center at symbol 60). [`exponent_bands`] derives the
+  per-block exponent/quantization-band and noise-grid partitions the
+  vendor decoder computes instead of storing. [`gain_ladder`] maps
+  decoded exponent indices to the §4 `Q[d]` weights.
+* **Wire bit layout** ([`frame_bits`], from the staged
+  `frame-bit-layout.md` decode-path trace): the S1/S2/S3 per-frame
+  header (reservoir offset at the staged `byte_offset_bits` formula
+  width → side field → 1-bit flag), the pinned B1..B6 per-block field
+  order (7-bit block header → gain VLC sub-stream → 1-bit
+  stereo/coupling flag on 2-channel streams → 5-bit envelope base →
+  scale VLC sub-stream → coefficient run-level sub-stream), one
+  trailing **sign bit per non-zero coefficient**, the corrected
+  escape shape (symbol 1 + literal run + literal level at
+  runtime-signalled widths), and the self-delimiting
+  coefficient-count rule with EOB (symbol 0) for trailing zeros.
+  Byte-exact layout pins, an exhaustive all-alphabets pair sweep
+  (2,152 pairs), escape boundary sweeps, and a no-panic fuzz pass
+  hold it down.
+* **Wire frame codec** ([`wire_chain`]): [`select_decode_class`]
+  carries the staged §4b rule (class 3 pinned below 32 kHz; a typed
+  class-1/2 bitrate-gated choice above — the vendor threshold
+  constants are unstaged), and [`WireFrameCodec`] derives everything
+  derivable from a parsed [`WmaHeader`] (S1 width, escape literal
+  widths per the staged source pins — run at the side-field width,
+  level at `byte_offset_bits` —, scale count = derived band count,
+  coefficient count = block size) to emit and parse whole frames as
+  bytes. Milestone pinned by test, mono (mode 2) and stereo (mode 1):
+  **PCM → §8 encoder chain → quantized coefficients → the staged
+  frame bit layout with the real VLCs → bytes → parse → §8 decoder
+  chain → PCM** within the quantizer bound, wire round trip
+  field-exact.
 
 Each module computes the quantitative property the patents fix and
 leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 745 unit tests.
+guessing. The crate carries 790 unit tests.
 
-With the encoder mirror in place the crate is a **complete,
-self-consistent codec loop at the typed-symbol level**: PCM → analysis
-→ quantize → run-level symbols → (optionally, self-consistent bits via
-[`paircode`]/[`matrix_coding`]) → entropy decode → dequantize →
-noise-fill → synthesis → PCM, round-tripping within the §4 quantizer
-bound. What separates this from a *WMA* codec is wire compatibility
-(see below).
+With the r390 wire pass the crate is a **complete, self-consistent
+codec loop at the wire-bit level**: PCM → analysis → quantize →
+run-level events → the staged frame bit layout with the real vendor
+tables → bytes → parse → entropy decode → dequantize → noise-fill →
+synthesis → PCM, round-tripping within the §4 quantizer bound. What
+separates this from decoding *vendor* WMA files is the short list of
+still-unstaged semantic bindings below.
 
 ### What is NOT implemented
 
-There is **no real-WMA bitstream-byte → PCM decode yet** (and no
-wire-compatible encode). The staged extraction closed the biggest
-data gaps — the coefficient VLC lengths, the band-partition seeds,
-the gain ladder, and the LSP negative are all in-tree now — but the
-remaining wire specifics are still unstaged:
+**Vendor-produced WMA streams do not decode end-to-end yet.** The
+crate now speaks the staged wire *layout* — real VLCs, real field
+order, real widths where the formulas are staged — and round-trips
+its own frames byte-exactly, but the remaining semantic bindings are
+still unstaged:
 
-* the **symbol → `(R, L)` mapping** of the coefficient VLCs (the
-  vendor module's companion index-ramp tables were located but their
-  per-column role is not pinned);
-* the **mode-2 escape codeword enumeration** (needs the verified
-  decode-tree walk);
-* the smaller **scale (~121) / gain (~37) VLC tables** that carry the
-  per-band exponent indices;
-* the **sign-bit placement, escape literal widths, per-band
-  noise/cutoff flag encoding, and frame/superframe bit layout**
-  (bit-reader path, needs a validator round over real streams);
+* the **S2 frame side-field width formula** and therefore the
+  concrete per-stream **escape literal widths** (their *sources* are
+  pinned: side-field width and `byte_offset_bits`; the side-field
+  width value itself is runtime/config);
+* the **gain/scale delta chaining semantics** (initial values,
+  per-band application order, wrap rule) and the **B1 / B4 field
+  semantics** (the 7-bit block header beyond its `0x7f` marker, the
+  5-bit envelope base) — the fields and symbol streams are carried
+  verbatim;
+* the **gain sub-stream element count** per block;
+* the class-1/2 **bitrate threshold constants** of the §4b decode
+  class rule (the sub-32-kHz class-3 half is pinned);
+* the **class-2 alt-variant VLC** (located, unextracted) and the
+  **alt variants' run/level companion maps**;
+* **frames-per-packet / the bit-reservoir walk** and the
+  variable-block-length split (runtime-gated per the staged trace);
 * verification that the vendor decode tree's internal **bit
-  assignment** matches the canonical reconstruction of its exact
-  lengths;
-* how the **decode mode (1/2/3) is selected** from the stream header.
+  assignment** matches the canonical reconstruction, and the exact
+  codes of mode 2's DAG-replicated high symbols (blocked statically
+  by decode-DAG space sharing, dynamically behind a COM
+  `ProcessOutput` vtable call).
 
-Each is a data-staging item under `docs/audio/wma/`; the machinery on
-this side ([`bitio`], [`huffman`]`::from_lengths`, [`coef_vlc`],
-[`wire_chain`]) is built and waiting. The [`oxideav_core`]
-registration will land once the wire format is pinned.
+Each is a data-staging item under `docs/audio/wma/`. The
+[`oxideav_core`] registration will land once vendor streams decode.
 
 ## Public surface
 

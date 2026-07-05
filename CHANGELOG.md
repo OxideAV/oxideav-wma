@@ -8,6 +8,47 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Wire-decode pass (r390)** over the newly staged frame-layout
+  trace (`docs/audio/wma/frame-bit-layout.md`, docs `c1c68cd`) and
+  the corrected mode-2 reading (docs `f319744`):
+  - `wire_tables` — the corrected mode-2 sentinels (`COEF_EOB_SYMBOL`
+    = 0, `COEF_ESCAPE_SYMBOL` = 1, 2-based run-level indexing; the
+    "8 missing escape codewords" premise was overturned — the Kraft
+    deficit is decode-DAG replication room, no codeword is missing)
+    plus the newly staged tables verbatim: `SCALE_VLC_LENGTHS` (121,
+    Kraft = 1), `GAIN_VLC_LENGTHS` (37, Kraft = 1),
+    `COEF_VLC_CLASS1_ALT_LENGTHS` (555) and
+    `COEF_VLC_CLASS3_ALT_LENGTHS` (435).
+  - `runlevel_tables` — the symbol → `(run, |level|)` companion maps
+    for decode classes 1/2/3 (664 / 1333 / 474 pairs), ramp-grouping
+    law and the provenance §4e worked examples pinned.
+  - `coef_vlc` — mode 2 now constructible (via the new
+    `HuffmanCode::from_lengths_prefix`, accepting a
+    documented-incomplete prefix code whose unassigned space decodes
+    to a clean error); `Class1Alt`/`Class3Alt` variants; typed
+    `CoefEvent` expansion (`EndOfBlock` / `Escape` /
+    `Pair{run, abs_level}`) and its encoder-side inverse
+    `symbol_for_pair`.
+  - `envelope_vlc` — the scale (121) and gain (37) delta VLCs with
+    CSV-pinned codewords and symmetric-alphabet delta accessors (the
+    scale center 60 is pinned by the staged data's own 1-bit
+    codeword).
+  - `frame_bits` — the staged bit-packing layout realised: S1/S2/S3
+    frame header, the B1..B6 per-block field order (7-bit header,
+    gain sub-stream, 2-channel stereo flag, 5-bit envelope base,
+    scale sub-stream, coefficients), one trailing sign bit per
+    non-zero coefficient, the corrected escape (symbol 1 + literal
+    run/level at runtime-signalled widths), self-delimiting
+    coefficient counts with EOB for trailing zeros. Byte-exact layout
+    pins, an exhaustive 2,152-pair all-alphabet wire sweep, escape
+    boundary sweeps, and a 200-stream no-panic fuzz pass.
+  - `wire_chain` — `select_decode_class` (staged §4b rule: class 3
+    pinned below 32 kHz, typed class-1/2 bitrate-gated choice above)
+    and `WireFrameCodec` (header-derived S1/escape widths per the
+    staged formulas and §4e source pins, frame encode/decode to
+    bytes). Milestone tests: mono (mode 2) and stereo (mode 1)
+    PCM → §8 chain → real-VLC frame bits → bytes → parse → §8 chain
+    → PCM within the quantizer bound.
 - **Wire-level data pass** over the newly staged
   `docs/audio/wma/tables/` extraction (numeric tables read as bytes
   from the vendor WMA Standard decoder module's own PE sections, with

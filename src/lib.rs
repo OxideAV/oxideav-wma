@@ -223,6 +223,30 @@
 //! the frame/superframe bit layout — so the full
 //! bitstream-byte → PCM path remains intentionally absent.
 //!
+//! Round 25 (docs `c1c68cd` + `f319744`) closes most of that list:
+//! the **frame/superframe bit-packing layout** is staged
+//! (`docs/audio/wma/frame-bit-layout.md`) and realised in
+//! [`frame_bits`] (S1/S2/S3 frame header, the B1..B6 per-block field
+//! order, per-coefficient trailing sign bits, the self-delimiting
+//! coefficient sub-stream); the **mode-2 "escape" reading is
+//! corrected** (symbols 1016..=1023 are ordinary pairs; EOB = symbol
+//! 0, escape = symbol 1 with runtime-width literal run/level) so
+//! [`coef_vlc`] now builds all five staged tables including mode 2;
+//! the **symbol → `(R, L)` companion maps** land in
+//! [`runlevel_tables`]; the **scale (121) and gain (37) delta VLCs**
+//! land in [`envelope_vlc`]; and [`wire_chain`]'s
+//! [`WireFrameCodec`] + [`select_decode_class`] (the staged §4b
+//! class rule) close the loop: PCM → §8 encoder chain → quantized
+//! coefficients → the staged frame bit layout with the real VLCs →
+//! bytes → parse → §8 decoder chain → PCM, pinned by test mono and
+//! stereo. Still `[GAP]` (typed): the S2 side-field width formula,
+//! concrete escape widths per stream, the gain/scale delta chaining
+//! semantics, the B1/B4 field semantics, the class-1/2 bitrate
+//! threshold constants, the class-2 alt VLC and the alt variants'
+//! companion maps, frames-per-packet / reservoir walk, and VBR block
+//! splits — so *vendor-produced* streams are not yet decodable
+//! end-to-end.
+//!
 //! ## Public surface
 //!
 //! * [`Version`] — WMA v1 vs. v2 selector (from container codec ID

@@ -172,16 +172,18 @@ pub const COEF_VLC_MODE1_LENGTHS: [u8; 666] = [
 ];
 
 /// Exact per-symbol code lengths of the coefficient run-level VLC for
-/// decode mode 2 — **real symbols `0..=1015` only** (max length 22).
+/// decode mode 2 — symbols `0..=1015` (max length 22).
 ///
-/// Staged as `docs/audio/wma/tables/wma-huffman-coef-mode2-codelen.csv`.
-/// **Deliberately incomplete**: the mode-2 tree also carries escape
-/// leaves for symbols `1016..=1023` whose per-codeword enumeration is
-/// unstaged (see [`COEF_VLC_MODE2_ESCAPE_SYMBOLS`]), so these lengths
-/// do NOT satisfy the Kraft equality and
-/// [`crate::huffman::HuffmanCode::from_lengths`] rejects them by
-/// design — building a decoder over them would misparse any stream
-/// that uses an escape codeword. The gap is data-staging, not code.
+/// Staged as `docs/audio/wma/tables/wma-huffman-coef-mode2-codelen.csv`
+/// under the corrected §4e reading (see the module docs): the vendor
+/// decode table is a space-shared DAG that replicates a few high
+/// symbols across several code lengths, so this flat scan does not
+/// satisfy the Kraft **equality** — build it with
+/// [`crate::huffman::HuffmanCode::from_lengths_prefix`], which
+/// accepts the documented-incomplete prefix code and turns the
+/// unassigned code space into a clean decode error. No codeword is
+/// missing; the exact codes of the DAG-replicated symbols are the
+/// documented static residual.
 pub const COEF_VLC_MODE2_REAL_LENGTHS: [u8; 1016] = [
     11, 9, 2, 3, 4, 4, 5, 6, 6, 7, 7, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11,
     11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14,
