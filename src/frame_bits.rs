@@ -1066,6 +1066,101 @@ mod tests {
     }
 
     #[test]
+    fn every_alphabet_pair_survives_the_wire() {
+        // Exhaustive self-consistency sweep: every (run, |level|)
+        // pair of every staged primary alphabet goes through the B6
+        // wire layer — one pair per exactly-full block (no EOB, the
+        // self-delimiting path) with alternating signs.
+        use crate::coef_vlc::CoefDecodeMode;
+        let escape = EscapeWidths::new(9, 12).unwrap();
+        for mode in [
+            CoefDecodeMode::Mode1,
+            CoefDecodeMode::Mode2,
+            CoefDecodeMode::Mode3,
+        ] {
+            let vlc = CoefVlc::new(mode).unwrap();
+            for symbol in 2..vlc.symbol_count() {
+                let CoefEvent::Pair { run, abs_level } = vlc.expand(symbol).unwrap() else {
+                    panic!("symbol {symbol} of {mode:?} must be a pair");
+                };
+                let m = usize::from(run) + 1;
+                let mut coeffs = vec![0i32; m];
+                let sign = if symbol % 2 == 0 { 1 } else { -1 };
+                coeffs[m - 1] = sign * i32::from(abs_level);
+                let mut w = BitWriter::new();
+                write_coefficients(&coeffs, &vlc, escape, &mut w).unwrap();
+                // The pair is in the alphabet: it must ride the VLC
+                // symbol (its length + 1 sign bit), not the escape.
+                let expected = usize::from(vlc.code().length_of(symbol).unwrap()) + 1;
+                assert_eq!(w.bit_len(), expected, "{mode:?} symbol {symbol}");
+                let bit_len = w.bit_len();
+                let bytes = w.into_bytes();
+                let mut r = BitReader::with_bit_len(&bytes, bit_len);
+                assert_eq!(
+                    read_coefficients(m, &vlc, escape, &mut r).unwrap(),
+                    coeffs,
+                    "{mode:?} symbol {symbol}"
+                );
+                assert_eq!(r.remaining_bits(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn escape_boundary_values_survive_the_wire() {
+        // The widest values the escape literals can carry, plus the
+        // smallest, on a pair guaranteed outside every alphabet.
+        let (coef, _, _) = vlcs();
+        for (run_bits, level_bits) in [(5u8, 9u8), (9, 12), (12, 16)] {
+            let escape = EscapeWidths::new(run_bits, level_bits).unwrap();
+            let max_run = escape.max_run() as usize;
+            let max_level = escape.max_level() as i32;
+            let m = max_run + 2;
+            for (run, level) in [
+                (max_run, max_level),
+                (max_run, -max_level),
+                (0, max_level), // level beyond every staged table
+            ] {
+                let mut coeffs = vec![0i32; m];
+                coeffs[run] = level;
+                let mut w = BitWriter::new();
+                write_coefficients(&coeffs, &coef, escape, &mut w).unwrap();
+                let bit_len = w.bit_len();
+                let bytes = w.into_bytes();
+                let mut r = BitReader::with_bit_len(&bytes, bit_len);
+                assert_eq!(
+                    read_coefficients(m, &coef, escape, &mut r).unwrap(),
+                    coeffs,
+                    "widths ({run_bits}, {level_bits}) run {run} level {level}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic_the_frame_parser() {
+        // Robustness: whatever bits arrive, read_frame returns a
+        // Result — no panics, no unbounded work.
+        let (coef, gain, scale) = vlcs();
+        let plans = vec![plan(&coef, &gain, &scale, 2, 64)];
+        let widths = FrameFieldWidths::new(11, 7).unwrap();
+        let mut state = 0x5EEDu64;
+        for round in 0..200 {
+            let len = (round % 64) + 1;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (state >> 33) as u8
+                })
+                .collect();
+            let mut r = BitReader::new(&bytes);
+            let _ = read_frame(&widths, &plans, &mut r);
+        }
+    }
+
+    #[test]
     fn truncated_frame_fails_cleanly() {
         let (coef, gain, scale) = vlcs();
         let widths = FrameFieldWidths::new(10, 6).unwrap();
