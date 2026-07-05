@@ -768,7 +768,7 @@ pub use bitio::{BitReader, BitWriter, BitstreamEnd};
 pub use block::BlockSize;
 pub use channel_decision::{ChannelMode, OpenLoopDecision};
 pub use codebook::{CodebookGrid, Disposition};
-pub use coef_vlc::{CoefDecodeMode, CoefVlc, CoefVlcError};
+pub use coef_vlc::{CoefDecodeMode, CoefEvent, CoefVlc, CoefVlcError};
 pub use decode::{AssemblyError, ChannelDecoder, DecodeError, Stage};
 pub use dequant::{DequantStage, InvalidDequant};
 pub use encode::{ChannelEncoder, EncodeAssemblyError, EncodeError, EncodeStage, EncodedBlock};

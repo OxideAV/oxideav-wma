@@ -182,6 +182,32 @@ impl HuffmanCode {
     ///   code; the single-symbol `[1]` case is accepted as the
     ///   conventional degenerate code).
     pub fn from_lengths(lengths: &[u8]) -> Result<Self, HuffmanError> {
+        Self::build_from_lengths(lengths, true)
+    }
+
+    /// Build the canonical code from explicit per-symbol code lengths,
+    /// accepting an **incomplete** prefix code (Kraft *inequality*
+    /// `Σ 2^-len <= 1`).
+    ///
+    /// This is the plug-in point for a staged real table whose length
+    /// vector is documented-incomplete — the WMA mode-2 coefficient
+    /// VLC, whose vendor decode DAG replicates a few high symbols
+    /// across several code lengths so their canonical single length is
+    /// not statically determinable. Decoding a codeword that falls in
+    /// the unassigned code space returns
+    /// [`HuffmanError::InvalidCodeword`] instead of a symbol.
+    ///
+    /// # Errors
+    ///
+    /// As [`HuffmanCode::from_lengths`], except that
+    /// [`HuffmanError::KraftViolation`] is raised only when the
+    /// lengths *oversubscribe* the code space (`Σ 2^-len > 1` — not a
+    /// prefix code at all).
+    pub fn from_lengths_prefix(lengths: &[u8]) -> Result<Self, HuffmanError> {
+        Self::build_from_lengths(lengths, false)
+    }
+
+    fn build_from_lengths(lengths: &[u8], require_complete: bool) -> Result<Self, HuffmanError> {
         if lengths.is_empty() {
             return Err(HuffmanError::EmptyAlphabet);
         }
@@ -195,9 +221,14 @@ impl HuffmanCode {
         // Kraft sum in units of 2^-max_len, exactly (u128 headroom:
         // max 64-bit lengths over practical alphabet sizes).
         let kraft: u128 = lengths.iter().map(|&len| 1u128 << (max_len - len)).sum();
-        let complete = kraft == 1u128 << max_len;
+        let full = 1u128 << max_len;
         let degenerate_single = lengths.len() == 1 && lengths[0] == 1;
-        if !complete && !degenerate_single {
+        let acceptable = if require_complete {
+            kraft == full || degenerate_single
+        } else {
+            kraft <= full
+        };
+        if !acceptable {
             return Err(HuffmanError::KraftViolation);
         }
 
