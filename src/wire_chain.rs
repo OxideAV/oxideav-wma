@@ -42,17 +42,25 @@
 
 use crate::analysis::Analysis;
 use crate::bands::{BandPlan, BandPolicy};
+use crate::bitio::{BitReader, BitWriter};
 use crate::block::BlockSize;
+use crate::coef_vlc::{CoefDecodeMode, CoefVlc, CoefVlcError};
 use crate::decode::{AssemblyError, ChannelDecoder};
 use crate::dequant::{DequantStage, InvalidDequant};
 use crate::encode::{ChannelEncoder, EncodeAssemblyError};
 use crate::entropy_mode::Partition;
+use crate::envelope_vlc::{GainVlc, ScaleVlc};
 use crate::exponent_bands::{exponent_band_layout, noise_band_layout, BandDeriveError};
+use crate::frame_bits::{
+    read_frame, write_frame, BlockPlan, FrameBitsError, FrameFieldWidths, WireFrame,
+};
 use crate::gain_ladder::{band_weights, GainLadderError};
 use crate::header::WmaHeader;
 use crate::noisefill::{InvalidNoiseFill, NoiseFiller};
+use crate::paircode::EscapeWidths;
 use crate::qband::QuantBandLayout;
 use crate::quant::{InvalidQuant, QuantStage};
+use crate::setup::SetupParams;
 use crate::spectral::{SpectralDecode, SpectralEncode};
 use crate::step_size::OverallStepSize;
 use crate::stereo_decode::{StereoAssemblyError, StereoDecoder};
@@ -100,6 +108,25 @@ pub enum WireChainError {
     /// The two-channel assembly cross-check failed (defensive; both
     /// channels are built from one config so their block sizes agree).
     StereoAssembly(StereoAssemblyError),
+    /// A derived frame-field width fell outside `1..=32` (malformed
+    /// header rates) or the escape-width pairing was rejected.
+    BadFieldWidth {
+        /// Which width was rejected.
+        field: &'static str,
+        /// The rejected value.
+        value: u32,
+    },
+    /// The header's channel count is outside the staged layout's
+    /// `1..=2` (the B3 flag is defined for exactly 2 channels).
+    UnsupportedChannels {
+        /// The header's channel count.
+        channels: u8,
+    },
+    /// A coefficient VLC could not be built (defensive; the staged
+    /// tables construct — pinned by test in [`crate::coef_vlc`]).
+    CoefVlc(CoefVlcError),
+    /// The frame bit layer failed during encode/decode.
+    FrameBits(FrameBitsError),
 }
 
 impl core::fmt::Display for WireChainError {
@@ -118,6 +145,16 @@ impl core::fmt::Display for WireChainError {
             WireChainError::EncodeAssembly(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
             WireChainError::DecodeAssembly(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
             WireChainError::StereoAssembly(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
+            WireChainError::BadFieldWidth { field, value } => write!(
+                f,
+                "oxideav-wma::wire_chain: derived width `{field}` = {value} is outside 1..=32",
+            ),
+            WireChainError::UnsupportedChannels { channels } => write!(
+                f,
+                "oxideav-wma::wire_chain: {channels} channels (the staged block layout covers 1..=2)",
+            ),
+            WireChainError::CoefVlc(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
+            WireChainError::FrameBits(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
         }
     }
 }
@@ -133,6 +170,18 @@ impl From<BandDeriveError> for WireChainError {
 impl From<GainLadderError> for WireChainError {
     fn from(e: GainLadderError) -> Self {
         WireChainError::GainLadder(e)
+    }
+}
+
+impl From<CoefVlcError> for WireChainError {
+    fn from(e: CoefVlcError) -> Self {
+        WireChainError::CoefVlc(e)
+    }
+}
+
+impl From<FrameBitsError> for WireChainError {
+    fn from(e: FrameBitsError) -> Self {
+        WireChainError::FrameBits(e)
     }
 }
 
@@ -330,6 +379,223 @@ impl WireBlockConfig {
         let ch0 = self.channel_decoder(exponent_indices_ch0, step, split, None)?;
         let ch1 = self.channel_decoder(exponent_indices_ch1, step, split, None)?;
         StereoDecoder::new(ch0, ch1).map_err(WireChainError::StereoAssembly)
+    }
+}
+
+/// Sample-rate threshold of the staged decode-class selection rule
+/// (`provenance/02` §4b): below it the class is pinned to 3.
+pub const DECODE_CLASS_RATE_THRESHOLD_HZ: u32 = 32_000;
+
+/// The staged decode-class selection outcome for one stream.
+///
+/// The staged rule (`provenance/02` §4b): the class **defaults to 3**
+/// and moves to 1 or 2 only when `sample_rate >=` 32 kHz **and** a
+/// bitrate/quality float compares against two vendor constants that
+/// are *not* staged. So low-rate streams are fully pinned; high-rate
+/// streams are a typed two-way choice the caller resolves by
+/// black-box observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeClassSelection {
+    /// The rule pins the class outright (`sample_rate <` 32 kHz →
+    /// class 3).
+    Pinned(CoefDecodeMode),
+    /// `sample_rate >=` 32 kHz: class 1 or class 2 by the unstaged
+    /// bitrate-float comparison — the two staged candidates, in the
+    /// rule's own order (`[GAP]`: the threshold constants).
+    BitrateGated {
+        /// The two candidate primary modes (class 1, class 2).
+        candidates: [CoefDecodeMode; 2],
+    },
+}
+
+/// Apply the staged §4b decode-class rule to a stream's sample rate.
+pub fn select_decode_class(sample_rate: u32) -> DecodeClassSelection {
+    if sample_rate >= DECODE_CLASS_RATE_THRESHOLD_HZ {
+        DecodeClassSelection::BitrateGated {
+            candidates: [CoefDecodeMode::Mode1, CoefDecodeMode::Mode2],
+        }
+    } else {
+        DecodeClassSelection::Pinned(CoefDecodeMode::Mode3)
+    }
+}
+
+/// Header-derived **wire frame codec**: everything needed to emit and
+/// parse whole frames at the bit level — the staged frame/block
+/// layout ([`crate::frame_bits`]) instantiated with the real VLCs and
+/// the header-derived geometry.
+///
+/// Derivations (all staged):
+///
+/// * S1 width = `byte_offset_bits` from the staged formula
+///   ([`SetupParams`]).
+/// * Escape literal widths: the staged §4e correction pins their
+///   *sources* — the escape reads its literal run at the frame
+///   side-field width (`ctx+0x35c`) and its literal level at
+///   `byte_offset_bits` (`ctx+0x88`). The side-field width itself has
+///   no staged formula (`[GAP]`), so the caller threads in an
+///   observed value and both dependent widths follow.
+/// * Scale symbols per block = the derived exponent band count.
+///
+/// Still caller-supplied (typed gaps): the coefficient decode mode
+/// when [`select_decode_class`] returns the bitrate-gated case, the
+/// gain-delta count per block (sub-stream count semantics unstaged;
+/// defaults to 1), and the envelope gate.
+#[derive(Debug, Clone)]
+pub struct WireFrameCodec {
+    config: WireBlockConfig,
+    widths: FrameFieldWidths,
+    escape: EscapeWidths,
+    coef_vlc: CoefVlc,
+    gain_vlc: GainVlc,
+    scale_vlc: ScaleVlc,
+    channels: u8,
+    gain_count: usize,
+    envelope_coded: bool,
+}
+
+impl WireFrameCodec {
+    /// Derive the codec from a parsed header, a resolved coefficient
+    /// decode mode, and the observed frame side-field width.
+    ///
+    /// # Errors
+    ///
+    /// * [`WireChainError::UnsupportedChannels`] outside 1–2 channels.
+    /// * [`WireChainError::BadFieldWidth`] when a derived width falls
+    ///   outside `1..=32`.
+    /// * Propagated geometry/VLC construction failures.
+    pub fn from_header(
+        header: &WmaHeader,
+        mode: CoefDecodeMode,
+        side_field_bits: u8,
+    ) -> Result<Self, WireChainError> {
+        if header.channels == 0 || header.channels > 2 {
+            return Err(WireChainError::UnsupportedChannels {
+                channels: header.channels,
+            });
+        }
+        let config = WireBlockConfig::from_header(header)?;
+        let setup = SetupParams::from_header(header);
+        let byte_offset_bits = u8::try_from(setup.byte_offset_bits)
+            .ok()
+            .filter(|&b| (1..=32).contains(&b))
+            .ok_or(WireChainError::BadFieldWidth {
+                field: "byte_offset_bits",
+                value: setup.byte_offset_bits,
+            })?;
+        let widths = FrameFieldWidths::new(byte_offset_bits, side_field_bits).map_err(|_| {
+            WireChainError::BadFieldWidth {
+                field: "side_field_bits",
+                value: u32::from(side_field_bits),
+            }
+        })?;
+        // §4e: escape literal run at the side-field width, literal
+        // level at byte_offset_bits.
+        let escape = EscapeWidths::new(side_field_bits, byte_offset_bits).map_err(|_| {
+            WireChainError::BadFieldWidth {
+                field: "escape widths",
+                value: u32::from(side_field_bits),
+            }
+        })?;
+        Ok(Self {
+            config,
+            widths,
+            escape,
+            coef_vlc: CoefVlc::new(mode)?,
+            gain_vlc: GainVlc::new(),
+            scale_vlc: ScaleVlc::new(),
+            channels: header.channels,
+            gain_count: 1,
+            envelope_coded: true,
+        })
+    }
+
+    /// Override the gain-delta count per block (sub-stream count
+    /// semantics are unstaged; the default is 1).
+    #[must_use]
+    pub fn with_gain_count(mut self, gain_count: usize) -> Self {
+        self.gain_count = gain_count;
+        self
+    }
+
+    /// Override the envelope gate (B4/B5 presence; staged as a config
+    /// flag, default on).
+    #[must_use]
+    pub fn with_envelope_coded(mut self, envelope_coded: bool) -> Self {
+        self.envelope_coded = envelope_coded;
+        self
+    }
+
+    /// The derived block-geometry configuration.
+    pub fn config(&self) -> &WireBlockConfig {
+        &self.config
+    }
+
+    /// The derived frame header field widths.
+    pub fn widths(&self) -> &FrameFieldWidths {
+        &self.widths
+    }
+
+    /// The derived escape literal widths.
+    pub fn escape_widths(&self) -> EscapeWidths {
+        self.escape
+    }
+
+    /// The coefficient decode mode in force.
+    pub fn mode(&self) -> CoefDecodeMode {
+        self.coef_vlc.mode()
+    }
+
+    /// The per-block layout plan this codec parses and emits.
+    pub fn plan(&self) -> BlockPlan<'_> {
+        BlockPlan {
+            coef_vlc: &self.coef_vlc,
+            gain_vlc: &self.gain_vlc,
+            scale_vlc: &self.scale_vlc,
+            escape: self.escape,
+            channels: self.channels,
+            envelope_coded: self.envelope_coded,
+            gain_count: self.gain_count,
+            scale_count: self.config.exponent_band_count(),
+            coef_count: usize::from(self.config.block_size().samples()),
+        }
+    }
+
+    /// Emit one frame as bytes, returning `(bytes, bit_len)` (frames
+    /// are bit-packed; the trailing byte may be partial).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`FrameBitsError`] through
+    /// [`WireChainError::FrameBits`].
+    pub fn encode_frame(&self, frame: &WireFrame) -> Result<(Vec<u8>, usize), WireChainError> {
+        let blocks = frame
+            .channel_blocks
+            .first()
+            .map(Vec::len)
+            .unwrap_or_default();
+        let plans = vec![self.plan(); blocks];
+        let mut writer = BitWriter::new();
+        write_frame(frame, &self.widths, &plans, &mut writer)?;
+        let bit_len = writer.bit_len();
+        Ok((writer.into_bytes(), bit_len))
+    }
+
+    /// Parse one frame of `blocks_per_channel` uniform blocks from
+    /// `bytes` (`bit_len` valid bits).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`FrameBitsError`] through
+    /// [`WireChainError::FrameBits`].
+    pub fn decode_frame(
+        &self,
+        bytes: &[u8],
+        bit_len: usize,
+        blocks_per_channel: usize,
+    ) -> Result<WireFrame, WireChainError> {
+        let plans = vec![self.plan(); blocks_per_channel];
+        let mut reader = BitReader::with_bit_len(bytes, bit_len);
+        Ok(read_frame(&self.widths, &plans, &mut reader)?)
     }
 }
 
@@ -550,6 +816,203 @@ mod tests {
         let a = fd_exp.decode_frame(&params_exp).unwrap();
         let b = fd_noise.decode_frame(&params_noise).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn decode_class_rule_matches_the_staged_fork() {
+        // provenance/02 §4b: default class 3; the 32 kHz threshold
+        // opens the (unstaged-constant) class-1/2 bitrate fork.
+        for sr in [8_000, 11_025, 16_000, 22_050, 24_000, 31_999] {
+            assert_eq!(
+                select_decode_class(sr),
+                DecodeClassSelection::Pinned(CoefDecodeMode::Mode3),
+                "{sr}"
+            );
+        }
+        for sr in [32_000, 44_100, 48_000] {
+            assert_eq!(
+                select_decode_class(sr),
+                DecodeClassSelection::BitrateGated {
+                    candidates: [CoefDecodeMode::Mode1, CoefDecodeMode::Mode2],
+                },
+                "{sr}"
+            );
+        }
+    }
+
+    #[test]
+    fn codec_derives_the_staged_widths_from_the_header() {
+        let codec = WireFrameCodec::from_header(&header_44k(), CoefDecodeMode::Mode2, 6).unwrap();
+        // bps = 128000 / (2 * 44100) = 1 (integer);
+        // byte_offset_bits = floor(log2(1 * 2048 / 8)) + 2 = 10.
+        assert_eq!(codec.widths(), &FrameFieldWidths::new(10, 6).unwrap());
+        // §4e: escape run at the side-field width, escape level at
+        // byte_offset_bits.
+        assert_eq!(codec.escape_widths().run_bits, 6);
+        assert_eq!(codec.escape_widths().level_bits, 10);
+        assert_eq!(codec.mode(), CoefDecodeMode::Mode2);
+        let plan = codec.plan();
+        assert_eq!(plan.channels, 2);
+        assert_eq!(plan.scale_count, 25);
+        assert_eq!(plan.coef_count, 2048);
+        assert_eq!(plan.gain_count, 1);
+        assert!(plan.envelope_coded);
+    }
+
+    #[test]
+    fn codec_rejects_unsupported_channel_counts() {
+        let h = WmaHeader::parse(Version::V2, 44_100, 6, 128_000, 0, &[0; 6]).unwrap();
+        assert_eq!(
+            WireFrameCodec::from_header(&h, CoefDecodeMode::Mode2, 6).unwrap_err(),
+            WireChainError::UnsupportedChannels { channels: 6 }
+        );
+    }
+
+    #[test]
+    fn mono_pcm_round_trips_through_the_wire_bit_layout() {
+        // THE r390 milestone loop: PCM -> §8 encoder chain (real
+        // geometry) -> quantized coefficients -> the staged frame bit
+        // layout with the real mode-2 VLC (pairs, escapes, signs) ->
+        // bytes -> frame_bits parse -> §8 decoder chain -> PCM.
+        // 512 kb/s mono: bps = 11, so the staged formula gives
+        // byte_offset_bits = floor(log2(11 * 2048 / 8)) + 2 = 13 and
+        // the escape level literal spans 13 bits (max 8191).
+        let header = WmaHeader::parse(Version::V2, 44_100, 1, 512_000, 0, &[0; 6]).unwrap();
+        let codec = WireFrameCodec::from_header(&header, CoefDecodeMode::Mode2, 6).unwrap();
+        let cfg = codec.config().clone();
+        let m = usize::from(cfg.block_size().samples());
+        let n = cfg.exponent_band_count();
+        let indices = vec![80u8; n]; // ladder value 1024000/1024000: flat unit weights
+        let step = OverallStepSize::new(5e-3).unwrap();
+        let split = u32::try_from(m).unwrap(); // all-levels: EncodedBlock.levels is the full coef vector
+
+        // Forward: PCM -> quantized coefficient vectors.
+        let mut fe = FrameEncoder::new(cfg.channel_encoder(&indices, step, split).unwrap());
+        let blocks = 2usize;
+        let x: Vec<f64> = pseudo_random(blocks * m, 390)
+            .into_iter()
+            .map(|v| v * 0.5)
+            .collect();
+        let mut encoded = fe.encode_frame(&x).unwrap();
+        encoded.push(fe.flush().unwrap());
+
+        // Package as wire blocks (envelope/gain symbol streams carried
+        // verbatim; their delta chaining is the documented GAP).
+        let frame = WireFrame {
+            header: crate::frame_bits::FrameHeaderFields {
+                reservoir_offset: 100,
+                side_field: 3,
+                flag: false,
+            },
+            channel_blocks: vec![encoded
+                .iter()
+                .map(|b| {
+                    assert!(b.pairs.is_empty(), "all-levels mode has no tail pairs");
+                    crate::frame_bits::WireBlock {
+                        header: 0x11,
+                        gain_symbols: vec![18],
+                        stereo_coupling: None,
+                        envelope_base: 5,
+                        scale_symbols: vec![60; n],
+                        coefficients: b.levels.clone(),
+                    }
+                })
+                .collect()],
+        };
+
+        // Wire: bits out, bits back, field-exact.
+        let (bytes, bit_len) = codec.encode_frame(&frame).unwrap();
+        let decoded = codec.decode_frame(&bytes, bit_len, blocks + 1).unwrap();
+        assert_eq!(decoded, frame, "wire round trip must be field-exact");
+
+        // Inverse: decoded coefficients -> PCM.
+        let mut fd = FrameDecoder::new(cfg.channel_decoder(&indices, step, split, None).unwrap());
+        let params: Vec<_> = decoded.channel_blocks[0]
+            .iter()
+            .map(|b| {
+                crate::frame::BlockParams::new(b.coefficients.clone(), vec![], vec![Vec::new(); n])
+            })
+            .collect();
+        let pcm = fd.decode_frame(&params).unwrap();
+        for (t, (&want, &got)) in x.iter().zip(pcm.iter().skip(m)).enumerate() {
+            assert!((want - got).abs() < 0.1, "sample {t}: {want} vs {got}");
+        }
+    }
+
+    #[test]
+    fn stereo_pcm_round_trips_through_the_wire_bit_layout() {
+        // Two-channel wire loop (B3 stereo flag in every block),
+        // independent channels, real mode-1 VLC with escapes.
+        // 1024 kb/s stereo: bps = 11 -> byte_offset_bits = 13.
+        let header = WmaHeader::parse(Version::V2, 44_100, 2, 1_024_000, 0, &[0; 6]).unwrap();
+        let codec = WireFrameCodec::from_header(&header, CoefDecodeMode::Mode1, 6).unwrap();
+        let cfg = codec.config().clone();
+        let m = usize::from(cfg.block_size().samples());
+        let n = cfg.exponent_band_count();
+        let indices = vec![80u8; n];
+        let step = OverallStepSize::new(5e-3).unwrap();
+        let split = u32::try_from(m).unwrap();
+
+        let soften = |v: Vec<f64>| v.into_iter().map(|s| s * 0.5).collect::<Vec<_>>();
+        let inputs = [soften(pseudo_random(m, 391)), soften(pseudo_random(m, 392))];
+        let mut frames_per_channel = Vec::new();
+        let mut decoders = Vec::new();
+        for x in &inputs {
+            let mut fe = FrameEncoder::new(cfg.channel_encoder(&indices, step, split).unwrap());
+            let mut encoded = fe.encode_frame(x).unwrap();
+            encoded.push(fe.flush().unwrap());
+            frames_per_channel.push(encoded);
+            decoders.push(FrameDecoder::new(
+                cfg.channel_decoder(&indices, step, split, None).unwrap(),
+            ));
+        }
+
+        let frame = WireFrame {
+            header: crate::frame_bits::FrameHeaderFields {
+                reservoir_offset: 512,
+                side_field: 63,
+                flag: true,
+            },
+            channel_blocks: frames_per_channel
+                .iter()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|b| crate::frame_bits::WireBlock {
+                            header: 0x22,
+                            gain_symbols: vec![17],
+                            stereo_coupling: Some(false),
+                            envelope_base: 9,
+                            scale_symbols: vec![60; n],
+                            coefficients: b.levels.clone(),
+                        })
+                        .collect()
+                })
+                .collect(),
+        };
+        let (bytes, bit_len) = codec.encode_frame(&frame).unwrap();
+        let decoded = codec.decode_frame(&bytes, bit_len, 2).unwrap();
+        assert_eq!(decoded, frame);
+
+        for (ch, x) in inputs.iter().enumerate() {
+            let params: Vec<_> = decoded.channel_blocks[ch]
+                .iter()
+                .map(|b| {
+                    crate::frame::BlockParams::new(
+                        b.coefficients.clone(),
+                        vec![],
+                        vec![Vec::new(); n],
+                    )
+                })
+                .collect();
+            let pcm = decoders[ch].decode_frame(&params).unwrap();
+            for (t, (&want, &got)) in x.iter().zip(pcm.iter().skip(m)).enumerate() {
+                assert!(
+                    (want - got).abs() < 0.1,
+                    "ch {ch} sample {t}: {want} vs {got}"
+                );
+            }
+        }
     }
 
     #[test]

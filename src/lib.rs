@@ -807,7 +807,9 @@ pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 pub use window::{Window, WindowPair, WindowShape};
-pub use wire_chain::{WireBlockConfig, WireChainError};
+pub use wire_chain::{
+    select_decode_class, DecodeClassSelection, WireBlockConfig, WireChainError, WireFrameCodec,
+};
 
 /// Crate-local error type. Concrete variants land as the rebuild
 /// rounds populate the codec pipeline.
