@@ -52,7 +52,8 @@ use crate::entropy_mode::Partition;
 use crate::envelope_vlc::{GainVlc, ScaleVlc};
 use crate::exponent_bands::{exponent_band_layout, noise_band_layout, BandDeriveError};
 use crate::frame_bits::{
-    read_frame, write_frame, BlockPlan, FrameBitsError, FrameFieldWidths, WireFrame,
+    read_frame, read_packet, write_frame, write_packet, BlockPlan, FrameBitsError,
+    FrameFieldWidths, WireFrame,
 };
 use crate::gain_ladder::{band_weights, GainLadderError};
 use crate::header::WmaHeader;
@@ -578,6 +579,47 @@ impl WireFrameCodec {
         write_frame(frame, &self.widths, &plans, &mut writer)?;
         let bit_len = writer.bit_len();
         Ok((writer.into_bytes(), bit_len))
+    }
+
+    /// Emit one packet (superframe) of back-to-back bit-contiguous
+    /// frames per the staged §1 rule, as `(bytes, bit_len)`. All
+    /// frames must share one uniform block count.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`FrameBitsError`] through
+    /// [`WireChainError::FrameBits`].
+    pub fn encode_packet(&self, frames: &[WireFrame]) -> Result<(Vec<u8>, usize), WireChainError> {
+        let blocks = frames
+            .first()
+            .and_then(|f| f.channel_blocks.first())
+            .map(Vec::len)
+            .unwrap_or_default();
+        let plans = vec![self.plan(); blocks];
+        let mut writer = BitWriter::new();
+        write_packet(frames, &self.widths, &plans, &mut writer)?;
+        let bit_len = writer.bit_len();
+        Ok((writer.into_bytes(), bit_len))
+    }
+
+    /// Parse one packet of `frame_count` frames of
+    /// `blocks_per_channel` uniform blocks each (both counts are
+    /// runtime state per the staged trace — the caller owns them).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`FrameBitsError`] through
+    /// [`WireChainError::FrameBits`].
+    pub fn decode_packet(
+        &self,
+        bytes: &[u8],
+        bit_len: usize,
+        frame_count: usize,
+        blocks_per_channel: usize,
+    ) -> Result<Vec<WireFrame>, WireChainError> {
+        let plans = vec![self.plan(); blocks_per_channel];
+        let mut reader = BitReader::with_bit_len(bytes, bit_len);
+        Ok(read_packet(&self.widths, &plans, frame_count, &mut reader)?)
     }
 
     /// Parse one frame of `blocks_per_channel` uniform blocks from

@@ -649,6 +649,50 @@ pub fn read_frame(
     })
 }
 
+/// Emit one **packet (superframe)**: the staged §1 rule — one or
+/// more frames, back-to-back and bit-contiguous (no per-frame
+/// padding; only the packet end is byte-padded by the container).
+///
+/// The **number of frames per packet is runtime** per the staged
+/// trace (packet size ÷ per-frame lengths, not a static field), so
+/// the count is explicit here and [`read_packet`] takes it back as a
+/// parameter. The per-frame S1 reservoir-offset values are carried
+/// verbatim from each [`WireFrame`] (their accumulation semantics
+/// are runtime-gated — a documented `[GAP]`).
+///
+/// # Errors
+///
+/// As [`write_frame`], per frame.
+pub fn write_packet(
+    frames: &[WireFrame],
+    widths: &FrameFieldWidths,
+    plans: &[BlockPlan<'_>],
+    writer: &mut BitWriter,
+) -> Result<(), FrameBitsError> {
+    for frame in frames {
+        write_frame(frame, widths, plans, writer)?;
+    }
+    Ok(())
+}
+
+/// Parse one packet of `frame_count` back-to-back frames — the
+/// inverse of [`write_packet`] (the count is runtime state the
+/// caller owns, per the staged trace).
+///
+/// # Errors
+///
+/// As [`read_frame`], per frame.
+pub fn read_packet(
+    widths: &FrameFieldWidths,
+    plans: &[BlockPlan<'_>],
+    frame_count: usize,
+    reader: &mut BitReader<'_>,
+) -> Result<Vec<WireFrame>, FrameBitsError> {
+    (0..frame_count)
+        .map(|_| read_frame(widths, plans, reader))
+        .collect()
+}
+
 fn frame_channels(plans: &[BlockPlan<'_>]) -> Result<u8, FrameBitsError> {
     let Some(first) = plans.first() else {
         return Err(FrameBitsError::PlanMismatch {
@@ -1157,6 +1201,73 @@ mod tests {
                 .collect();
             let mut r = BitReader::new(&bytes);
             let _ = read_frame(&widths, &plans, &mut r);
+        }
+    }
+
+    #[test]
+    fn packet_concatenates_frames_bit_contiguously() {
+        // §1: frames back-to-back with no per-frame padding — the
+        // packet's bit length is exactly the sum of its frames'.
+        let (coef, gain, scale) = vlcs();
+        let widths = FrameFieldWidths::new(10, 6).unwrap();
+        let plans = vec![plan(&coef, &gain, &scale, 1, 32)];
+        let mk_frame = |seed: u32| {
+            let mut coefficients = vec![0i32; 32];
+            coefficients[(seed as usize) % 32] = seed as i32 + 1;
+            WireFrame {
+                header: FrameHeaderFields {
+                    reservoir_offset: seed % 1024,
+                    side_field: seed % 64,
+                    flag: seed % 2 == 1,
+                },
+                channel_blocks: vec![vec![WireBlock {
+                    header: (seed as u8) & 0x7f,
+                    gain_symbols: vec![(seed as usize) % 37],
+                    stereo_coupling: None,
+                    envelope_base: (seed as u8) & 0x1f,
+                    scale_symbols: vec![60, 59, 61],
+                    coefficients,
+                }]],
+            }
+        };
+        let frames: Vec<WireFrame> = (0..3).map(mk_frame).collect();
+
+        // Per-frame bit lengths, measured individually.
+        let mut per_frame_bits = Vec::new();
+        for f in &frames {
+            let mut w = BitWriter::new();
+            write_frame(f, &widths, &plans, &mut w).unwrap();
+            per_frame_bits.push(w.bit_len());
+        }
+
+        let mut w = BitWriter::new();
+        write_packet(&frames, &widths, &plans, &mut w).unwrap();
+        assert_eq!(
+            w.bit_len(),
+            per_frame_bits.iter().sum::<usize>(),
+            "no padding between frames"
+        );
+        let bit_len = w.bit_len();
+        let bytes = w.into_bytes();
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        assert_eq!(read_packet(&widths, &plans, 3, &mut r).unwrap(), frames);
+        assert_eq!(r.remaining_bits(), 0);
+    }
+
+    #[test]
+    fn our_bit_reader_matches_the_staged_mask_lut_convention() {
+        // The staged wma-bitreader-mask-lut pins the vendor get-bits
+        // as (acc >> shift) & ((1 << n) - 1), MSB-first. Our reader
+        // must produce exactly that mask for every field width.
+        let bytes = [0xFFu8; 8];
+        for n in 1..=32u8 {
+            let mut r = BitReader::new(&bytes);
+            let mask = if n == 32 {
+                u64::from(u32::MAX)
+            } else {
+                (1u64 << n) - 1
+            };
+            assert_eq!(r.read_bits(n).unwrap(), mask, "width {n}");
         }
     }
 
