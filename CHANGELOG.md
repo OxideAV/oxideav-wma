@@ -8,6 +8,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Class-selector pass (r405)** over the newly staged
+  decode-class threshold extraction
+  (`docs/audio/wma/tables/wma-class-selector-thresholds.csv` + the
+  updated `docs/audio/wma/provenance/02-extractor-univdreams-tables.md`):
+  - `wire_tables` — the four class-selector constants verbatim
+    (`CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND` = 0.125,
+    `CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD` = 0.72,
+    `CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD` = 1.16,
+    `CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND` = 1.6, plus the
+    storage-order array `CLASS_SELECTOR_THRESHOLDS`), pinned
+    bit-exact (`f32::to_bits`) against the staged CSV's
+    shortest-round-trip renderings. Documented residual gaps: the
+    branch *directions* (which side of each threshold selects which
+    class) and the init formula of the per-stream float the
+    thresholds are compared against.
 - **Wire-decode pass (r390)** over the newly staged frame-layout
   trace (`docs/audio/wma/frame-bit-layout.md`, docs `c1c68cd`) and
   the corrected mode-2 reading (docs `f319744`):

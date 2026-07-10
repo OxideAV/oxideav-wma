@@ -62,6 +62,12 @@
 //! * [`GAIN_VLC_LENGTHS`] — the 37-symbol **gain delta** VLC
 //!   (Kraft-complete; matches the wiki's "gain Huffman table
 //!   (37 entries)").
+//! * [`CLASS_SELECTOR_THRESHOLDS`] — the four `f32` constants of the
+//!   decode-class selection rule (the per-stream rate float's
+//!   lower/upper bounds plus the class-1 and class-2 branch
+//!   thresholds), compared against a per-stream float at stream-open
+//!   time when the sample rate is at least 32 kHz. The rule itself is
+//!   realised in [`crate::wire_chain`].
 //! * The **symbol → `(R, L)` companion maps** for all three decode
 //!   classes are staged too — carried in [`crate::runlevel_tables`].
 //! * The frame/superframe **bit-packing layout** (field order + fixed
@@ -69,6 +75,12 @@
 //!
 //! ## What the staged material does NOT pin (open `[GAP]`s)
 //!
+//! * The class-selector **branch directions**: which side of the
+//!   class-1 / class-2 branch thresholds selects which class (the
+//!   staged trace deliberately records only that the float "compares
+//!   a certain way"), and the init **formula of the per-stream float**
+//!   the thresholds are compared against (a "bitrate/quality" scalar;
+//!   its derivation from the header fields is not staged).
 //! * The **class-2 alt-variant** coefficient VLC (located at vendor
 //!   RVA `0x20718`, 350+ symbols, not yet extracted).
 //! * The exact per-symbol codes of the mode-2 **DAG-replicated high
@@ -383,6 +395,58 @@ pub const GAIN_VLC_LENGTHS: [u8; 37] = [
     8, 9, 9, 13, 10, 13, 13, 13,
 ];
 
+/// Lower bound of the decode-class selector's per-stream rate float
+/// (`f32`, staged role "lower bound").
+///
+/// Staged as `docs/audio/wma/tables/wma-class-selector-thresholds.csv`
+/// row 1. The four class-selector constants are the `f32` values the
+/// vendor module's stream-open path compares a per-stream
+/// bitrate/quality float against when the sample rate is at least
+/// 32 kHz, choosing the coefficient-VLC **decode class**
+/// (see [`crate::wire_chain::select_decode_class`]).
+pub const CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND: f32 = 0.125;
+
+/// The decode-class selector's **class-1 branch threshold** (`f32`,
+/// staged role "class-1 branch threshold"; shortest-round-trip
+/// rendering `0.72000003`).
+///
+/// Staged as `docs/audio/wma/tables/wma-class-selector-thresholds.csv`
+/// row 3. Which *side* of the threshold selects class 1 is not staged
+/// (the branch direction of the comparison is a documented gap) — see
+/// the module docs.
+pub const CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD: f32 = 0.72;
+
+/// The decode-class selector's **class-2 branch threshold** (`f32`,
+/// staged role "class-2 branch threshold").
+///
+/// Staged as `docs/audio/wma/tables/wma-class-selector-thresholds.csv`
+/// row 2. Which *side* of the threshold selects class 2 is not staged
+/// — see the module docs.
+pub const CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD: f32 = 1.16;
+
+/// Upper bound of the decode-class selector's per-stream rate float
+/// (`f32`, staged role "upper bound").
+///
+/// Staged as `docs/audio/wma/tables/wma-class-selector-thresholds.csv`
+/// row 4.
+pub const CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND: f32 = 1.6;
+
+/// The four decode-class selector constants in their staged storage
+/// order (ascending vendor-module address): lower bound, class-2
+/// branch threshold, class-1 branch threshold, upper bound.
+///
+/// Staged as `docs/audio/wma/tables/wma-class-selector-thresholds.csv`
+/// (4 × `f32` LE). Note the storage order interleaves the two branch
+/// thresholds between the bounds — the *rule* order (thresholds
+/// ascending along the float axis) is bounds-outer, `0.72 < 1.16`
+/// inner.
+pub const CLASS_SELECTOR_THRESHOLDS: [f32; 4] = [
+    CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND,
+    CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
+    CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD,
+    CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +610,65 @@ mod tests {
         assert_eq!(*GAIN_VLC_LENGTHS.iter().min().unwrap(), 3);
         let (sum, full) = kraft_num(&GAIN_VLC_LENGTHS);
         assert_eq!(sum, full, "gain Kraft equality");
+    }
+
+    // ---------- class-selector thresholds ----------
+
+    #[test]
+    fn class_selector_constants_are_bit_exact_f32() {
+        // The staged CSV renders each `f32 LE` value in shortest
+        // round-trip form (`0.125`, `1.16`, `0.72000003`, `1.6`);
+        // shortest round-trip uniquely identifies the bit pattern, so
+        // these pins are exact against the extracted bytes.
+        assert_eq!(CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND.to_bits(), 0x3E00_0000);
+        assert_eq!(
+            CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD.to_bits(),
+            0x3F94_7AE1
+        );
+        assert_eq!(
+            CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD.to_bits(),
+            0x3F38_51EC
+        );
+        assert_eq!(CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND.to_bits(), 0x3FCC_CCCD);
+    }
+
+    #[test]
+    fn class_selector_storage_order_matches_the_staged_rows() {
+        // CSV row order = ascending vendor storage address: lower
+        // bound, class-2 threshold, class-1 threshold, upper bound.
+        assert_eq!(CLASS_SELECTOR_THRESHOLDS.len(), 4);
+        assert_eq!(
+            CLASS_SELECTOR_THRESHOLDS[0].to_bits(),
+            CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND.to_bits()
+        );
+        assert_eq!(
+            CLASS_SELECTOR_THRESHOLDS[1].to_bits(),
+            CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD.to_bits()
+        );
+        assert_eq!(
+            CLASS_SELECTOR_THRESHOLDS[2].to_bits(),
+            CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD.to_bits()
+        );
+        assert_eq!(
+            CLASS_SELECTOR_THRESHOLDS[3].to_bits(),
+            CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND.to_bits()
+        );
+    }
+
+    #[test]
+    fn class_selector_rule_axis_is_strictly_ordered() {
+        // Along the rate-float axis the rule order is bounds-outer
+        // with the two branch thresholds strictly inside:
+        // 0.125 < 0.72 < 1.16 < 1.6 (a property of the staged data).
+        let axis = [
+            CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND,
+            CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD,
+            CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
+            CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND,
+        ];
+        for w in axis.windows(2) {
+            assert!(w[0] < w[1], "axis must strictly increase: {w:?}");
+        }
     }
 
     #[test]
