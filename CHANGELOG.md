@@ -23,6 +23,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     branch *directions* (which side of each threshold selects which
     class) and the init formula of the per-stream float the
     thresholds are compared against.
+  - `coef_vlc` — `CoefDecodeMode::from_class_and_variant`, the staged
+    six-descriptor registration crossing (decode class `1..=3` × alt
+    flag → registered coefficient table), with the located-but-unstaged
+    class-2 alt slot as its only documented hole; round-trips
+    `class()`/`is_alt()` over all five staged descriptors.
 - **Wire-decode pass (r390)** over the newly staged frame-layout
   trace (`docs/audio/wma/frame-bit-layout.md`, docs `c1c68cd`) and
   the corrected mode-2 reading (docs `f319744`):

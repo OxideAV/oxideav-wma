@@ -135,6 +135,30 @@ impl CoefDecodeMode {
     pub fn context_value(self) -> u8 {
         self.class()
     }
+
+    /// The staged descriptor-registration crossing: map a **decode
+    /// class** (`1..=3`) crossed with the **alt-variant** flag to the
+    /// registered coefficient decode table — the six-descriptor
+    /// selection the vendor module resolves at registration time
+    /// (class from the stream-open rule realised in
+    /// [`crate::wire_chain`]; variant from its per-configuration
+    /// flag).
+    ///
+    /// Returns `None` for a class outside `1..=3` and for the
+    /// **class-2 alt** descriptor, which is located in the vendor
+    /// module but not staged (the documented gap — it is the only
+    /// hole in the 3 × 2 crossing).
+    pub fn from_class_and_variant(class: u8, alt: bool) -> Option<CoefDecodeMode> {
+        match (class, alt) {
+            (1, false) => Some(CoefDecodeMode::Mode1),
+            (1, true) => Some(CoefDecodeMode::Class1Alt),
+            (2, false) => Some(CoefDecodeMode::Mode2),
+            (2, true) => None, // located, unstaged: the class-2 alt VLC
+            (3, false) => Some(CoefDecodeMode::Mode3),
+            (3, true) => Some(CoefDecodeMode::Class3Alt),
+            _ => None,
+        }
+    }
 }
 
 /// A decoded coefficient-VLC symbol classified per the staged
@@ -566,6 +590,59 @@ mod tests {
             vlc.decode_symbol(&mut r),
             Err(CoefVlcError::Huffman(HuffmanError::Bitstream(_)))
         ));
+    }
+
+    #[test]
+    fn class_variant_crossing_matches_the_staged_descriptor_table() {
+        // The staged six-descriptor registration crossing, with the
+        // class-2 alt slot as its only (documented) hole.
+        assert_eq!(
+            CoefDecodeMode::from_class_and_variant(1, false),
+            Some(CoefDecodeMode::Mode1)
+        );
+        assert_eq!(
+            CoefDecodeMode::from_class_and_variant(1, true),
+            Some(CoefDecodeMode::Class1Alt)
+        );
+        assert_eq!(
+            CoefDecodeMode::from_class_and_variant(2, false),
+            Some(CoefDecodeMode::Mode2)
+        );
+        assert_eq!(CoefDecodeMode::from_class_and_variant(2, true), None);
+        assert_eq!(
+            CoefDecodeMode::from_class_and_variant(3, false),
+            Some(CoefDecodeMode::Mode3)
+        );
+        assert_eq!(
+            CoefDecodeMode::from_class_and_variant(3, true),
+            Some(CoefDecodeMode::Class3Alt)
+        );
+    }
+
+    #[test]
+    fn class_variant_crossing_rejects_out_of_range_classes() {
+        for class in [0u8, 4, 5, 255] {
+            for alt in [false, true] {
+                assert_eq!(
+                    CoefDecodeMode::from_class_and_variant(class, alt),
+                    None,
+                    "class {class} alt {alt}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn class_variant_crossing_round_trips_every_staged_mode() {
+        // (class(), is_alt()) -> from_class_and_variant is the
+        // identity over all five staged descriptors.
+        for mode in CoefDecodeMode::ALL {
+            assert_eq!(
+                CoefDecodeMode::from_class_and_variant(mode.class(), mode.is_alt()),
+                Some(mode),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
