@@ -28,6 +28,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     flag → registered coefficient table), with the located-but-unstaged
     class-2 alt slot as its only documented hole; round-trips
     `class()`/`is_alt()` over all five staged descriptors.
+  - `wire_chain` — the staged thresholds wired into the §4b decode-class
+    rule: `clamp_rate_float` (saturation into the staged `[0.125, 1.6]`
+    axis), `RateFloatRegion` + `rate_float_region` (the typed
+    three-region partition by the 0.72 / 1.16 branch thresholds, named
+    after the thresholds — never after a class outcome, since the
+    branch directions are unstaged), `select_decode_class` now takes
+    the per-stream rate float and its `BitrateGated` arm carries the
+    resolved region (the previous `candidates` field over-asserted a
+    two-way class-1/2 choice; §4b's prose leaves the class-3 default
+    retainable, so the arm now carries exactly what is staged), and
+    `WireFrameCodec::from_header_pinned_class` builds the codec
+    wherever the rule pins the class (below the 32 kHz gate → class-3
+    primary) and refuses with the new typed
+    `WireChainError::ClassNotPinned { sample_rate, region }` above it.
+    `select_decode_class`'s signature is now
+    `(sample_rate: u32, rate_float: f32)` — the second argument is the
+    per-stream bitrate/quality scalar of the staged threshold
+    comparison (ignored below the 32 kHz gate, where the class pins
+    before the comparison is reached); its init formula is a
+    documented gap, so callers thread in an observed value.
 - **Wire-decode pass (r390)** over the newly staged frame-layout
   trace (`docs/audio/wma/frame-bit-layout.md`, docs `c1c68cd`) and
   the corrected mode-2 reading (docs `f319744`):

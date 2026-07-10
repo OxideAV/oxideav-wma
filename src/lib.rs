@@ -832,7 +832,9 @@ pub use terminator::{TerminatorDecision, TerminatorMechanism};
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 pub use window::{Window, WindowPair, WindowShape};
 pub use wire_chain::{
-    select_decode_class, DecodeClassSelection, WireBlockConfig, WireChainError, WireFrameCodec,
+    clamp_rate_float, rate_float_region, select_decode_class, DecodeClassSelection,
+    RateFloatRegion, WireBlockConfig, WireChainError, WireFrameCodec,
+    DECODE_CLASS_RATE_THRESHOLD_HZ,
 };
 
 /// Crate-local error type. Concrete variants land as the rebuild

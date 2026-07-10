@@ -68,6 +68,7 @@ use crate::stereo_decode::{StereoAssemblyError, StereoDecoder};
 use crate::stereo_encode::StereoEncoder;
 use crate::synthesis::Synthesis;
 use crate::window::WindowPair;
+use crate::wire_tables;
 
 /// The real-data block configuration derived once from a parsed
 /// header — the typed carrier of steps 1–3 above.
@@ -128,6 +129,18 @@ pub enum WireChainError {
     CoefVlc(CoefVlcError),
     /// The frame bit layer failed during encode/decode.
     FrameBits(FrameBitsError),
+    /// The staged §4b rule does not pin the decode class for this
+    /// stream: at or above the 32 kHz gate the class is
+    /// bitrate-gated, and the region → class branch directions are
+    /// the unstaged residual — the caller resolves the class and uses
+    /// [`WireFrameCodec::from_header`].
+    ClassNotPinned {
+        /// The stream's sample rate (at or above
+        /// [`DECODE_CLASS_RATE_THRESHOLD_HZ`]).
+        sample_rate: u32,
+        /// Where the supplied rate float sits on the selector axis.
+        region: RateFloatRegion,
+    },
 }
 
 impl core::fmt::Display for WireChainError {
@@ -156,6 +169,15 @@ impl core::fmt::Display for WireChainError {
             ),
             WireChainError::CoefVlc(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
             WireChainError::FrameBits(e) => write!(f, "oxideav-wma::wire_chain: {e}"),
+            WireChainError::ClassNotPinned {
+                sample_rate,
+                region,
+            } => write!(
+                f,
+                "oxideav-wma::wire_chain: the staged rule does not pin the decode class at \
+                 {sample_rate} Hz (bitrate-gated, rate float in {region:?}; the branch \
+                 directions are the unstaged residual)",
+            ),
         }
     }
 }
@@ -387,33 +409,118 @@ impl WireBlockConfig {
 /// (`provenance/02` §4b): below it the class is pinned to 3.
 pub const DECODE_CLASS_RATE_THRESHOLD_HZ: u32 = 32_000;
 
+/// Where a stream's rate float falls relative to the two staged
+/// class-branch thresholds
+/// ([`crate::wire_tables::CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD`] =
+/// 0.72 and
+/// [`crate::wire_tables::CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD`] =
+/// 1.16) — the typed carrier of the staged comparison's *operands*.
+///
+/// The staged trace pins the constants, their roles (0.72 is the
+/// class-1 branch, 1.16 the class-2 branch), and the bounds of the
+/// float axis; it deliberately does **not** pin the branch
+/// *directions* — which side of each threshold selects which class —
+/// so this enum names the three axis regions after the thresholds
+/// that delimit them, never after a class outcome. Boundary
+/// inclusivity (the region an input exactly equal to a threshold
+/// lands in) is likewise unstaged; this realization puts each exact
+/// threshold value in the region above it, a documented realization
+/// detail affecting only bit-exact-threshold inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RateFloatRegion {
+    /// Clamped rate float strictly below the class-1 branch
+    /// threshold (0.72).
+    BelowClass1Threshold,
+    /// Clamped rate float in `0.72..1.16` — at or above the class-1
+    /// branch threshold and strictly below the class-2 branch
+    /// threshold.
+    BetweenThresholds,
+    /// Clamped rate float at or above the class-2 branch threshold
+    /// (1.16).
+    AtOrAboveClass2Threshold,
+}
+
+/// Saturate a per-stream rate float into the staged selector axis
+/// `[0.125, 1.6]`
+/// ([`crate::wire_tables::CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND`] ..
+/// [`crate::wire_tables::CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND`]).
+///
+/// The staged roles name the two outer constants the float's "lower
+/// bound" / "upper bound"; this helper realizes them as a saturating
+/// clamp. A `NaN` input (impossible from real stream config; purely
+/// defensive) normalizes to the lower bound. Clamping never moves an
+/// input across a branch threshold, so
+/// [`rate_float_region`]`(x) == rate_float_region(clamp_rate_float(x))`
+/// for every non-`NaN` input.
+pub fn clamp_rate_float(rate_float: f32) -> f32 {
+    if rate_float.is_nan() {
+        wire_tables::CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND
+    } else {
+        rate_float.clamp(
+            wire_tables::CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND,
+            wire_tables::CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND,
+        )
+    }
+}
+
+/// Locate a per-stream rate float on the staged selector axis: clamp
+/// to the staged bounds, then partition by the two staged branch
+/// thresholds (see [`RateFloatRegion`] for the boundary-side
+/// realization note).
+pub fn rate_float_region(rate_float: f32) -> RateFloatRegion {
+    let x = clamp_rate_float(rate_float);
+    if x < wire_tables::CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD {
+        RateFloatRegion::BelowClass1Threshold
+    } else if x < wire_tables::CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD {
+        RateFloatRegion::BetweenThresholds
+    } else {
+        RateFloatRegion::AtOrAboveClass2Threshold
+    }
+}
+
 /// The staged decode-class selection outcome for one stream.
 ///
-/// The staged rule (`provenance/02` §4b): the class **defaults to 3**
-/// and moves to 1 or 2 only when `sample_rate >=` 32 kHz **and** a
-/// bitrate/quality float compares against two vendor constants that
-/// are *not* staged. So low-rate streams are fully pinned; high-rate
-/// streams are a typed two-way choice the caller resolves by
-/// black-box observation.
+/// The staged rule (`provenance/02` §4b + the staged threshold
+/// extraction): the class **defaults to 3** and moves to 1 or 2 only
+/// when `sample_rate >=` 32 kHz **and** a per-stream
+/// bitrate/quality float compares against the staged branch
+/// thresholds (0.72 for the class-1 branch, 1.16 for the class-2
+/// branch, float axis bounded to `[0.125, 1.6]`). Low-rate streams
+/// are fully pinned; high-rate streams resolve to a typed
+/// [`RateFloatRegion`], and the remaining `[GAP]` is exactly the
+/// region → class mapping (the two comparisons' branch directions,
+/// including whether the between-thresholds region keeps the
+/// class-3 default), which the caller resolves by black-box
+/// observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeClassSelection {
     /// The rule pins the class outright (`sample_rate <` 32 kHz →
-    /// class 3).
+    /// class 3, primary descriptor; an alt-configured stream maps
+    /// the same class through
+    /// [`CoefDecodeMode::from_class_and_variant`]).
     Pinned(CoefDecodeMode),
-    /// `sample_rate >=` 32 kHz: class 1 or class 2 by the unstaged
-    /// bitrate-float comparison — the two staged candidates, in the
-    /// rule's own order (`[GAP]`: the threshold constants).
+    /// `sample_rate >=` 32 kHz: the staged comparisons place the
+    /// stream's rate float in this region of the selector axis; the
+    /// region → class branch directions are the unstaged residual.
     BitrateGated {
-        /// The two candidate primary modes (class 1, class 2).
-        candidates: [CoefDecodeMode; 2],
+        /// Where the (clamped) rate float sits relative to the two
+        /// staged branch thresholds.
+        region: RateFloatRegion,
     },
 }
 
-/// Apply the staged §4b decode-class rule to a stream's sample rate.
-pub fn select_decode_class(sample_rate: u32) -> DecodeClassSelection {
+/// Apply the staged §4b decode-class rule: the sample-rate gate, and
+/// past it the staged threshold comparison operands.
+///
+/// `rate_float` is the per-stream bitrate/quality scalar the staged
+/// rule compares against the thresholds. Its init formula is **not**
+/// staged (a documented gap): the caller supplies the value (for a
+/// sub-32-kHz stream it is ignored — the class pins to 3 before the
+/// comparison is reached).
+pub fn select_decode_class(sample_rate: u32, rate_float: f32) -> DecodeClassSelection {
     if sample_rate >= DECODE_CLASS_RATE_THRESHOLD_HZ {
         DecodeClassSelection::BitrateGated {
-            candidates: [CoefDecodeMode::Mode1, CoefDecodeMode::Mode2],
+            region: rate_float_region(rate_float),
         }
     } else {
         DecodeClassSelection::Pinned(CoefDecodeMode::Mode3)
@@ -508,6 +615,41 @@ impl WireFrameCodec {
             gain_count: 1,
             envelope_coded: true,
         })
+    }
+
+    /// Derive the codec with the decode class resolved by the staged
+    /// §4b rule where the rule **pins** it: below the 32 kHz gate the
+    /// class is 3 (the rule's retained default), realized here as the
+    /// primary class-3 descriptor — an alt-configured stream maps the
+    /// same class through [`CoefDecodeMode::from_class_and_variant`]
+    /// and [`WireFrameCodec::from_header`].
+    ///
+    /// `rate_float` is the per-stream bitrate/quality scalar of the
+    /// staged threshold comparison (its init formula is a documented
+    /// gap — caller-observed); it is consumed only to type the error
+    /// when the class is *not* pinned.
+    ///
+    /// # Errors
+    ///
+    /// * [`WireChainError::ClassNotPinned`] when the stream sits at
+    ///   or above the 32 kHz gate: the staged constants place the
+    ///   rate float in a typed [`RateFloatRegion`], but the
+    ///   region → class branch directions are unstaged, so the caller
+    ///   resolves the class and calls
+    ///   [`WireFrameCodec::from_header`].
+    /// * Everything [`WireFrameCodec::from_header`] can raise.
+    pub fn from_header_pinned_class(
+        header: &WmaHeader,
+        rate_float: f32,
+        side_field_bits: u8,
+    ) -> Result<Self, WireChainError> {
+        match select_decode_class(header.sample_rate, rate_float) {
+            DecodeClassSelection::Pinned(mode) => Self::from_header(header, mode, side_field_bits),
+            DecodeClassSelection::BitrateGated { region } => Err(WireChainError::ClassNotPinned {
+                sample_rate: header.sample_rate,
+                region,
+            }),
+        }
     }
 
     /// Override the gain-delta count per block (sub-stream count
@@ -862,24 +1004,173 @@ mod tests {
 
     #[test]
     fn decode_class_rule_matches_the_staged_fork() {
-        // provenance/02 §4b: default class 3; the 32 kHz threshold
-        // opens the (unstaged-constant) class-1/2 bitrate fork.
+        // provenance/02 §4b: default class 3; the 32 kHz gate opens
+        // the bitrate fork, now carrying the staged-threshold region.
         for sr in [8_000, 11_025, 16_000, 22_050, 24_000, 31_999] {
-            assert_eq!(
-                select_decode_class(sr),
-                DecodeClassSelection::Pinned(CoefDecodeMode::Mode3),
-                "{sr}"
-            );
+            for rate_float in [0.0, 0.5, 1.0, 100.0] {
+                assert_eq!(
+                    select_decode_class(sr, rate_float),
+                    DecodeClassSelection::Pinned(CoefDecodeMode::Mode3),
+                    "{sr} @ {rate_float}"
+                );
+            }
         }
         for sr in [32_000, 44_100, 48_000] {
             assert_eq!(
-                select_decode_class(sr),
+                select_decode_class(sr, 0.5),
                 DecodeClassSelection::BitrateGated {
-                    candidates: [CoefDecodeMode::Mode1, CoefDecodeMode::Mode2],
+                    region: RateFloatRegion::BelowClass1Threshold,
+                },
+                "{sr}"
+            );
+            assert_eq!(
+                select_decode_class(sr, 1.0),
+                DecodeClassSelection::BitrateGated {
+                    region: RateFloatRegion::BetweenThresholds,
+                },
+                "{sr}"
+            );
+            assert_eq!(
+                select_decode_class(sr, 1.45),
+                DecodeClassSelection::BitrateGated {
+                    region: RateFloatRegion::AtOrAboveClass2Threshold,
                 },
                 "{sr}"
             );
         }
+    }
+
+    #[test]
+    fn clamp_saturates_into_the_staged_axis() {
+        use crate::wire_tables::{
+            CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND, CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND,
+        };
+        // Inside the axis: identity, bit-for-bit.
+        for x in [0.125_f32, 0.3, 0.72, 1.0, 1.16, 1.5, 1.6] {
+            assert_eq!(clamp_rate_float(x).to_bits(), x.to_bits(), "{x}");
+        }
+        // Outside: saturate to the staged bounds.
+        for x in [-1.0_f32, 0.0, 0.1249, f32::NEG_INFINITY] {
+            assert_eq!(
+                clamp_rate_float(x).to_bits(),
+                CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND.to_bits(),
+                "{x}"
+            );
+        }
+        for x in [1.6001_f32, 2.9, 100.0, f32::INFINITY] {
+            assert_eq!(
+                clamp_rate_float(x).to_bits(),
+                CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND.to_bits(),
+                "{x}"
+            );
+        }
+        // Defensive NaN normalization (documented realization detail).
+        assert_eq!(
+            clamp_rate_float(f32::NAN).to_bits(),
+            CLASS_SELECTOR_RATE_FLOAT_LOWER_BOUND.to_bits()
+        );
+    }
+
+    #[test]
+    fn region_partition_follows_the_staged_thresholds() {
+        use crate::wire_tables::{
+            CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD, CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
+        };
+        // Interior representatives of the three regions.
+        for x in [0.125_f32, 0.3, 0.5, 0.719] {
+            assert_eq!(
+                rate_float_region(x),
+                RateFloatRegion::BelowClass1Threshold,
+                "{x}"
+            );
+        }
+        for x in [0.7201_f32, 0.9, 1.0, 1.15] {
+            assert_eq!(
+                rate_float_region(x),
+                RateFloatRegion::BetweenThresholds,
+                "{x}"
+            );
+        }
+        for x in [1.1601_f32, 1.45, 1.6] {
+            assert_eq!(
+                rate_float_region(x),
+                RateFloatRegion::AtOrAboveClass2Threshold,
+                "{x}"
+            );
+        }
+        // The documented boundary-side realization: an input exactly
+        // equal to a threshold lands in the region above it, and the
+        // next representable f32 below lands under it.
+        let c1 = CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD;
+        let c2 = CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD;
+        assert_eq!(rate_float_region(c1), RateFloatRegion::BetweenThresholds);
+        assert_eq!(
+            rate_float_region(f32::from_bits(c1.to_bits() - 1)),
+            RateFloatRegion::BelowClass1Threshold
+        );
+        assert_eq!(
+            rate_float_region(c2),
+            RateFloatRegion::AtOrAboveClass2Threshold
+        );
+        assert_eq!(
+            rate_float_region(f32::from_bits(c2.to_bits() - 1)),
+            RateFloatRegion::BetweenThresholds
+        );
+    }
+
+    #[test]
+    fn region_is_clamp_stable_and_monotone() {
+        // Clamping never moves an input across a branch threshold
+        // (the thresholds sit strictly inside the staged bounds), so
+        // the region of a raw input equals the region of its clamp;
+        // and the region index is monotone non-decreasing along the
+        // float axis.
+        let rank = |r: RateFloatRegion| match r {
+            RateFloatRegion::BelowClass1Threshold => 0,
+            RateFloatRegion::BetweenThresholds => 1,
+            RateFloatRegion::AtOrAboveClass2Threshold => 2,
+        };
+        let mut prev = 0;
+        for i in 0..=4_000 {
+            // Sweep -0.5 .. 3.5, comfortably past both bounds.
+            let x = -0.5_f32 + (i as f32) * 0.001;
+            let r = rate_float_region(x);
+            assert_eq!(r, rate_float_region(clamp_rate_float(x)), "{x}");
+            let k = rank(r);
+            assert!(k >= prev, "region must be monotone along the axis: {x}");
+            prev = k;
+        }
+    }
+
+    #[test]
+    fn pinned_class_codec_builds_below_the_gate_and_types_the_gap_above() {
+        // Below 32 kHz the staged rule pins class 3: the codec builds
+        // with the primary class-3 descriptor, no caller-resolved
+        // mode needed.
+        let low = WmaHeader::parse(Version::V1, 22_050, 1, 64_000, 0, &[0; 4]).unwrap();
+        let codec = WireFrameCodec::from_header_pinned_class(&low, 0.9, 6).unwrap();
+        assert_eq!(codec.mode(), CoefDecodeMode::Mode3);
+        assert_eq!(codec.mode().class(), 3);
+        assert!(!codec.mode().is_alt());
+
+        // At/above the gate the class is bitrate-gated and the branch
+        // directions are unstaged: the constructor refuses with the
+        // typed region rather than guessing a class.
+        let high = header_44k();
+        assert_eq!(
+            WireFrameCodec::from_header_pinned_class(&high, 1.45, 6).unwrap_err(),
+            WireChainError::ClassNotPinned {
+                sample_rate: 44_100,
+                region: RateFloatRegion::AtOrAboveClass2Threshold,
+            }
+        );
+        assert_eq!(
+            WireFrameCodec::from_header_pinned_class(&high, 0.5, 6).unwrap_err(),
+            WireChainError::ClassNotPinned {
+                sample_rate: 44_100,
+                region: RateFloatRegion::BelowClass1Threshold,
+            }
+        );
     }
 
     #[test]
