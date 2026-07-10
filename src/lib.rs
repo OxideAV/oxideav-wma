@@ -247,6 +247,25 @@
 //! splits — so *vendor-produced* streams are not yet decodable
 //! end-to-end.
 //!
+//! Round 26 (docs staging of the class-selector threshold
+//! extraction) closes the **threshold constants** item from that
+//! list: the four `f32` selector constants land bit-exact in
+//! [`wire_tables`] (lower bound 0.125, class-1 branch threshold
+//! 0.72, class-2 branch threshold 1.16, upper bound 1.6);
+//! [`select_decode_class`] now runs the staged comparison operands
+//! — clamp to the staged axis ([`clamp_rate_float`]), partition by
+//! the branch thresholds ([`rate_float_region`] /
+//! [`RateFloatRegion`]) — and [`WireFrameCodec`] gains a
+//! `from_header_pinned_class` constructor for the sub-32-kHz
+//! streams the rule pins outright; [`CoefDecodeMode`] gains the
+//! staged six-descriptor `from_class_and_variant` registration
+//! crossing (class × alt flag; the class-2 alt slot is the
+//! documented hole). The narrower residual replacing the old item:
+//! the two comparisons' **branch directions** (which side of each
+//! threshold selects which class, and whether the middle region
+//! keeps the class-3 default) and the **init formula of the rate
+//! float** itself — both caller-observed until staged.
+//!
 //! ## Public surface
 //!
 //! * [`Version`] — WMA v1 vs. v2 selector (from container codec ID

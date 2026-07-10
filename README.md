@@ -131,8 +131,10 @@ each pinned to the patent it is disclosed in:
   primary — 666 / 1016 / 476 symbols — plus the class-1/3 alt
   variants, 555 / 435), the scale (121) and gain (37) delta VLC
   lengths, the 25-edge critical-band Hz partition seed, the 11-edge
-  octave subband seed, and the 113-step `10^(1/16)` (1.25 dB/step)
-  dequantization gain ladder. [`runlevel_tables`] carries the
+  octave subband seed, the 113-step `10^(1/16)` (1.25 dB/step)
+  dequantization gain ladder, and the four decode-class selector
+  threshold constants (bit-exact `f32`: bounds `0.125` / `1.6`,
+  branch thresholds `0.72` / `1.16`). [`runlevel_tables`] carries the
   symbol → `(run, |level|)` companion maps for the three primary
   classes (664 / 1333 / 474 pairs, 2-based indexing). The same
   extraction **confirms no LSP codebook exists** on this decode path.
@@ -162,9 +164,16 @@ each pinned to the patent it is disclosed in:
   (2,152 pairs), escape boundary sweeps, and a no-panic fuzz pass
   hold it down.
 * **Wire frame codec** ([`wire_chain`]): [`select_decode_class`]
-  carries the staged §4b rule (class 3 pinned below 32 kHz; a typed
-  class-1/2 bitrate-gated choice above — the vendor threshold
-  constants are unstaged), and [`WireFrameCodec`] derives everything
+  carries the staged §4b rule with the staged threshold constants
+  wired in (class 3 pinned below 32 kHz; above the gate the
+  per-stream rate float is clamped to the staged `[0.125, 1.6]` axis
+  and located against the staged 0.72 / 1.16 branch thresholds as a
+  typed `RateFloatRegion` — the branch *directions* stay a documented
+  gap), `WireFrameCodec::from_header_pinned_class` builds the codec
+  wherever the rule pins the class, `CoefDecodeMode::
+  from_class_and_variant` realises the staged six-descriptor
+  class × alt-variant registration crossing (the class-2 alt slot is
+  the documented hole), and [`WireFrameCodec`] derives everything
   derivable from a parsed [`WmaHeader`] (S1 width, escape literal
   widths per the staged source pins — run at the side-field width,
   level at `byte_offset_bits` —, scale count = derived band count,
@@ -180,7 +189,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 790 unit tests.
+guessing. The crate carries 802 unit tests.
 
 With the r390 wire pass the crate is a **complete, self-consistent
 codec loop at the wire-bit level**: PCM → analysis → quantize →
@@ -208,8 +217,12 @@ still unstaged:
   5-bit envelope base) — the fields and symbol streams are carried
   verbatim;
 * the **gain sub-stream element count** per block;
-* the class-1/2 **bitrate threshold constants** of the §4b decode
-  class rule (the sub-32-kHz class-3 half is pinned);
+* the §4b class selector's **branch directions** and **rate-float
+  formula** (the four threshold constants are now staged and wired
+  in — see above — but which side of the 0.72 / 1.16 thresholds
+  selects which class, whether the middle region keeps the class-3
+  default, and how the per-stream float is derived from the header
+  are all still caller-observed);
 * the **class-2 alt-variant VLC** (located, unextracted) and the
   **alt variants' run/level companion maps**;
 * **frames-per-packet / the bit-reservoir walk** and the
