@@ -6,6 +6,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Internal public surface marked `#[doc(hidden)]` (44 rebuild-plumbing
+  modules plus their crate-root re-exports) so cargo-semver-checks
+  scores only the documented stable API (`header::{Version, WmaHeader}`,
+  `block::BlockSize`, crate-root `Error` / `Result`); attributes and
+  comments only, no path, signature, or semantic changes.
+
 ### Added
 
 - **Class-selector pass (r405)** over the newly staged

@@ -760,96 +760,260 @@
 
 #![forbid(unsafe_code)]
 
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod analysis;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod bands;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod bitio;
 pub mod block;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod channel_decision;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod codebook;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod coef_vlc;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod decode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod dequant;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod encode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod entropy_mode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod envelope_vlc;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod escape;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod excitation;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod exponent_bands;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod frame;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod frame_bits;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod frame_encode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod gain_ladder;
 pub mod header;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod huffman;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod invquant;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod masking;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod matrix_coding;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod mlt;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod noisefill;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod overlap_add;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod paircode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod qband;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod qmatrix;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod quant;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod runlevel;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod runlevel_tables;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod setup;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod spectral;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod step_size;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod stereo;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod stereo_decode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod stereo_encode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod stereo_synthesis;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod synthesis;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod terminator;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod transient;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod window;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod wire_chain;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod wire_tables;
 
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use analysis::{Analysis, InvalidSampleLen};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use bands::{BandPlan, BandPolicy};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use bitio::{BitReader, BitWriter, BitstreamEnd};
 pub use block::BlockSize;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use channel_decision::{ChannelMode, OpenLoopDecision};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use codebook::{CodebookGrid, Disposition};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use coef_vlc::{CoefDecodeMode, CoefEvent, CoefVlc, CoefVlcError};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use decode::{AssemblyError, ChannelDecoder, DecodeError, Stage};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use dequant::{DequantStage, InvalidDequant};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use encode::{ChannelEncoder, EncodeAssemblyError, EncodeError, EncodeStage, EncodedBlock};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use entropy_mode::{EntropyMode, Partition};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use envelope_vlc::{GainVlc, ScaleVlc};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use escape::{EscapeError, EscapeLiteral};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use exponent_bands::BandDeriveError;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use frame::{BlockParams, FrameDecoder, StereoBlockParams, StereoFrameDecoder};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use frame_bits::{
     BlockPlan, FrameBitsError, FrameFieldWidths, FrameHeaderFields, WireBlock, WireFrame,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use frame_encode::{
     FrameEncodeError, FrameEncoder, InvalidFrameLen, StereoFrameEncodeError, StereoFrameEncoder,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use gain_ladder::GainLadderError;
 pub use header::{Version, WmaHeader};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use huffman::{HuffmanCode, HuffmanError};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use invquant::BandScale;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use masking::SpreadingSlopes;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use matrix_coding::{MatrixCodeError, MatrixCoder};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use mlt::{InvalidMltLen, Mlt};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use noisefill::{InvalidNoiseFill, NoiseFiller};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use overlap_add::{InvalidInputLen, OverlapAdd};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use paircode::{EscapeWidths, PairCodeError, RunLevelCoder};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use qband::{QuantBand, QuantBandLayout};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use quant::{InvalidQuant, QuantStage};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use setup::SetupParams;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use spectral::{SpectralDecode, SpectralEncode, SpectralEncodeError, SpectralError};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use step_size::{OverallStepSize, PerBlockStep};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use stereo_decode::{StereoAssemblyError, StereoChannel, StereoDecodeError, StereoDecoder};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use stereo_encode::{StereoEncodeError, StereoEncodedBlock, StereoEncoder};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use stereo_synthesis::{StereoBlock, StereoSynthesis};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use synthesis::{InvalidCoeffLen, MismatchedBlockSize, Synthesis};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use terminator::{TerminatorDecision, TerminatorMechanism};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use window::{Window, WindowPair, WindowShape};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use wire_chain::{
     clamp_rate_float, rate_float_region, select_decode_class, DecodeClassSelection,
     RateFloatRegion, WireBlockConfig, WireChainError, WireFrameCodec,
