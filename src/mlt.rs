@@ -83,12 +83,32 @@
 //!   two overlapping frames (the 50 % redundancy of the lapped
 //!   arrangement).
 //!
+//! ## Fast factorization (the production path)
+//!
+//! [`Mlt::forward`] and [`Mlt::inverse`] run an `O(M log M)` **FFT
+//! factorization** of the same basis — general public DSP algebra
+//! (the trace's **[DSP]** tier), derived directly from
+//! `cos θ = Re e^{-iθ}` with no WMA-specific fact involved:
+//!
+//! ```text
+//! basis exponent  -(π/M)(n + a)(k + ½),  a = ½ + M/2, splits as
+//!   -(2π n k / 2M)  −  (π n / 2M)  −  (π/M)·a·(k + ½)      (forward)
+//!   -(2π n k / 2M)  −  (π/M)·a·k   −  (π/M)·(n + a)/2      (inverse)
+//! ```
+//!
+//! so each direction is a **pre-twiddle → one `2M`-point complex FFT
+//! → post-twiddle + real part** chain (the inverse zero-pads its `M`
+//! coefficients to `2M` before the FFT and applies the `2/M`
+//! normalization after). The direct `O(M·2M)` summation of the basis
+//! is retained in-module as the **test oracle**: equivalence between
+//! the fast path and the direct summation is pinned by tests at every
+//! patent-disclosed block size (exhaustively at the small sizes,
+//! spot-wise per coefficient/sample at the large ones), alongside the
+//! algebraic identities above, which the fast path must satisfy
+//! within floating-point tolerance.
+//!
 //! ## What is NOT in this module
 //!
-//! * **A fast (FFT-based) factorization.** The transform here is the
-//!   direct `O(M·2M)` summation — a reference realization of the
-//!   patent-named filter bank. A fast path is a later optimization
-//!   round; it must stay bit-compatible with this reference.
 //! * **The window itself.** [`crate::window`] owns the `ha(n)` /
 //!   `hs(n)` pair (and the MLBT / NMLBT `[GAP]`s).
 //! * **Block-size-transition frames.** Adjacent blocks of different
@@ -97,6 +117,66 @@
 //!   uniform [`BlockSize`].
 
 use crate::block::BlockSize;
+
+/// Minimal complex value for the internal FFT — format-neutral
+/// **[DSP]** plumbing (no WMA-specific fact lives in it).
+#[derive(Debug, Clone, Copy)]
+struct Complex {
+    re: f64,
+    im: f64,
+}
+
+/// In-place iterative radix-2 decimation-in-time FFT with the
+/// `e^{-i·2πnk/N}` kernel, `N` a power of two — the standard public
+/// algorithm (bit-reversal permutation, then butterfly stages of
+/// doubling span), format-neutral **[DSP]** plumbing for the fast MLT
+/// factorization.
+fn fft_in_place(buf: &mut [Complex]) {
+    let n = buf.len();
+    debug_assert!(n.is_power_of_two());
+    // Bit-reversal permutation.
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            buf.swap(i, j);
+        }
+    }
+    // Butterfly stages; each stage's twiddle w_k = e^{-i·2πk/len} is
+    // computed once per k and shared across every block of the stage.
+    let mut len = 2;
+    while len <= n {
+        let half = len / 2;
+        let step = -core::f64::consts::PI / half as f64; // -2π/len
+        for k in 0..half {
+            let (w_im, w_re) = (step * k as f64).sin_cos();
+            let mut i = k;
+            while i < n {
+                let u = buf[i];
+                let t = buf[i + half];
+                let v = Complex {
+                    re: t.re * w_re - t.im * w_im,
+                    im: t.re * w_im + t.im * w_re,
+                };
+                buf[i] = Complex {
+                    re: u.re + v.re,
+                    im: u.im + v.im,
+                };
+                buf[i + half] = Complex {
+                    re: u.re - v.re,
+                    im: u.im - v.im,
+                };
+                i += len;
+            }
+        }
+        len <<= 1;
+    }
+}
 
 /// Forward/inverse MLT for one patent-disclosed [`BlockSize`] `M`, per
 /// §3 of the patent trace (US6,029,126 / US6,240,380 oddly-stacked
@@ -144,6 +224,9 @@ impl Mlt {
     /// The oddly-stacked TDAC cosine basis,
     /// `cos((π/M)·(n + ½ + M/2)·(k + ½))` (US6,029,126 / US6,240,380
     /// FIG.7; general public DSP form, the trace's **[DSP]** tier).
+    /// Production I/O runs the FFT factorization of this same basis;
+    /// the summation over it survives as the in-module test oracle.
+    #[cfg(test)]
     #[inline]
     fn basis(&self, n: usize, k: usize) -> f64 {
         let m = self.coeff_len() as f64;
@@ -173,16 +256,61 @@ impl Mlt {
                 got: windowed.len(),
             });
         }
+        Ok(self.forward_fast(windowed))
+    }
+
+    /// The `O(M log M)` FFT factorization of the forward direction
+    /// (see the module docs): pre-twiddle `x[n]·e^{-iπn/(2M)}`, one
+    /// `2M`-point FFT, post-twiddle `e^{-i(π/M)·a·(k+½)}` and real
+    /// part, with `a = ½ + M/2`.
+    fn forward_fast(&self, windowed: &[f64]) -> Vec<f64> {
         let m = self.coeff_len();
-        let mut coeffs = Vec::with_capacity(m);
-        for k in 0..m {
-            let mut acc = 0.0_f64;
-            for (n, &x) in windowed.iter().enumerate() {
-                acc += x * self.basis(n, k);
-            }
-            coeffs.push(acc);
-        }
-        Ok(coeffs)
+        let two_m = self.time_len();
+        let pi = core::f64::consts::PI;
+        let mut buf: Vec<Complex> = windowed
+            .iter()
+            .enumerate()
+            .map(|(n, &x)| {
+                let (s, c) = (-pi * n as f64 / two_m as f64).sin_cos();
+                Complex {
+                    re: x * c,
+                    im: x * s,
+                }
+            })
+            .collect();
+        fft_in_place(&mut buf);
+        let a = 0.5 + m as f64 / 2.0;
+        buf[..m]
+            .iter()
+            .enumerate()
+            .map(|(k, y)| {
+                let (s, c) = (-(pi / m as f64) * a * (k as f64 + 0.5)).sin_cos();
+                y.re * c - y.im * s
+            })
+            .collect()
+    }
+
+    /// The direct `O(M·2M)` summation of the forward basis — the
+    /// in-module **test oracle** the fast path is pinned against.
+    #[cfg(test)]
+    fn forward_direct(&self, windowed: &[f64]) -> Vec<f64> {
+        let m = self.coeff_len();
+        (0..m)
+            .map(|k| self.forward_direct_one(windowed, k))
+            .collect()
+    }
+
+    /// One coefficient of the direct forward summation,
+    /// `X[k] = Σₙ x[n]·basis(n, k)` — `O(2M)`, cheap enough to spot
+    /// oracle-check individual coefficients at the largest block
+    /// sizes.
+    #[cfg(test)]
+    fn forward_direct_one(&self, windowed: &[f64], k: usize) -> f64 {
+        windowed
+            .iter()
+            .enumerate()
+            .map(|(n, &x)| x * self.basis(n, k))
+            .sum()
     }
 
     /// Inverse (synthesis) MLT: consume `M` spectral coefficients,
@@ -206,17 +334,59 @@ impl Mlt {
                 got: coeffs.len(),
             });
         }
+        Ok(self.inverse_fast(coeffs))
+    }
+
+    /// The `O(M log M)` FFT factorization of the inverse direction
+    /// (see the module docs): pre-twiddle `X[k]·e^{-i(π/M)·a·k}`
+    /// zero-padded to `2M`, one `2M`-point FFT, post-twiddle
+    /// `e^{-i(π/M)·(n+a)/2}`, real part, and the `2/M` normalization,
+    /// with `a = ½ + M/2`.
+    fn inverse_fast(&self, coeffs: &[f64]) -> Vec<f64> {
+        let m = self.coeff_len();
         let two_m = self.time_len();
-        let scale = 2.0 / m as f64;
-        let mut frame = Vec::with_capacity(two_m);
-        for n in 0..two_m {
-            let mut acc = 0.0_f64;
-            for (k, &c) in coeffs.iter().enumerate() {
-                acc += c * self.basis(n, k);
-            }
-            frame.push(acc * scale);
+        let pi = core::f64::consts::PI;
+        let a = 0.5 + m as f64 / 2.0;
+        let mut buf = vec![Complex { re: 0.0, im: 0.0 }; two_m];
+        for (k, (&x, slot)) in coeffs.iter().zip(buf.iter_mut()).enumerate() {
+            let (s, c) = (-(pi / m as f64) * a * k as f64).sin_cos();
+            slot.re = x * c;
+            slot.im = x * s;
         }
-        Ok(frame)
+        fft_in_place(&mut buf);
+        let scale = 2.0 / m as f64;
+        buf.iter()
+            .enumerate()
+            .map(|(n, u)| {
+                let (s, c) = (-(pi / m as f64) * (n as f64 + a) * 0.5).sin_cos();
+                scale * (u.re * c - u.im * s)
+            })
+            .collect()
+    }
+
+    /// The direct `O(M·2M)` summation of the inverse basis — the
+    /// in-module **test oracle** the fast path is pinned against.
+    #[cfg(test)]
+    fn inverse_direct(&self, coeffs: &[f64]) -> Vec<f64> {
+        let two_m = self.time_len();
+        (0..two_m)
+            .map(|n| self.inverse_direct_one(coeffs, n))
+            .collect()
+    }
+
+    /// One sample of the direct inverse summation,
+    /// `y[n] = (2/M)·Σₖ X[k]·basis(n, k)` — `O(M)`, cheap enough to
+    /// spot oracle-check individual samples at the largest block
+    /// sizes.
+    #[cfg(test)]
+    fn inverse_direct_one(&self, coeffs: &[f64], n: usize) -> f64 {
+        let scale = 2.0 / self.coeff_len() as f64;
+        scale
+            * coeffs
+                .iter()
+                .enumerate()
+                .map(|(k, &c)| c * self.basis(n, k))
+                .sum::<f64>()
     }
 }
 
@@ -558,6 +728,128 @@ mod tests {
     #[test]
     fn perfect_reconstruction_s512() {
         assert_perfect_reconstruction(BlockSize::S512, 3, 10);
+    }
+
+    // ---------- fast path vs the direct-summation oracle ----------
+
+    /// Absolute tolerance scaled by the oracle's magnitude: the FFT
+    /// factorization and the direct summation are the same algebra,
+    /// so they must agree to floating-point rounding.
+    fn assert_close(fast: &[f64], oracle: &[f64], what: &str) {
+        assert_eq!(fast.len(), oracle.len(), "{what}: length");
+        let scale = oracle.iter().fold(1.0_f64, |m, &v| m.max(v.abs()));
+        for (i, (&f, &o)) in fast.iter().zip(oracle).enumerate() {
+            assert!(
+                (f - o).abs() < 1e-9 * scale,
+                "{what}[{i}]: fast {f} vs oracle {o} (scale {scale})",
+            );
+        }
+    }
+
+    #[test]
+    fn fast_forward_matches_the_direct_oracle_small_sizes() {
+        // Exhaustive coefficient-for-coefficient equivalence at the
+        // three smaller block sizes (the direct oracle is O(M·2M)).
+        for (bs, seed) in [
+            (BlockSize::S256, 11),
+            (BlockSize::S512, 12),
+            (BlockSize::S1024, 13),
+        ] {
+            let mlt = Mlt::new(bs);
+            let x = pseudo_random(mlt.time_len(), seed);
+            let fast = mlt.forward(&x).unwrap();
+            let oracle = mlt.forward_direct(&x);
+            assert_close(&fast, &oracle, "forward");
+        }
+    }
+
+    #[test]
+    fn fast_inverse_matches_the_direct_oracle_small_sizes() {
+        for (bs, seed) in [
+            (BlockSize::S256, 14),
+            (BlockSize::S512, 15),
+            (BlockSize::S1024, 16),
+        ] {
+            let mlt = Mlt::new(bs);
+            let coeffs = pseudo_random(mlt.coeff_len(), seed);
+            let fast = mlt.inverse(&coeffs).unwrap();
+            let oracle = mlt.inverse_direct(&coeffs);
+            assert_close(&fast, &oracle, "inverse");
+        }
+    }
+
+    #[test]
+    fn fast_forward_matches_spot_oracle_coefficients_large_sizes() {
+        // At S2048/S4096 the full O(M·2M) oracle is disproportionate;
+        // individual oracle coefficients are O(2M) each, so spot-pin
+        // the band edges, the mid-band, and both ends.
+        for (bs, seed) in [(BlockSize::S2048, 17), (BlockSize::S4096, 18)] {
+            let mlt = Mlt::new(bs);
+            let m = mlt.coeff_len();
+            let x = pseudo_random(mlt.time_len(), seed);
+            let fast = mlt.forward(&x).unwrap();
+            let scale = fast.iter().fold(1.0_f64, |mx, &v| mx.max(v.abs()));
+            for k in [0, 1, m / 2 - 1, m / 2, m - 2, m - 1] {
+                let oracle = mlt.forward_direct_one(&x, k);
+                assert!(
+                    (fast[k] - oracle).abs() < 1e-9 * scale,
+                    "bs={bs:?} k={k}: fast {} vs oracle {oracle}",
+                    fast[k],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_inverse_matches_spot_oracle_samples_large_sizes() {
+        for (bs, seed) in [(BlockSize::S2048, 19), (BlockSize::S4096, 20)] {
+            let mlt = Mlt::new(bs);
+            let m = mlt.coeff_len();
+            let coeffs = pseudo_random(m, seed);
+            let fast = mlt.inverse(&coeffs).unwrap();
+            let scale = fast.iter().fold(1.0_f64, |mx, &v| mx.max(v.abs()));
+            for n in [0, 1, m - 1, m, 2 * m - 2, 2 * m - 1] {
+                let oracle = mlt.inverse_direct_one(&coeffs, n);
+                assert!(
+                    (fast[n] - oracle).abs() < 1e-9 * scale,
+                    "bs={bs:?} n={n}: fast {} vs oracle {oracle}",
+                    fast[n],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alias_identities_hold_at_the_largest_size() {
+        // The defining TDAC algebra, checked through the fast path
+        // alone at S4096 (both directions are O(M log M) there):
+        // inverse∘forward exposes the alias structure and
+        // forward∘inverse doubles the coefficients.
+        let mlt = Mlt::new(BlockSize::S4096);
+        let m = 4096usize;
+        let u = pseudo_random(2 * m, 21);
+        let y = mlt.inverse(&mlt.forward(&u).unwrap()).unwrap();
+        for n in 0..m {
+            let expected = u[n] - u[m - 1 - n];
+            assert!((y[n] - expected).abs() < 1e-8, "n={n}");
+        }
+        for n in m..2 * m {
+            let expected = u[n] + u[3 * m - 1 - n];
+            assert!((y[n] - expected).abs() < 1e-8, "n={n}");
+        }
+
+        let coeffs = pseudo_random(m, 22);
+        let back = mlt.forward(&mlt.inverse(&coeffs).unwrap()).unwrap();
+        for k in 0..m {
+            assert!((back[k] - 2.0 * coeffs[k]).abs() < 1e-8, "k={k}");
+        }
+    }
+
+    #[test]
+    fn perfect_reconstruction_s2048() {
+        // The full patent chain at a large block size — tractable now
+        // that the transform is O(M log M).
+        assert_perfect_reconstruction(BlockSize::S2048, 2, 23);
     }
 
     // ---------- error display + trait ----------
