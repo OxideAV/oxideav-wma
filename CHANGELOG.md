@@ -8,6 +8,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Fast MLT (r433)** — `mlt::Mlt::{forward, inverse}` now run an
+  `O(M log M)` FFT factorization of the oddly-stacked TDAC basis
+  (pre-twiddle → one `2M`-point radix-2 complex FFT → post-twiddle +
+  real part, derived from `cos θ = Re e^{-iθ}`; general public DSP
+  algebra, the trace's `[DSP]` tier). The direct `O(M·2M)` summation
+  survives in-module as the test oracle: the fast path is pinned
+  against it coefficient-for-coefficient at S256/S512/S1024 and
+  spot-wise at S2048/S4096, the TDAC alias identities and full-chain
+  perfect reconstruction now also run at the large sizes, and the
+  crate test suite drops from ~10.5 s to ~0.2 s wall.
+- `bitio`'s module docs no longer describe the MSB-first packing
+  order as a swap-point realization detail: the staged frame-layout
+  trace pins the vendor get-bits mechanism
+  (`out = (acc >> shift) & MASK[n]`, fields MSB-first), so the
+  module's order is the staged wire fact. Stale "not specified by any
+  staged document" trailers in `header` / `setup` docs now point at
+  the modules where the staging actually landed.
+
+### Added
+
+- **Staged-data + hardening pass (r433)**:
+  - `wire_tables::BITREADER_MASK_LUT` — the last unconsumed staged
+    table (`docs/audio/wma/tables/wma-bitreader-mask-lut.csv`, 32 ×
+    `u32`, `(1 << n) - 1`), carried verbatim with the staged
+    validation line pinned; a new `bitio` cross-check test ties
+    `BitReader::read_bits` to the staged mask law.
+  - `header::WmaHeader::variable_block_length_field` — typed carriage
+    of the wiki-located variable-block-length configuration field
+    (the upper 13 bits of `flags2`, present only when `flags2` bit 2
+    is set); the block-size-determination logic it feeds is elided by
+    the snapshot's own ellipses and stays a documented DOCS-GAP.
+  - `wire_chain` decode-path hardening sweeps at real 8 kHz S512
+    geometry with the staged class-3 table: every strict bit prefix
+    of a valid frame fails with a typed error (self-delimiting rule),
+    single-bit corruption never panics the frame parser, and the
+    packet entry point survives arbitrary byte streams across
+    several runtime frame counts.
+
 - Internal public surface marked `#[doc(hidden)]` (44 rebuild-plumbing
   modules plus their crate-root re-exports) so cargo-semver-checks
   scores only the documented stable API (`header::{Version, WmaHeader}`,

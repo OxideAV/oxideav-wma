@@ -41,11 +41,14 @@
 //!   target; see [`normalize_sample_rate_v2`] for the DOCS-GAP note
 //!   and the boundary behaviour this crate ships in its absence.
 //!
-//! Anything beyond the items above — the Huffman codebook entries,
-//! the exponent-band partition tables, the LSP codebook, the
-//! critical-frequency curves, the per-block VLC selection rules —
-//! is not specified by any staged document and is therefore not
-//! implemented in this round.
+//! Items beyond the snapshot's header facts live where their own
+//! staging landed: the VLC tables and band-partition seeds in
+//! [`crate::wire_tables`] / [`crate::runlevel_tables`], the derived
+//! band partitions in [`crate::exponent_bands`], the frame/superframe
+//! bit layout in [`crate::frame_bits`], and the decode-class rule in
+//! [`crate::wire_chain`]. (The snapshot's "codebook of LSP
+//! coefficients" table proved **absent** on the vendor decode path —
+//! confirmed negative by the staged extraction.)
 
 use crate::block::BlockSize;
 use crate::{Error, Result};

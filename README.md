@@ -41,7 +41,9 @@ tested **DSP and entropy primitives** lifted from the patent trace —
 each pinned to the patent it is disclosed in:
 
 * Transform core: the [`mlt`] forward/inverse Modulated Lapped
-  Transform (reference `O(M·2M)` summation), the [`window`]
+  Transform (production `O(M log M)` FFT factorization; the direct
+  `O(M·2M)` summation survives in-module as the test oracle the fast
+  path is pinned against at every block size), the [`window`]
   analysis/synthesis window pair (realizable sine shape; MLBT/NMLBT
   parametric forms left as gaps), the [`overlap_add`] overlapper/adder
   carrier, the [`block`] `{256,512,1024,2048,4096}` block-size set, and
@@ -95,7 +97,10 @@ each pinned to the patent it is disclosed in:
   `use noise coding = 1` default) derived from a parsed [`WmaHeader`],
   plus the [`WmaHeader::long_block_size`] bridge mapping the header's
   `frame_length_bits` exponent onto the typed transform [`BlockSize`]
-  that constructs the per-block decoders.
+  that constructs the per-block decoders, and the
+  [`WmaHeader::variable_block_length_field`] carrier for the wiki-located
+  VBL configuration field (the upper 13 bits of `flags2`; the
+  block-size logic it feeds is a documented gap).
 * **Encoder side (§8 FIG.5 — the forward mirror of every decode
   stage)**: [`analysis`] (frame formation at 50% TDAC overlap → `ha(n)`
   window → forward MLT, the stateful mirror of [`synthesis`]),
@@ -111,9 +116,12 @@ each pinned to the patent it is disclosed in:
   latency within the quantizer's `divisor/2` bound — mono and stereo,
   block- and frame-level — and that the bound shrinks with the step.
 * **Bit-level entropy machinery**: [`bitio`] MSB-first
-  `BitWriter`/`BitReader` (the packing order of the real bitstream is
-  `[GAP]`; the convention is a documented realization detail with one
-  swap point), [`huffman`] the §6 code-book construction *method*
+  `BitWriter`/`BitReader` (MSB-first is the **staged wire fact**: the
+  frame-layout trace pins the vendor get-bits mechanism as
+  `(acc >> shift) & MASK[n]`, with the mask LUT staged as
+  `wma-bitreader-mask-lut` and carried verbatim in [`wire_tables`];
+  a cross-check test ties the reader to the staged mask law),
+  [`huffman`] the §6 code-book construction *method*
   (canonical Huffman from caller-supplied weights; `from_lengths` is
   the plug-in point for staged real tables, Kraft equality validated),
   [`paircode`] the grid-driven joint `(R, L)` coder with escape
@@ -132,9 +140,10 @@ each pinned to the patent it is disclosed in:
   variants, 555 / 435), the scale (121) and gain (37) delta VLC
   lengths, the 25-edge critical-band Hz partition seed, the 11-edge
   octave subband seed, the 113-step `10^(1/16)` (1.25 dB/step)
-  dequantization gain ladder, and the four decode-class selector
+  dequantization gain ladder, the four decode-class selector
   threshold constants (bit-exact `f32`: bounds `0.125` / `1.6`,
-  branch thresholds `0.72` / `1.16`). [`runlevel_tables`] carries the
+  branch thresholds `0.72` / `1.16`), and the 32-entry get-bits mask
+  LUT that pins the reader's MSB-first field order. [`runlevel_tables`] carries the
   symbol → `(run, |level|)` companion maps for the three primary
   classes (664 / 1333 / 474 pairs, 2-based indexing). The same
   extraction **confirms no LSP codebook exists** on this decode path.
@@ -161,8 +170,11 @@ each pinned to the patent it is disclosed in:
   runtime-signalled widths), and the self-delimiting
   coefficient-count rule with EOB (symbol 0) for trailing zeros.
   Byte-exact layout pins, an exhaustive all-alphabets pair sweep
-  (2,152 pairs), escape boundary sweeps, and a no-panic fuzz pass
-  hold it down.
+  (2,152 pairs), escape boundary sweeps, and no-panic fuzz passes
+  hold it down — plus codec-level hardening sweeps (every strict bit
+  prefix of a valid frame fails with a typed error, single-bit
+  corruption never panics the parser, arbitrary bytes never panic
+  the packet entry point).
 * **Wire frame codec** ([`wire_chain`]): [`select_decode_class`]
   carries the staged §4b rule with the staged threshold constants
   wired in (class 3 pinned below 32 kHz; above the gate the
@@ -189,7 +201,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 802 unit tests.
+guessing. The crate carries 817 unit tests.
 
 With the r390 wire pass the crate is a **complete, self-consistent
 codec loop at the wire-bit level**: PCM → analysis → quantize →

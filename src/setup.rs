@@ -29,11 +29,12 @@
 //! it as an overridable field, never fabricating a threshold. See
 //! [`SetupParams::noise_coding`].
 //!
-//! Anything past these setup scalars — the exponent-band partition
-//! tables, the Huffman codebooks, the critical-frequency curves, the
-//! superframe/packet byte layout — is not specified by any staged
-//! document (the patent trace marks every one `[GAP]` in its §9) and
-//! is not computed here.
+//! Anything past these setup scalars is computed where its own
+//! staging landed, not here: the band partitions (the snapshot's
+//! "compute the scale factor band sizes for each MDCT block size"
+//! step) in [`crate::exponent_bands`], the VLC tables in
+//! [`crate::wire_tables`], and the frame/superframe bit layout in
+//! [`crate::frame_bits`].
 
 use crate::header::WmaHeader;
 

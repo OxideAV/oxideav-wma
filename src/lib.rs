@@ -388,7 +388,11 @@
 //!   length contracts via [`InvalidMltLen`]. The inverse `2/M`
 //!   normalization makes the [`window`] → [`mlt`] → [`overlap_add`]
 //!   chain unity-gain for a power-complementary window pair (covered
-//!   by a cross-module perfect-reconstruction test). Sourced from §3
+//!   by a cross-module perfect-reconstruction test). Both directions
+//!   run an `O(M log M)` FFT factorization of the basis (general
+//!   public DSP algebra, the trace's `[DSP]` tier); the direct
+//!   `O(M·2M)` summation survives in-module as the test oracle the
+//!   fast path is pinned against at every block size. Sourced from §3
 //!   of the patent trace.
 //! * [`excitation`] — the §4 patent-disclosed energy-derived
 //!   quantization matrix: `Q[c][d] = E[d]` where the excitation
@@ -525,9 +529,11 @@
 //!   rate dependent parameters" section.
 //! * [`bitio`] + [`huffman`] — the entropy stage's **bit-level
 //!   machinery**: an MSB-first [`BitWriter`] / [`BitReader`] pair
-//!   (format-neutral `[DSP]` plumbing; the shipping WMA packing order
-//!   is `[GAP]`, so the convention is a documented realization detail
-//!   with one swap point) and [`HuffmanCode`], the §6 patent-disclosed
+//!   (the MSB-first order is the **staged wire fact** — the
+//!   frame-layout trace pins the vendor get-bits mechanism as
+//!   `(acc >> shift) & MASK[n]` with the mask LUT staged as
+//!   `wma-bitreader-mask-lut` and carried in
+//!   [`wire_tables::BITREADER_MASK_LUT`]) and [`HuffmanCode`], the §6 patent-disclosed
 //!   code-book construction step run on caller-supplied weights
 //!   (US6,223,162 grid 500 / threshold 518: "pairings above a
 //!   probability threshold get Huffman codewords"; US7,930,171 step
