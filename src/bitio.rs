@@ -12,15 +12,25 @@
 //! in it), and this module provides it so the entropy stages have a
 //! carrier to run on.
 //!
-//! **What stays `[GAP]`:** the byte/bit packing order of the shipping
-//! WMA v1/v2 bitstream (which end of each byte fills first, the
-//! superframe byte layout, any padding/alignment rules) is not
-//! disclosed by the staged material. This module fixes an internal
-//! **MSB-first** convention — the conventional order for prefix-code
-//! I/O, in which the first bit written occupies the highest bit of
-//! byte 0 — as a *realization detail of this crate's self-consistent
-//! coder*, explicitly **not** as a WMA wire-format claim. When a trace
-//! pins the real packing order, this is the single point to swap.
+//! **The bit order is staged, not a convention.** The frame-layout
+//! trace (`docs/audio/wma/frame-bit-layout.md`, "Bit-reader
+//! primitive") pins the vendor decoder's get-bits mechanism: an
+//! accumulator filled a byte at a time by left shifts, fields
+//! extracted as `out = (acc >> shift) & MASK[n]` with the mask LUT
+//! staged as `wma-bitreader-mask-lut`
+//! ([`crate::wire_tables::BITREADER_MASK_LUT`]) — "all fields are
+//! read most-significant-bit-first." The **MSB-first** order this
+//! module realises (first bit written occupies the highest bit of
+//! byte 0) is therefore the staged wire fact, no longer the
+//! swap-point realization detail it was documented as before the
+//! trace landed. A cross-check test ties [`BitReader::read_bits`] to
+//! the staged mask law (`read_bits(n)` never exceeds `MASK[n]`, and
+//! reading `n` of a written `value` returns `value & MASK[n]`).
+//!
+//! **What stays `[GAP]`:** the superframe byte layout beyond the
+//! staged field order, and any container-side padding/alignment rules
+//! (the packet end is byte-padded by the container; that boundary is
+//! the container's, not this cursor's).
 //!
 //! ## Scope
 //!
@@ -411,6 +421,39 @@ mod tests {
             assert_eq!(r.read_bits(width).unwrap(), value, "width={width}");
         }
         assert_eq!(r.remaining_bits(), 0);
+    }
+
+    #[test]
+    fn read_bits_obeys_the_staged_mask_law() {
+        // The staged get-bits mechanism extracts a field as
+        // `(acc >> shift) & MASK[n]` (frame-bit-layout.md,
+        // "Bit-reader primitive"; LUT staged as
+        // wma-bitreader-mask-lut). Tie this cursor to that law: an
+        // n-bit read of an all-ones stream returns exactly MASK[n],
+        // and reading back a written value returns value & MASK[n].
+        use crate::wire_tables::BITREADER_MASK_LUT;
+
+        let ones = [0xFFu8; 8];
+        for (n, &mask) in BITREADER_MASK_LUT.iter().enumerate() {
+            let mut r = BitReader::new(&ones);
+            assert_eq!(r.read_bits(n as u8).unwrap(), u64::from(mask), "n={n}");
+        }
+
+        // Pseudo-random values: the write/read pair reproduces the
+        // staged masking exactly (the low n bits, MSB-first).
+        let mut state = 0xBADC0DE_u64;
+        for i in 0..64u64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let n = (i % 32) as u8;
+            let mut w = BitWriter::new();
+            w.write_bits(state, n);
+            let bytes = w.into_bytes();
+            let mut r = BitReader::new(&bytes);
+            let mask = u64::from(BITREADER_MASK_LUT[n as usize]);
+            assert_eq!(r.read_bits(n).unwrap(), state & mask, "n={n}");
+        }
     }
 
     #[test]

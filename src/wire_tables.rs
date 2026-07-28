@@ -68,6 +68,10 @@
 //!   thresholds), compared against a per-stream float at stream-open
 //!   time when the sample rate is at least 32 kHz. The rule itself is
 //!   realised in [`crate::wire_chain`].
+//! * [`BITREADER_MASK_LUT`] — the 32-entry `(1 << n) - 1` mask LUT of
+//!   the vendor get-bits reader. Closed-form data, carried because it
+//!   is the staged artifact pinning the reader's **MSB-first** field
+//!   order (`out = (acc >> shift) & MASK[n]`).
 //! * The **symbol → `(R, L)` companion maps** for all three decode
 //!   classes are staged too — carried in [`crate::runlevel_tables`].
 //! * The frame/superframe **bit-packing layout** (field order + fixed
@@ -447,6 +451,25 @@ pub const CLASS_SELECTOR_THRESHOLDS: [f32; 4] = [
     CLASS_SELECTOR_RATE_FLOAT_UPPER_BOUND,
 ];
 
+/// The MSB-first get-bits reader's low-`n`-bits mask LUT: entry `n`
+/// is `(1 << n) - 1` for `n = 0..32` (32 entries, `u32`).
+///
+/// Staged as `docs/audio/wma/tables/wma-bitreader-mask-lut.csv`. The
+/// staged frame-layout trace (`docs/audio/wma/frame-bit-layout.md`,
+/// "Bit-reader primitive") pins the vendor decoder's field-extraction
+/// mechanism as `out = (acc >> shift) & MASK[n]` over an accumulator
+/// filled a byte at a time by left shifts — which is exactly the
+/// **most-significant-bit-first** field order [`crate::bitio`]
+/// realises. The LUT is trivially closed-form; it is carried verbatim
+/// because it is the staged artifact that *pins* the bit order (and
+/// the `n <= 32` ceiling of any single fixed-width field read on the
+/// vendor path).
+pub const BITREADER_MASK_LUT: [u32; 32] = [
+    0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535, 131071,
+    262143, 524287, 1048575, 2097151, 4194303, 8388607, 16777215, 33554431, 67108863, 134217727,
+    268435455, 536870911, 1073741823, 2147483647,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +692,22 @@ mod tests {
         for w in axis.windows(2) {
             assert!(w[0] < w[1], "axis must strictly increase: {w:?}");
         }
+    }
+
+    #[test]
+    fn bitreader_mask_lut_is_the_staged_low_bits_masks() {
+        // The staged validation line: MASK[n] == (1<<n)-1 exactly for
+        // n = 0..31 (32 entries).
+        assert_eq!(BITREADER_MASK_LUT.len(), 32);
+        for (n, &mask) in BITREADER_MASK_LUT.iter().enumerate() {
+            assert_eq!(u64::from(mask), (1u64 << n) - 1, "n={n}");
+        }
+        // Spot rows straight from the staged CSV.
+        assert_eq!(BITREADER_MASK_LUT[0], 0);
+        assert_eq!(BITREADER_MASK_LUT[1], 1);
+        assert_eq!(BITREADER_MASK_LUT[7], 127);
+        assert_eq!(BITREADER_MASK_LUT[16], 65535);
+        assert_eq!(BITREADER_MASK_LUT[31], 2_147_483_647);
     }
 
     #[test]
