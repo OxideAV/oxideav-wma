@@ -1348,6 +1348,94 @@ mod tests {
         }
     }
 
+    // ---------- wire-decode hardening ----------
+
+    /// A small valid mono frame at real 8 kHz geometry (S512, staged
+    /// class-3 pin below the 32 kHz gate), for the robustness sweeps.
+    fn small_valid_frame() -> (WireFrameCodec, crate::frame_bits::WireFrame, Vec<u8>, usize) {
+        let header = WmaHeader::parse(Version::V2, 8_000, 1, 64_000, 0, &[0; 6]).unwrap();
+        let codec = WireFrameCodec::from_header(&header, CoefDecodeMode::Mode3, 6).unwrap();
+        let n = codec.config().exponent_band_count();
+        let m = usize::from(codec.config().block_size().samples());
+        let mut coefficients = vec![0i32; m];
+        coefficients[0] = 3;
+        coefficients[1] = -1;
+        coefficients[7] = 2; // a short run, then EOB covers the tail
+        let frame = crate::frame_bits::WireFrame {
+            header: crate::frame_bits::FrameHeaderFields {
+                reservoir_offset: 42,
+                side_field: 5,
+                flag: true,
+            },
+            channel_blocks: vec![vec![crate::frame_bits::WireBlock {
+                header: 0x11,
+                gain_symbols: vec![18],
+                stereo_coupling: None,
+                envelope_base: 5,
+                scale_symbols: vec![60; n],
+                coefficients,
+            }]],
+        };
+        let (bytes, bit_len) = codec.encode_frame(&frame).unwrap();
+        (codec, frame, bytes, bit_len)
+    }
+
+    #[test]
+    fn every_strict_bit_prefix_of_a_valid_frame_fails_cleanly() {
+        // The sub-streams are self-delimiting (staged §2, item 4):
+        // the parser knows exactly how many bands/coefficients it
+        // still owes, so cutting the stream anywhere short of its
+        // full bit length must surface a typed error — never a panic,
+        // never a silent success.
+        let (codec, frame, bytes, bit_len) = small_valid_frame();
+        assert_eq!(
+            codec.decode_frame(&bytes, bit_len, 1).unwrap(),
+            frame,
+            "the untruncated frame must decode field-exact",
+        );
+        for prefix in 0..bit_len {
+            assert!(
+                codec.decode_frame(&bytes, prefix, 1).is_err(),
+                "prefix of {prefix}/{bit_len} bits must fail",
+            );
+        }
+    }
+
+    #[test]
+    fn single_bit_flips_never_panic_the_frame_parser() {
+        // Corruption robustness: any one-bit channel error either
+        // decodes to some other frame or errors — the parser must
+        // stay total either way.
+        let (codec, _frame, bytes, bit_len) = small_valid_frame();
+        for bit in 0..bit_len {
+            let mut corrupted = bytes.clone();
+            corrupted[bit / 8] ^= 0x80 >> (bit % 8);
+            let _ = codec.decode_frame(&corrupted, bit_len, 1);
+        }
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic_the_packet_parser() {
+        // Codec-level analogue of the frame_bits no-panic sweep, over
+        // the packet entry point and several runtime frame counts.
+        let (codec, _frame, _bytes, _bit_len) = small_valid_frame();
+        let mut state = 0xD15EA5Eu64;
+        for round in 0..150usize {
+            let len = round % 96 + 1;
+            let buf: Vec<u8> = (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (state >> 33) as u8
+                })
+                .collect();
+            for frame_count in 1..=3usize {
+                let _ = codec.decode_packet(&buf, buf.len() * 8, frame_count, 1);
+            }
+        }
+    }
+
     #[test]
     fn noise_grid_plan_length_is_enforced() {
         let cfg = WireBlockConfig::from_header(&header_44k()).unwrap();
