@@ -1,0 +1,67 @@
+[package]
+name = "oxideav-wma-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-wma]
+path = ".."
+
+# ------------------------------------------------------------------
+# Fuzz targets.
+# ------------------------------------------------------------------
+
+# Target 1: header + setup panic-freedom. Arbitrary container fields
+# and extradata through WmaHeader::parse (both versions), with the
+# derived-scalar invariants asserted on every accepted header
+# (frame-length rule, VBL-field gating, setup formulas).
+[[bin]]
+name = "header_parse"
+path = "fuzz_targets/header_parse.rs"
+test = false
+doc = false
+
+# Target 2: wire-decode panic-freedom. Arbitrary bytes through
+# WireFrameCodec::{decode_frame, decode_packet} at two real header
+# geometries (8 kHz mono S512 class-3, 44.1 kHz stereo S2048 class-1)
+# across several runtime frame/block counts.
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+
+# Target 3: structure-aware wire round trip. Fuzzer bytes sanitized
+# into a valid WireFrame (fields masked to the staged widths, runs
+# kept inside the escape-literal envelope), then
+# encode_frame -> decode_frame must be field-exact and a one-bit
+# truncation must fail with a typed error (self-delimiting rule).
+[[bin]]
+name = "wire_roundtrip"
+path = "fuzz_targets/wire_roundtrip.rs"
+test = false
+doc = false
+
+# Target 4: staged coefficient-VLC round trip. Fuzzer-chosen symbol
+# streams over all five staged decode tables encode -> decode
+# bit-exactly; expand() is total over the alphabet; arbitrary bits
+# decode without panicking (bounded walk).
+[[bin]]
+name = "coef_vlc_roundtrip"
+path = "fuzz_targets/coef_vlc_roundtrip.rs"
+test = false
+doc = false
+
+# Prevent this fuzz package from being pulled into the umbrella
+# workspace at `crates/*` glob-resolve time.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
