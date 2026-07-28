@@ -45,6 +45,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     single-bit corruption never panics the frame parser, and the
     packet entry point survives arbitrary byte streams across
     several runtime frame counts.
+  - `fuzz/` sub-crate with four self-contained libFuzzer targets:
+    `header_parse` (both versions + open-time derivation invariants),
+    `wire_decode` (arbitrary bytes through the frame/packet parsers
+    at two real geometries), `wire_roundtrip` (sanitized valid frame
+    → encode → decode field-exact, final-bit truncation must fail),
+    and `coef_vlc_roundtrip` (symbol streams over all five staged
+    tables encode/decode bit-exact; `expand` total where the
+    companion map is staged, typed error on the alt variants whose
+    maps are the documented gap). Initial bounded runs: 60 s per
+    target, 0.9M–48M execs, zero findings.
 
 - Internal public surface marked `#[doc(hidden)]` (44 rebuild-plumbing
   modules plus their crate-root re-exports) so cargo-semver-checks

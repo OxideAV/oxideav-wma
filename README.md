@@ -174,7 +174,9 @@ each pinned to the patent it is disclosed in:
   hold it down — plus codec-level hardening sweeps (every strict bit
   prefix of a valid frame fails with a typed error, single-bit
   corruption never panics the parser, arbitrary bytes never panic
-  the packet entry point).
+  the packet entry point) and a `fuzz/` sub-crate with four
+  libFuzzer targets over the header, wire-parse, wire-round-trip,
+  and staged-VLC surfaces.
 * **Wire frame codec** ([`wire_chain`]): [`select_decode_class`]
   carries the staged §4b rule with the staged threshold constants
   wired in (class 3 pinned below 32 kHz; above the gate the
