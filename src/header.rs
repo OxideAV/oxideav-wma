@@ -220,6 +220,31 @@ impl WmaHeader {
     pub const fn long_block_size(&self) -> Result<BlockSize> {
         BlockSize::from_log2(self.frame_length_bits)
     }
+
+    /// The **variable-block-length configuration field**: the upper
+    /// 13 bits of `flags2` (`flags2 >> 3`), present as data whenever
+    /// the stream sets the variable-block-length flag.
+    ///
+    /// The wiki snapshot's init walk states: "if var block length …
+    /// add logic for determining block sizes … based on **upper 13
+    /// bits of flags2**". The *location* of the field (bits 3..=15 of
+    /// `flags2`) is therefore staged; the block-size-determination
+    /// logic it feeds is elided by the snapshot's own ellipses and is
+    /// a **DOCS-GAP** — this accessor carries the field as typed data
+    /// and interprets nothing.
+    ///
+    /// Returns `None` when the variable-block-length flag
+    /// ([`WmaHeader::variable_block_length`], `flags2` bit 2) is
+    /// clear: the snapshot conditions the field's use on that flag,
+    /// and a fixed-block stream's upper `flags2` bits are not claimed
+    /// to mean anything by any staged document.
+    pub const fn variable_block_length_field(&self) -> Option<u16> {
+        if self.variable_block_length {
+            Some(self.flags2 >> 3)
+        } else {
+            None
+        }
+    }
 }
 
 /// Frame-length-bits decision tree from the wiki snapshot.
@@ -403,6 +428,53 @@ mod tests {
         assert!(h.exp_vlc);
         assert!(h.bit_reservoir);
         assert!(h.variable_block_length);
+    }
+
+    // ---------- variable-block-length field (upper 13 bits) ----------
+
+    #[test]
+    fn vbl_field_is_the_upper_thirteen_bits_when_flag_set() {
+        // flags2 = 0xABCC: low bits 0b100 (VBL flag set), upper 13
+        // bits = 0xABCC >> 3 = 0x1579.
+        let h = WmaHeader::parse(Version::V1, 44_100, 2, 128_000, 0, &[0, 0, 0xCC, 0xAB]).unwrap();
+        assert!(h.variable_block_length);
+        assert_eq!(h.variable_block_length_field(), Some(0xABCC >> 3));
+        assert_eq!(h.variable_block_length_field(), Some(0x1579));
+    }
+
+    #[test]
+    fn vbl_field_is_none_when_flag_clear() {
+        // Upper bits populated but bit 2 clear: no staged document
+        // assigns them a meaning, so the accessor yields None.
+        let h = WmaHeader::parse(Version::V1, 44_100, 2, 128_000, 0, &[0, 0, 0xF8, 0xFF]).unwrap();
+        assert!(!h.variable_block_length);
+        assert_eq!(h.variable_block_length_field(), None);
+    }
+
+    #[test]
+    fn vbl_field_spans_exactly_thirteen_bits() {
+        // All sixteen flags2 bits set: the field is 13 wide (0x1FFF).
+        let h = WmaHeader::parse(
+            Version::V2,
+            44_100,
+            2,
+            128_000,
+            0,
+            &[0, 0, 0, 0, 0xFF, 0xFF],
+        )
+        .unwrap();
+        assert!(h.variable_block_length);
+        assert_eq!(h.variable_block_length_field(), Some(0x1FFF));
+    }
+
+    #[test]
+    fn vbl_field_zero_upper_bits_is_some_zero() {
+        // Flag set, upper bits all clear: the field exists and is 0
+        // (the flag, not the field value, gates presence).
+        let h =
+            WmaHeader::parse(Version::V2, 44_100, 2, 128_000, 0, &[0, 0, 0, 0, 0b100, 0]).unwrap();
+        assert!(h.variable_block_length);
+        assert_eq!(h.variable_block_length_field(), Some(0));
     }
 
     // ---------- frame-length decision tree ----------
