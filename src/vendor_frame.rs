@@ -935,6 +935,51 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_bytes_never_panic_the_vendor_parser() {
+        // Deterministic pseudo-random sweep of the fuzz target's
+        // contract: every input parses or fails typed, never panics.
+        let cfgs = [
+            StreamConfig::derive(Version::V2, 8000, 1, 1000, 160, 0x0026).unwrap(),
+            StreamConfig::derive(Version::V2, 22_050, 2, 4006, 186, 0x0017).unwrap(),
+            StreamConfig::derive(Version::V2, 44_100, 2, 12_003, 320, 0x000f).unwrap(),
+            StreamConfig::derive(Version::V1, 32_000, 2, 4000, 192, 0x0003).unwrap(),
+        ];
+        let mut state = 0x1234_5678_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 33) as u8
+        };
+        for round in 0..64 {
+            let cfg = &cfgs[round % cfgs.len()];
+            let ba = usize::from(cfg.block_align);
+            let bytes: Vec<u8> = (0..ba * 3).map(|_| next()).collect();
+            let mut asm = crate::packet::PacketAssembler::new(cfg);
+            for pkt in bytes.chunks_exact(ba) {
+                let _ = asm.push_packet(pkt);
+            }
+            let stream = asm.finish();
+            if stream.packets.is_empty() {
+                continue;
+            }
+            let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
+            let mut parser = FrameParser::new(cfg, &body_starts);
+            if round % 2 == 0 {
+                parser = parser.with_noise(NoiseSpec {
+                    start: NoiseStart::Band(round % 5),
+                });
+            }
+            let mut reader = stream.reader_at(0);
+            for _ in 0..16 {
+                if parser.parse_frame(&mut reader).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
     fn boundary_crossing_re_raises_the_latch() {
         let cfg = stereo_vbl_cfg();
         let bands = crate::band_partition::exponent_band_count(22_050, 1024);

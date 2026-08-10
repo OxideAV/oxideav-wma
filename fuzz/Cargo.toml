@@ -65,3 +65,10 @@ members = ["."]
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "vendor_parse"
+path = "fuzz_targets/vendor_parse.rs"
+test = false
+doc = false
+bench = false
