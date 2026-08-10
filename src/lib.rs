@@ -899,6 +899,9 @@ pub mod synthesis;
 pub mod terminator;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod vendor_frame;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod transient;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
