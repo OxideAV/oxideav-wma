@@ -6,10 +6,10 @@
 //! The fixtures are **not** copied into this repo: the tests locate
 //! them via `OXIDEAV_WMA_VENDOR_STREAMS_DIR` or the umbrella
 //! workspace layout, and unwrap the ASF container with a black-box
-//! `ffmpeg -c copy -f data` invocation (an opaque validator binary —
-//! its output was verified to be exactly the `nBlockAlign`-sized
-//! codec packets the staged measurement describes). When the
-//! fixtures or the binary are absent the tests skip.
+//! validator invocation (`extract_packets` — an opaque binary whose
+//! output was verified to be exactly the `nBlockAlign`-sized codec
+//! packets the staged measurement describes). When the fixtures or
+//! the binary are absent the tests skip.
 
 use std::path::PathBuf;
 use std::process::Command;
