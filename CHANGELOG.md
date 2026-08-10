@@ -6,7 +6,71 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Vendor-bitstream decode arc (r439)** — the crate now parses and
+  decodes genuine vendor-encoded WMA v2 streams end-to-end, measured
+  against the six committed vendor bitstreams under
+  `docs/audio/wma/reference/vendor-streams/`:
+  - `wire_codes` + `wire_vlc` — the exact vendor codeword assignment
+    for all **eight** staged VLC trees (class 1/2/3 primary + alt
+    coefficient trees at their full alphabets — class-2 primary 1336
+    symbols, class-2 alt 1072 — plus scale 121 and gain 37), and all
+    six 2-based `(run, |level|)` companion maps including the three
+    alt variants. A cross-check pins that **no staged table matches
+    the canonical reconstruction**, so the explicit codes are
+    load-bearing; the earlier canonical realisations in
+    `coef_vlc`/`envelope_vlc` remain for the self-consistent loop.
+  - `stream_config` — the complete §0 open-time derivation (flags2
+    map, the reservoir∧VBL gate, `n_block_sizes`, frame-length tree
+    with low-bitrate doubling, `byte_offset_bits`, `w_bs`, the §0.2
+    class decision table with staged branch directions, §0.3
+    coefficient ranges), pinned against every row of the staged
+    vendor-stream measurement.
+  - `packet` — the §1 superframe header (sequence / frame count /
+    reservoir carry) and a `PacketAssembler` that validates packets,
+    tracks sequence continuity, and concatenates bodies into one
+    contiguous bit stream with per-packet carry-boundary records.
+  - `band_partition` — the eight staged exponent-band partitions
+    with the (sample-rate arm × block size) selector and the
+    computed critical-band walk for everything else (25 bands for a
+    2048-coefficient block at 44.1 kHz, per the staged cross-check).
+  - `vendor_frame` — the §2–§4 frame/block parser: F1 with the
+    three-field opening, F2a/F2, total-gain chaining and its
+    escape-width map, the §3 exponent-delta envelope over per-size
+    partitions, the §3.1 line-spectral index carriage, §4
+    coefficient decode (escape = symbol 0, EOB = symbol 1, trailing
+    signs), and an off-by-default §2.1 noise-substitution hypothesis
+    carrier (its enable rule is still open in the staged docs).
+  - `vendor_decode` — the §5 sum/difference (mid/side) inverse in
+    its staged position plus staged-ladder dequantisation and the
+    inverse-MLT / sine-window / overlap-add synthesis to PCM (the
+    dequantisation composition rule and transition-window shape are
+    open staged items; documented as approximations).
+  - `tests/vendor_streams.rs` — the measurement harness over the six
+    committed vendor streams (fixtures referenced from the docs
+    staging area, skip-if-absent; ASF unwrapped by a black-box
+    validator invocation): §1 holds on **all 1769 packets** (sequence
+    continuity, carry bounds, frame counts), the frame layer closes
+    **1552 of 1763** carry boundaries (mono 8 kHz 394/394, stereo
+    22.05 kHz 1086/1098, mono 22.05 kHz 64/122, 44.1 kHz high-rate
+    family still partial), and the PCM leg correlates against a
+    black-box reference decode (corr² 0.96 on the 44.1 kHz 64 kbps
+    stereo stream; ~3.7–3.9 dB per-second median on the closed
+    mono/stereo families under the open dequantisation items).
+
 ### Changed
+
+- **Vendor-measured §2/§5 calibrations (r439)** — three details of
+  the staged frame-layout reading calibrate differently against the
+  vendor bitstreams (each is being reported back to the docs
+  staging as an erratum/extension ask): the F1 block-size field is a
+  **one-ahead pipeline** (the per-block field carries the *next*
+  block's size; the three-field opening re-primes previous /
+  current / next, and the latch applies to the first frame starting
+  in a packet); **no B2 envelope-reuse bit exists on the wire**; and
+  the joint-stereo flag's ALT-tree consequence is **channel-scoped**
+  (second coded channel only — the difference channel).
 
 - **Fast MLT (r433)** — `mlt::Mlt::{forward, inverse}` now run an
   `O(M log M)` FFT factorization of the oddly-stacked TDAC basis

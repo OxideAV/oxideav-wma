@@ -145,13 +145,17 @@ each pinned to the patent it is disclosed in:
   branch thresholds `0.72` / `1.16`), and the 32-entry get-bits mask
   LUT that pins the reader's MSB-first field order. [`runlevel_tables`] carries the
   symbol → `(run, |level|)` companion maps for the three primary
-  classes (664 / 1333 / 474 pairs, 2-based indexing). The same
-  extraction **confirms no LSP codebook exists** on this decode path.
-  [`coef_vlc`] realises every staged table as a working canonical
-  code matching the staged CSVs bit-for-bit — including mode 2 under
-  the corrected reading (EOB = symbol 0, escape = symbol 1; the
-  earlier "8 missing escape codewords" premise was overturned by the
-  docs watch pass) — and expands decoded symbols into typed
+  classes (2-based indexing). Two earlier readings carried here were
+  since **overturned by newer staging**: the round-6 docs establish
+  that the §3.1 line-spectral envelope path *does* exist (its
+  codebook is not a plain const array, which is why the data-section
+  search missed it), and the round-3 trie walk resolves mode 2 to a
+  complete 1336-symbol alphabet with **escape = symbol 0 and
+  end-of-block = symbol 1** — the vendor-exact code tables live in
+  `wire_codes`/`wire_vlc` and are what the vendor decode path uses,
+  while these modules survive as the earlier self-consistent loop.
+  [`coef_vlc`] realises the earlier staged length tables as
+  canonical codes and expands decoded symbols into typed
   `EndOfBlock` / `Escape` / `(run, |level|)` events. [`envelope_vlc`]
   realises the scale/gain delta VLCs (the scale table's own data pins
   its zero-delta center at symbol 60). [`exponent_bands`] derives the
@@ -213,42 +217,71 @@ synthesis → PCM, round-tripping within the §4 quantizer bound. What
 separates this from decoding *vendor* WMA files is the short list of
 still-unstaged semantic bindings below.
 
-### What is NOT implemented
+### Vendor-bitstream decode (r439)
 
-**Vendor-produced WMA streams do not decode end-to-end yet.** The
-crate now speaks the staged wire *layout* — real VLCs, real field
-order, real widths where the formulas are staged — and round-trips
-its own frames byte-exactly, but the remaining semantic bindings are
-still unstaged:
+The freshly staged rounds 3–6 of `docs/audio/wma/` (exact vendor VLC
+codewords for all eight trees, the §0–§5 frame-bit layout with the
+packet header and stereo sections, the exponent-band partitions, and
+six committed genuine vendor-encoder bitstreams) closed most of the
+old gap list, and the crate now parses and decodes **real
+vendor-encoded WMA v2 streams**:
 
-* the **S2 frame side-field width formula** and therefore the
-  concrete per-stream **escape literal widths** (their *sources* are
-  pinned: side-field width and `byte_offset_bits`; the side-field
-  width value itself is runtime/config);
-* the **gain/scale delta chaining semantics** (initial values,
-  per-band application order, wrap rule) and the **B1 / B4 field
-  semantics** (the 7-bit block header beyond its `0x7f` marker, the
-  5-bit envelope base) — the fields and symbol streams are carried
-  verbatim;
-* the **gain sub-stream element count** per block;
-* the §4b class selector's **branch directions** and **rate-float
-  formula** (the four threshold constants are now staged and wired
-  in — see above — but which side of the 0.72 / 1.16 thresholds
-  selects which class, whether the middle region keeps the class-3
-  default, and how the per-stream float is derived from the header
-  are all still caller-observed);
-* the **class-2 alt-variant VLC** (located, unextracted) and the
-  **alt variants' run/level companion maps**;
-* **frames-per-packet / the bit-reservoir walk** and the
-  variable-block-length split (runtime-gated per the staged trace);
-* verification that the vendor decode tree's internal **bit
-  assignment** matches the canonical reconstruction, and the exact
-  codes of mode 2's DAG-replicated high symbols (blocked statically
-  by decode-DAG space sharing, dynamically behind a COM
-  `ProcessOutput` vtable call).
+* [`wire_codes`] / [`wire_vlc`] — the exact vendor `(length, code)`
+  assignment for all eight staged trees (the class-2 primary at its
+  full 1336-symbol alphabet and the class-2 alt at 1072 — both
+  superseding the earlier partial flat-scan reading — plus all six
+  2-based run/level companion maps including the alt variants). No
+  staged table matches the canonical reconstruction, so these
+  explicit codes are what makes vendor decode possible.
+* [`stream_config`] (§0), [`packet`] (§1 superframe header +
+  bit-reservoir carry assembly), [`band_partition`] (the eight
+  staged partitions + computed walk), [`vendor_frame`] (the §2–§4
+  frame/block parse), [`vendor_decode`] (§5 mid/side inverse +
+  staged-ladder dequantisation + synthesis to PCM).
+* Measured on the six committed vendor streams
+  (`tests/vendor_streams.rs`, fixtures referenced from the docs
+  staging area and never copied here): the §1 packet layer holds on
+  **all 1769 packets**; the frame layer closes **1552 / 1763** §1
+  carry boundaries — mono 8 kHz **394/394 (100 %)**, stereo
+  22.05 kHz A/V **1086/1098 (98.9 %)**, mono 22.05 kHz 64/122, the
+  44.1 kHz high-rate family partial (its 64 kbps stream parses every
+  frame; the 96 kbps+ streams have an unresolved residual) — and
+  the PCM leg reaches corr² 0.96 (13.6 dB) against a black-box
+  reference decode on the 44.1 kHz 64 kbps stereo stream, with
+  ~3.7–3.9 dB per-second medians on the closed mono/stereo families
+  (bounded by the still-open dequantisation-composition and
+  transition-window items).
+* Three §2/§5 details calibrated *differently* from the staged
+  reading, with the §1 carry boundary as ground truth (reported to
+  the docs staging as erratum/extension asks): the F1 field is a
+  one-ahead **pipeline** of block sizes; **no B2 envelope-reuse
+  bit** exists on the wire; the joint-stereo ALT-tree consequence is
+  **channel-scoped** (second coded channel — the difference channel
+  — only).
 
-Each is a data-staging item under `docs/audio/wma/`. The
-[`oxideav_core`] registration will land once vendor streams decode.
+### What is still open
+
+* the **§2.1 noise-substitution enable rule** and its band
+  table/start (staged as open; the parser carries an off-by-default
+  hypothesis switch);
+* the **dequantisation composition rule** (the 10^(1/16) ladder is
+  staged; how exponents, the total gain and the escape widths
+  compose into the final scale is not) and the **transition-window
+  shape** between unequal block sizes;
+* the **§3.1 line-spectral envelope conversion tables** (wire format
+  staged and parsed; the index → envelope mapping is not — the mono
+  8 kHz stream decodes with a flat envelope meanwhile);
+* the **44.1 kHz high-rate residual**: those streams' frames parse
+  through header + envelopes and their first coefficient streams,
+  and the 64 kbps stream decodes fully, but at 96 kbps+ the §1
+  frame counts and the frame-layout bit budget stop reconciling
+  (forensic notes in the r439 report; needs a clean-room trace of
+  the frame loop's per-frame state at high rates);
+* **WMA v1** specifics (no v1 vendor stream exists in the staged
+  set) and the v1 per-channel byte-alignment rule.
+
+The [`oxideav_core`] registration will land once the remaining
+families close.
 
 ## Public surface
 
