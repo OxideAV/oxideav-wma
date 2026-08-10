@@ -845,6 +845,9 @@ pub mod noisefill;
 pub mod overlap_add;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod packet;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod paircode;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
