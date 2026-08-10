@@ -5,36 +5,57 @@
 //!
 //! `docs/audio/wma/frame-bit-layout.md`:
 //!
-//! * §2 — the per-block field order: F1 block-size index (with the
-//!   **three-field opening** on the first block after a packet
-//!   header, tracked by a latch the packet loop raises), F2a the
-//!   joint-stereo / VLC-variant flag (stereo only, read *before* the
-//!   channel flags), F2 the per-channel channel-coded flags, B1 the
-//!   total-gain accumulator, F3/F4 the noise-substitution sub-stream
-//!   (parse-active only when the open-time enable is set — the
-//!   enable rule itself is a staged gap, so it is a caller-supplied
-//!   hypothesis here, default off), B2 the envelope-reuse flag, B3
-//!   the version-1 envelope base, B4 the exponent delta VLC, B5 the
-//!   coefficient sub-stream. B2–B5 are per coded channel, envelopes
-//!   before coefficient sub-streams.
+//! * §2 — the per-block field order: F1 block-size indices (see
+//!   below), F2a the joint-stereo flag (stereo only, read *before*
+//!   the channel flags), F2 the per-channel channel-coded flags, B1
+//!   the total-gain accumulator, F3/F4 the noise-substitution
+//!   sub-stream (parse-active only when the open-time enable is set
+//!   — the enable rule itself is a staged gap, so it is a
+//!   caller-supplied hypothesis here, default off), B3 the version-1
+//!   envelope base, B4 the exponent delta VLC, B5 the coefficient
+//!   sub-stream. B3–B5 are per coded channel, envelopes before
+//!   coefficient sub-streams.
 //! * §3 — total-gain chaining (7-bit fields, `0x7f` extends) and its
 //!   escape-level width mapping; exponent deltas `symbol − 60`
 //!   against the initial predictor 36 (v1: 5-bit absolute base
-//!   `+ 10`, deltas from band 1); the per-block-size envelope-reuse
-//!   cache with default 1 (new envelope).
+//!   `+ 10`, deltas from band 1).
 //! * §3.1 — the line-spectral envelope path when `flags2` bit 0 is
 //!   clear: ten fixed-width indices (3,4,4,4,4,4,4,4,3,3 bits) per
 //!   coded channel; the index → envelope conversion tables are not
 //!   staged, so the indices are carried as data.
-//! * §4 — the coefficient run-level sub-stream: table by
-//!   (class, F2a variant), symbol 0 = **escape** (literal `|level|`
-//!   at the gain-mapped width, run at `frame_length_bits`, sign),
-//!   symbol 1 = **end of block**, symbols ≥ 2 through the 2-based
-//!   companion map, one trailing sign bit per non-EOB symbol
-//!   (1 = positive, 0 = negative).
+//! * §4 — the coefficient run-level sub-stream: symbol 0 =
+//!   **escape** (literal `|level|` at the gain-mapped width, run at
+//!   `frame_length_bits`, sign), symbol 1 = **end of block**,
+//!   symbols ≥ 2 through the 2-based companion map, one trailing
+//!   sign bit per non-EOB symbol (1 = positive, 0 = negative).
 //! * §5 — F2a's reconstruction consequence (the sum/difference
 //!   inverse) runs on dequantised coefficients and lives in the
-//!   decode stage; here the flag selects the ALT entropy table.
+//!   decode stage.
+//!
+//! ## Vendor-measured calibrations (this round)
+//!
+//! Three §2/§5 details were calibrated against the six committed
+//! vendor bitstreams, using the §1 carry boundary as ground truth
+//! (`tests/vendor_streams.rs` measures them; the closure counts
+//! quoted below are reproduced there):
+//!
+//! 1. **F1 is a one-ahead pipeline.** The per-block field carries
+//!    the *next* block's size index; the three-field opening after a
+//!    packet header re-primes (previous, current, next). Under the
+//!    last-field-is-current reading the multi-size streams lose most
+//!    boundaries; under the pipeline the 22.05 kHz stereo stream
+//!    closes 1086 of 1098.
+//! 2. **No B2 reuse bit exists on the wire.** Reading the §2 B2
+//!    row's 1-bit flag desynchronises every stream; without it the
+//!    mono 8 kHz stream closes 394 of 394. Envelopes are always sent
+//!    for coded channels.
+//! 3. **The ALT coefficient tree is channel-scoped.** In a joint
+//!    block only the second channel (the difference channel) uses
+//!    the class's ALT tree; channel 0 keeps the primary tree.
+//!
+//! Each calibration is flagged in the final report as a
+//! docs-erratum/extension ask rather than silently diverging from
+//! the staged text.
 //!
 //! The parser is deliberately *measurable*: it works over the
 //! [`crate::packet::AssembledStream`] and raises the three-field
@@ -70,9 +91,6 @@ pub enum Envelope {
     /// §3.1 line-spectral indices (their conversion tables are a
     /// staged gap; the wire data is carried verbatim).
     LspIndices([u8; 10]),
-    /// B2 = 0 — reuse the previous envelope cached for this block
-    /// size (the per-size cache is the decode stage's state).
-    Reused,
 }
 
 /// One channel's share of a parsed block.
@@ -198,17 +216,28 @@ impl From<VlcDecodeError> for FrameParseError {
     }
 }
 
+/// Where the §2.1 noise-band walk starts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoiseStart {
+    /// A fixed band index into the block's partition.
+    Band(usize),
+    /// The first band whose lower edge is at or above this fraction
+    /// of the block's coefficient count (a frequency cutoff expressed
+    /// on the coefficient axis, so it scales across block sizes).
+    CoefFraction(f64),
+}
+
 /// The §2.1 noise-substitution parse hypothesis. The open-time
 /// enable rule and the identity of "the band table" §2.1 walks are
 /// still open in the staged docs (`frame-bit-layout.md` "Still
 /// open"), so the sub-stream is **off by default** and this carrier
 /// exists to make the enabled hypothesis measurable, not to assert
 /// it: when set, the walk runs over the block's exponent-band
-/// partition starting at `first_band`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// partition starting at the resolved first band.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoiseSpec {
-    /// First noise band index (the §2.1 walk's starting band).
-    pub first_band: usize,
+    /// The §2.1 walk's starting band.
+    pub start: NoiseStart,
 }
 
 /// Stateful §2 frame parser over an assembled §1 stream.
@@ -222,6 +251,11 @@ pub struct FrameParser {
     next_boundary: usize,
     /// The §2 F1 latch: raised after every packet-header parse.
     latch: bool,
+    /// The F1 pipeline: the pre-read next-block size index.
+    next_size: Option<u8>,
+    /// The previous-block size index from the three-field opening
+    /// (windowing context; carried for the decode stage).
+    prev_size: Option<u8>,
 }
 
 impl FrameParser {
@@ -241,6 +275,8 @@ impl FrameParser {
                 0
             },
             latch: true,
+            next_size: None,
+            prev_size: None,
         }
     }
 
@@ -254,6 +290,14 @@ impl FrameParser {
     /// the block-sequencer's packet-start state raises it too).
     pub fn raise_latch(&mut self) {
         self.latch = true;
+        self.next_size = None;
+        self.prev_size = None;
+    }
+
+    /// Lower the latch (diagnostic use).
+    #[doc(hidden)]
+    pub fn lower_latch(&mut self) {
+        self.latch = false;
     }
 
     /// Advance the boundary watch to `cursor`, raising the latch for
@@ -280,6 +324,13 @@ impl FrameParser {
         &mut self,
         reader: &mut BitReader<'_>,
     ) -> Result<ParsedFrame, FrameParseError> {
+        // The three-field latch applies to the first block of the
+        // first frame *starting* in a packet: measured on the vendor
+        // streams, re-raising it for a mid-frame block right after a
+        // boundary crossing closes strictly fewer carry boundaries
+        // (55 vs 64 of 122 on the 22.05 kHz mono stream), so the
+        // crossing check runs per frame, not per block.
+        self.update_latch(reader.position() as u64);
         let mut blocks = Vec::new();
         let mut remaining = self.cfg.frame_length;
         while remaining > 0 {
@@ -295,19 +346,27 @@ impl FrameParser {
         reader: &mut BitReader<'_>,
         remaining: u16,
     ) -> Result<ParsedBlock, FrameParseError> {
-        self.update_latch(reader.position() as u64);
-
-        // F1 — block-size index (VBL streams only). Three fields on
-        // the first block after a packet header, one afterwards; the
-        // *last* field read is the current block's index.
+        // F1 — block-size indices (VBL streams only), pipelined one
+        // block ahead: the sizes a lapped transform needs before it
+        // can window the current block. The three-field opening after
+        // a packet header carries (previous, current, next); every
+        // later block reads exactly one field — the *next* block's
+        // size — and takes its own size from the pipeline. This is
+        // the reading the vendor bitstreams themselves select: on the
+        // staged streams the carry-boundary closure rate is strictly
+        // higher than under the last-field-is-current reading of the
+        // §2 F1 note (measured in tests/vendor_streams.rs).
         let size_index = if self.cfg.vbl_enabled {
-            let extra = if self.latch { 2 } else { 0 };
+            let cur = if self.latch {
+                let prev = reader.read_bits(self.cfg.w_bs)? as u8;
+                self.prev_size = Some(prev);
+                reader.read_bits(self.cfg.w_bs)? as u8
+            } else {
+                self.next_size.unwrap_or(0)
+            };
             self.latch = false;
-            let mut idx = 0u8;
-            for _ in 0..=extra {
-                idx = reader.read_bits(self.cfg.w_bs)? as u8;
-            }
-            idx
+            self.next_size = Some(reader.read_bits(self.cfg.w_bs)? as u8);
+            cur
         } else {
             0
         };
@@ -387,7 +446,15 @@ impl FrameParser {
                 if !coded[ch] {
                     continue;
                 }
-                let mut band = spec.first_band;
+                let mut band = match spec.start {
+                    NoiseStart::Band(b) => b,
+                    NoiseStart::CoefFraction(frac) => {
+                        let cutoff = frac * f64::from(block_size);
+                        (0..band_count)
+                            .find(|&b| f64::from(edges[b]) >= cutoff)
+                            .unwrap_or(band_count)
+                    }
+                };
                 while band < band_count && edges[band] < coef_end {
                     let flagged = reader.read_bit()?;
                     if flagged {
@@ -416,22 +483,18 @@ impl FrameParser {
             }
         }
 
-        // B2/B3/B4 — per coded channel envelopes, channel 0 first.
+        // B3/B4 — per coded channel envelopes, channel 0 first.
+        //
+        // No envelope-reuse flag is read here. The §2 B2 row claims a
+        // 1-bit reuse flag under the VBL gate, but the vendor
+        // bitstreams contradict it: with the flag the carry-boundary
+        // closure collapses (e.g. 210 of 394 on the mono 8 kHz
+        // stream), without it the same stream closes 394 of 394 —
+        // measured in tests/vendor_streams.rs. Flagged to the docs
+        // collaborator as an erratum candidate.
         let mut envelopes: Vec<Option<Envelope>> = vec![None; channels];
         for ch in 0..channels {
             if !coded[ch] {
-                continue;
-            }
-            // B2 — present when variable block length is enabled
-            // (`flags2` bit 2 through the §0 AND gate); defaults to
-            // 1 (new envelope) when absent.
-            let new_envelope = if self.cfg.vbl_enabled {
-                reader.read_bit()?
-            } else {
-                true
-            };
-            if !new_envelope {
-                envelopes[ch] = Some(Envelope::Reused);
                 continue;
             }
             if self.cfg.exp_vlc {
@@ -460,15 +523,26 @@ impl FrameParser {
             }
         }
 
-        // B5 — per coded channel coefficient sub-streams.
-        let vlc = coef_vlc(self.cfg.vlc_class, joint_stereo).ok_or(FrameParseError::Vlc)?;
-        let map = runlevel_map(self.cfg.vlc_class, joint_stereo).ok_or(FrameParseError::Vlc)?;
+        // B5 — per coded channel coefficient sub-streams. In a joint
+        // (F2a set) block the ALT tree applies to the **second**
+        // channel only — the difference channel, whose statistics the
+        // alt tables fit — while channel 0 keeps the primary tree.
+        // This per-channel split is what the vendor bitstreams
+        // select: with the ALT tree on both channels of a joint
+        // block the stereo streams close no boundaries at all; with
+        // it on the second channel alone the 22.05 kHz stereo stream
+        // closes 1086 of 1098 (tests/vendor_streams.rs). §5's "set
+        // selects the ALT coefficient VLC table" is thereby
+        // channel-scoped, not block-scoped.
         let w_lvl = escape_level_width(total_gain);
         let mut coefficients: Vec<Vec<i32>> = vec![Vec::new(); channels];
         for ch in 0..channels {
             if !coded[ch] {
                 continue;
             }
+            let alt = joint_stereo && ch == 1;
+            let vlc = coef_vlc(self.cfg.vlc_class, alt).ok_or(FrameParseError::Vlc)?;
+            let map = runlevel_map(self.cfg.vlc_class, alt).ok_or(FrameParseError::Vlc)?;
             let n_coef = base_coef - noise_widths[ch];
             coefficients[ch] =
                 decode_coefficients(reader, vlc, map, n_coef, w_lvl, self.cfg.frame_length_bits)?;
@@ -689,26 +763,28 @@ mod tests {
     }
 
     #[test]
-    fn vbl_stereo_first_block_reads_three_size_fields_and_alt_table() {
+    fn vbl_stereo_three_field_opening_and_channel_scoped_alt() {
         let cfg = stereo_vbl_cfg();
         assert!(cfg.vbl_enabled);
         assert_eq!((cfg.n_block_sizes, cfg.w_bs), (8, 2));
         let bands = crate::band_partition::exponent_band_count(22_050, 1024);
 
         let mut w = BitWriter::new();
-        // F1 × 3 (latch raised at stream start): two neighbours, then
-        // the current index 0 → 1024-sample block.
-        w.write_bits(0, 2);
-        w.write_bits(0, 2);
-        w.write_bits(0, 2);
-        w.write_bit(true); // F2a: joint stereo → ALT table
+        // F1 × 3 (latch raised at stream start): previous, current,
+        // next — current index 0 → 1024-sample block.
+        w.write_bits(0, 2); // previous
+        w.write_bits(0, 2); // current
+        w.write_bits(0, 2); // next (pipeline)
+        w.write_bit(true); // F2a: joint stereo
         w.write_bit(true); // ch0 coded
-        w.write_bit(false); // ch1 uncoded
+        w.write_bit(true); // ch1 coded
         w.write_bits(10, 7); // B1 → total gain 11
-        w.write_bit(true); // B2 (VBL): new envelope, ch0 only
-        write_scale_delta_zero_run(&mut w, bands);
-        let alt = coef_vlc(3, true).unwrap();
-        assert!(alt.encode_symbol(1, &mut w)); // EOB from the ALT tree
+        write_scale_delta_zero_run(&mut w, bands); // ch0 envelope
+        write_scale_delta_zero_run(&mut w, bands); // ch1 envelope
+                                                   // Channel-scoped ALT: ch0 from the primary tree, ch1 from
+                                                   // the ALT tree.
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
+        assert!(coef_vlc(3, true).unwrap().encode_symbol(1, &mut w));
         let bit_len = w.bit_len();
         let bytes = w.into_bytes();
 
@@ -719,19 +795,18 @@ mod tests {
         let b = &frame.blocks[0];
         assert_eq!(b.block_size, 1024);
         assert!(b.joint_stereo);
-        assert!(b.channels[0].coded);
-        assert!(!b.channels[1].coded);
-        assert!(b.channels[1].envelope.is_none());
+        assert!(b.channels.iter().all(|c| c.coded));
+        assert!(b.channels[0].coefficients.iter().all(|&c| c == 0));
+        assert!(b.channels[1].coefficients.iter().all(|&c| c == 0));
 
-        // A second frame does NOT re-read the extra fields (latch
-        // lowered, no boundary crossed): one F1 field only.
+        // A second frame reads ONE field (the next-size pipeline) and
+        // takes its own size from the previous block's field.
         let mut w = BitWriter::new();
-        w.write_bits(0, 2); // one F1 field
-        w.write_bit(false); // F2a clear → primary table
+        w.write_bits(1, 2); // next-size field (pipeline)
+        w.write_bit(false); // F2a clear → primary for both channels
         w.write_bit(true);
         w.write_bit(false);
         w.write_bits(10, 7);
-        w.write_bit(true);
         write_scale_delta_zero_run(&mut w, bands);
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         let bit_len = w.bit_len();
@@ -739,6 +814,8 @@ mod tests {
         let mut r = BitReader::with_bit_len(&bytes, bit_len);
         let frame = parser.parse_frame(&mut r).unwrap();
         assert_eq!(r.position(), bit_len);
+        // Size came from the pipeline (previous block wrote next=0).
+        assert_eq!(frame.blocks[0].block_size, 1024);
         assert!(!frame.blocks[0].joint_stereo);
     }
 
@@ -767,20 +844,19 @@ mod tests {
         let cfg = stereo_vbl_cfg();
         let bands_512 = crate::band_partition::exponent_band_count(22_050, 512);
         let mut w = BitWriter::new();
-        // Two 512-sample blocks tile the 1024-sample frame.
+        // Two 512-sample blocks tile the 1024-sample frame. Under
+        // the pipeline the opening carries (prev, cur, next) =
+        // (1, 1, 1); the second block reads only its own next field.
         for i in 0..2 {
             if i == 0 {
-                w.write_bits(1, 2); // neighbour
-                w.write_bits(1, 2); // neighbour
+                w.write_bits(1, 2); // previous
                 w.write_bits(1, 2); // current: index 1 → 512
-            } else {
-                w.write_bits(1, 2);
             }
+            w.write_bits(1, 2); // next (pipeline)
             w.write_bit(false); // F2a
             w.write_bit(true); // ch0
             w.write_bit(false); // ch1
             w.write_bits(20, 7);
-            w.write_bit(true); // B2 new envelope
             write_scale_delta_zero_run(&mut w, bands_512);
             assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         }
@@ -801,8 +877,12 @@ mod tests {
     }
 
     #[test]
-    fn envelope_reuse_flag_skips_the_exponent_stream() {
+    fn no_reuse_bit_is_read_before_the_envelope() {
+        // The vendor-measured calibration: no B2 bit exists — the
+        // envelope follows the total gain directly. A frame written
+        // that way parses back exactly.
         let cfg = stereo_vbl_cfg();
+        let bands = crate::band_partition::exponent_band_count(22_050, 1024);
         let mut w = BitWriter::new();
         w.write_bits(0, 2);
         w.write_bits(0, 2);
@@ -811,7 +891,7 @@ mod tests {
         w.write_bit(true); // ch0
         w.write_bit(false); // ch1
         w.write_bits(10, 7);
-        w.write_bit(false); // B2 = 0: reuse
+        write_scale_delta_zero_run(&mut w, bands); // envelope, immediately
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         let bit_len = w.bit_len();
         let bytes = w.into_bytes();
@@ -819,7 +899,10 @@ mod tests {
         let mut r = BitReader::with_bit_len(&bytes, bit_len);
         let frame = parser.parse_frame(&mut r).unwrap();
         assert_eq!(r.position(), bit_len);
-        assert_eq!(frame.blocks[0].channels[0].envelope, Some(Envelope::Reused));
+        match frame.blocks[0].channels[0].envelope.as_ref().unwrap() {
+            Envelope::Exponents(e) => assert!(e.iter().all(|&x| x == 36)),
+            other => panic!("unexpected envelope {other:?}"),
+        }
     }
 
     #[test]
@@ -833,7 +916,6 @@ mod tests {
         w.write_bits(0, 1);
         w.write_bit(true); // F2 (mono: no F2a)
         w.write_bits(10, 7); // B1
-        w.write_bit(true); // B2 new envelope
         for (i, &width) in LSP_INDEX_WIDTHS.iter().enumerate() {
             w.write_bits(i as u64 % (1 << width.min(3)), width);
         }
@@ -867,7 +949,6 @@ mod tests {
             w.write_bit(true);
             w.write_bit(false);
             w.write_bits(10, 7);
-            w.write_bit(true);
             write_scale_delta_zero_run(&mut w, bands);
             assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
             (w.bit_len(), w.into_bytes())

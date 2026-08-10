@@ -305,11 +305,13 @@ impl StreamConfig {
         block_size - ((9 * u32::from(block_size)) / 100) as u16
     }
 
-    /// The §2 block-size decode: `block_size = frame_length >> index`,
-    /// `None` when the shift exceeds the frame or produces a block
-    /// under the configured minimum count.
+    /// The §2 block-size decode: `block_size = frame_length >> index`.
+    /// Valid indices span `0..=log2(n_block_sizes)` — the smallest
+    /// block is `frame_length / n_block_sizes` (the §0 clamp at
+    /// `frame_length / 128` bounds the smallest block at 128
+    /// samples), and §2 validates decoded sizes against that minimum.
     pub fn block_size_for_index(&self, index: u8) -> Option<u16> {
-        if index >= self.n_block_sizes {
+        if (1u32 << index) > u32::from(self.n_block_sizes) {
             return None;
         }
         Some(self.frame_length >> index)
