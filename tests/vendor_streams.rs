@@ -302,3 +302,172 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
         "global closure regressed: {all_aligned}/{all_packets}"
     );
 }
+
+/// PCM leg: decode each vendor stream through the full chain
+/// (§1 assembly → §2–§4 parse → §5 mid/side + staged-ladder
+/// dequantisation → synthesis) and compare a mono downmix against a
+/// black-box reference decode (best-lag + scalar-gain fit — the
+/// staged docs leave the absolute dequantisation scale open, so the
+/// gain is fitted; the correlation and SNR are the signal).
+#[test]
+fn vendor_pcm_decodes_and_correlates() {
+    use oxideav_wma::vendor_decode::BlockSynth;
+
+    let dir = match vendor_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!("skipping: vendor streams unavailable");
+            return;
+        }
+    };
+    let loaded = skip_unless_fixtures!();
+    for l in &loaded {
+        // Black-box reference decode: mono downmix, f32le.
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(dir.join(l.spec.file))
+            .args(["-f", "f32le", "-ac", "1", "-"])
+            .output();
+        let reference: Vec<f64> = match out {
+            Ok(o) if o.status.success() => o
+                .stdout
+                .chunks_exact(4)
+                .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+                .collect(),
+            _ => {
+                eprintln!("skipping PCM leg: reference decoder unavailable");
+                return;
+            }
+        };
+
+        let mut asm = PacketAssembler::new(&l.cfg);
+        for pkt in &l.packets {
+            asm.push_packet(pkt).unwrap();
+        }
+        let stream = asm.finish();
+        let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
+        let mut parser = FrameParser::new(&l.cfg, &body_starts);
+        let mut synth = BlockSynth::new(&l.cfg);
+
+        let mut pcm: Vec<f64> = Vec::new();
+        let mut cursor = stream.packets[0].frames_start_bit();
+        for rec in stream.packets.iter() {
+            if cursor != rec.frames_start_bit() {
+                cursor = rec.frames_start_bit();
+                parser.raise_latch();
+                synth.reset();
+            }
+            let mut reader = stream.reader_at(cursor);
+            for f in 0..rec.header.frame_count {
+                match parser.parse_frame(&mut reader) {
+                    Ok(frame) => {
+                        for block in &frame.blocks {
+                            let chans = synth.block(block);
+                            for t in 0..chans[0].len() {
+                                let sum: f64 = chans.iter().map(|c| c[t]).sum();
+                                pcm.push(sum / chans.len() as f64);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Zero-fill the remaining declared frames so
+                        // the timeline stays aligned to the §1 counts.
+                        let remaining = usize::from(rec.header.frame_count - f);
+                        pcm.extend(
+                            std::iter::repeat(0.0)
+                                .take(usize::from(l.cfg.frame_length) * remaining),
+                        );
+                        synth.reset();
+                        break;
+                    }
+                }
+            }
+            cursor = reader.position() as u64;
+        }
+        assert!(!pcm.is_empty(), "{}: no PCM produced", l.spec.file);
+        assert!(
+            pcm.iter().all(|x| x.is_finite()),
+            "{}: non-finite PCM",
+            l.spec.file
+        );
+
+        // Best-lag + gain fit over a middle window.
+        let sr = l.spec.sample_rate as usize;
+        let win = (sr / 2).min(pcm.len().saturating_sub(1));
+        let start = (reference.len() / 3).min(reference.len().saturating_sub(win + 1));
+        let mut best = (0i64, f64::NEG_INFINITY, 0.0f64);
+        for lag in -5000i64..=5000 {
+            let (mut dot, mut ee, mut rr) = (0.0, 0.0, 0.0);
+            for t in (start..start + win).step_by(4) {
+                let u = t as i64 + lag;
+                if u < 0 || u as usize >= pcm.len() {
+                    continue;
+                }
+                let (a, b) = (reference[t], pcm[u as usize]);
+                dot += a * b;
+                ee += b * b;
+                rr += a * a;
+            }
+            if ee == 0.0 || rr == 0.0 {
+                continue;
+            }
+            let corr = dot * dot / (ee * rr);
+            if corr > best.1 {
+                best = (lag, corr, dot / ee);
+            }
+        }
+        let (lag, corr2, gain) = best;
+
+        // Per-second SNR over live (non-filled) chunks; median.
+        let mut chunk_snrs: Vec<f64> = Vec::new();
+        let mut t0 = sr;
+        while t0 + sr < reference.len().saturating_sub(sr) {
+            let (mut num, mut den) = (0.0, 0.0);
+            let mut live = 0usize;
+            for (t, &a) in reference.iter().enumerate().skip(t0).take(sr) {
+                let u = t as i64 + lag;
+                if u < 0 || u as usize >= pcm.len() {
+                    continue;
+                }
+                let b = pcm[u as usize] * gain;
+                if b != 0.0 {
+                    live += 1;
+                }
+                num += a * a;
+                den += (a - b) * (a - b);
+            }
+            if live > sr / 2 && num > 1e-9 {
+                chunk_snrs.push(10.0 * (num / den.max(1e-30)).log10());
+            }
+            t0 += sr;
+        }
+        chunk_snrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = chunk_snrs
+            .get(chunk_snrs.len() / 2)
+            .copied()
+            .unwrap_or(f64::NAN);
+        eprintln!(
+            "{}: lag {lag}, corr² {corr2:.3}, per-sec median SNR {median:.2} dB ({} chunks)",
+            l.spec.file,
+            chunk_snrs.len()
+        );
+
+        // Floors at the measured r439 quality for the families the
+        // parse closes (the dequantisation composition rule is still
+        // an open staged item, so these are correlation floors, not
+        // fidelity claims).
+        match l.spec.file {
+            "cand_apollo8.wma" => {
+                assert!(corr2 > 0.9, "apollo8 corr² regressed: {corr2}");
+            }
+            "cand_mono8k_8kbps_v8.wma" | "cand_stereo22k_32kbps_av.wma" => {
+                assert!(
+                    median > 2.5,
+                    "{}: median SNR regressed to {median:.2} dB",
+                    l.spec.file
+                );
+            }
+            _ => {}
+        }
+    }
+}
