@@ -899,7 +899,13 @@ pub mod window;
 pub mod wire_chain;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod wire_codes;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod wire_tables;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub mod wire_vlc;
 
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
