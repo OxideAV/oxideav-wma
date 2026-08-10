@@ -771,6 +771,9 @@
 pub mod analysis;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod band_partition;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod bands;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
