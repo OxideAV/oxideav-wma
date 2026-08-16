@@ -1077,6 +1077,37 @@ mod tests {
     }
 
     #[test]
+    fn octave_noise_edges_match_the_typed_derivation_and_close_short_blocks() {
+        // For block sizes inside the typed set the generalised walk
+        // must agree with exponent_bands::noise_band_boundaries
+        // (same seed, same rounding); for the short VBL sizes it
+        // must still tile [0, block] strictly increasingly.
+        use crate::block::BlockSize;
+        for (sr, bs) in [
+            (8_000u32, BlockSize::S512),
+            (22_050, BlockSize::S1024),
+            (44_100, BlockSize::S2048),
+            (22_050, BlockSize::S256),
+        ] {
+            let typed = crate::exponent_bands::noise_band_boundaries(sr, bs).unwrap();
+            assert_eq!(
+                octave_noise_edges(sr, bs.samples()),
+                typed,
+                "sr {sr} block {}",
+                bs.samples()
+            );
+        }
+        for (sr, bc) in [(22_050u32, 128u16), (44_100, 128), (8000, 128)] {
+            let edges = octave_noise_edges(sr, bc);
+            assert_eq!(edges[0], 0, "sr {sr} bc {bc}");
+            assert_eq!(*edges.last().unwrap(), bc, "sr {sr} bc {bc}");
+            for w in edges.windows(2) {
+                assert!(w[0] < w[1], "sr {sr} bc {bc}");
+            }
+        }
+    }
+
+    #[test]
     fn stereo_short_block_b2_zero_reuses_both_envelopes() {
         // B2 = 0 on a short stereo block: no envelope bits follow;
         // both coded channels carry Envelope::Reused.
