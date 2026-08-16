@@ -49,14 +49,26 @@ pub struct BlockSynth {
     /// Per-channel overlap tails (second half of the previous
     /// windowed inverse transform).
     tails: Vec<Vec<f64>>,
+    /// §3 per-block-size envelope cache, `[channel][size_index]` —
+    /// the exponents a B2 = 0 block reuses
+    /// ([`crate::vendor_frame::Envelope::Reused`]). The staged trace
+    /// stores the reuse state per block-size index (`ctx+0x24c`), so
+    /// the cache is keyed the same way.
+    env_cache: Vec<Vec<Option<Vec<i32>>>>,
 }
+
+/// Number of per-channel envelope-cache slots (block-size indices
+/// 0..=4 cover the §0 clamp range down to 128-sample blocks).
+const ENV_CACHE_SLOTS: usize = 8;
 
 impl BlockSynth {
     /// A synthesiser for one stream.
     pub fn new(cfg: &StreamConfig) -> Self {
+        let channels = usize::from(cfg.channels);
         Self {
             cfg: cfg.clone(),
-            tails: vec![Vec::new(); usize::from(cfg.channels)],
+            tails: vec![Vec::new(); channels],
+            env_cache: vec![vec![None; ENV_CACHE_SLOTS]; channels],
         }
     }
 
@@ -64,6 +76,11 @@ impl BlockSynth {
     pub fn reset(&mut self) {
         for t in &mut self.tails {
             t.clear();
+        }
+        for ch in &mut self.env_cache {
+            for slot in ch.iter_mut() {
+                *slot = None;
+            }
         }
     }
 
@@ -83,7 +100,22 @@ impl BlockSynth {
             if !chan.coded {
                 continue;
             }
-            let weights = band_weights(&self.cfg, block, chan.envelope.as_ref(), m);
+            // §3 per-block-size envelope cache: fresh exponents fill
+            // the slot for this size index; a Reused envelope reads
+            // it back (flat when nothing was cached yet — only
+            // possible right after a reset).
+            let slot = usize::from(block.size_index).min(ENV_CACHE_SLOTS - 1);
+            let envelope = match chan.envelope.as_ref() {
+                Some(Envelope::Exponents(e)) => {
+                    self.env_cache[ch][slot] = Some(e.clone());
+                    Some(Envelope::Exponents(e.clone()))
+                }
+                Some(Envelope::Reused) => self.env_cache[ch][slot]
+                    .as_ref()
+                    .map(|e| Envelope::Exponents(e.clone())),
+                other => other.cloned(),
+            };
+            let weights = band_weights(&self.cfg, block, envelope.as_ref(), m);
             let gain = total_gain_multiplier(block.total_gain);
             for (i, &q) in chan.coefficients.iter().enumerate() {
                 if q == 0 {
@@ -331,6 +363,38 @@ mod tests {
         synth.reset();
         let third = synth.block(&block);
         assert_eq!(first[0], third[0], "reset clears the carried tail");
+    }
+
+    #[test]
+    fn reused_envelope_resolves_from_the_per_size_cache() {
+        // A Reused envelope must dequantise exactly like the fresh
+        // envelope previously cached for the same block-size index.
+        let c = cfg();
+        let mut coeffs = vec![0i32; 1864];
+        coeffs[40] = 400;
+        coeffs[900] = 200;
+        let shaped: Vec<i32> = (0..25).map(|b| 30 + (b % 7)).collect();
+        let fresh = coded_block(false, coeffs.clone(), vec![0i32; 1864], shaped.clone());
+        let mut reused = fresh.clone();
+        reused.channels[0].envelope = Some(Envelope::Reused);
+        reused.channels[1].envelope = Some(Envelope::Reused);
+
+        let mut a = BlockSynth::new(&c);
+        let out_a1 = a.block(&fresh);
+        let out_a2 = a.block(&fresh);
+        let mut b = BlockSynth::new(&c);
+        let out_b1 = b.block(&fresh);
+        let out_b2 = b.block(&reused);
+        assert_eq!(out_a1, out_b1);
+        assert_eq!(out_a2, out_b2, "reused envelope must equal the cached one");
+
+        // After a reset the cache is empty: Reused falls back to the
+        // flat envelope, which differs for a shaped spectrum.
+        b.reset();
+        a.reset();
+        let flat_path = b.block(&reused);
+        let fresh_path = a.block(&fresh);
+        assert_ne!(flat_path, fresh_path);
     }
 
     #[test]

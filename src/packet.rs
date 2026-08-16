@@ -22,6 +22,15 @@
 //! vendor streams (`tables/vendor-stream-packet-headers.csv`) shows a
 //! non-zero carry is the *normal* case — 724 of 787 packets.
 //!
+//! **Zero-carry packets mark the previous packet as padded**
+//! (vendor-measured calibration, r446): a P3 of 0 means the previous
+//! packet's declared frames all completed inside it, and any body
+//! bits left there after the last frame are padding, not frame data.
+//! The VBR-configured vendor streams pad most packets this way — the
+//! 96 kbps 44.1 kHz stream closes all 133 carry boundaries under
+//! this reading and only 83 under a strict frames-fill-the-body
+//! reading (`tests/vendor_streams.rs`).
+//!
 //! [`PacketAssembler`] validates and strips the §1 header from each
 //! packet and concatenates the bodies into one contiguous bit
 //! stream, recording per packet where its body landed and what its

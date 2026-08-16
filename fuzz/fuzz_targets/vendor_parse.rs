@@ -13,7 +13,7 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_wma::header::Version;
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
-use oxideav_wma::vendor_frame::{FrameParser, NoiseSpec, NoiseStart};
+use oxideav_wma::vendor_frame::{FrameParser, NoiseGrid, NoiseSpec, NoiseStart, ReuseRule};
 use std::sync::OnceLock;
 
 fn configs() -> &'static Vec<StreamConfig> {
@@ -39,6 +39,16 @@ fuzz_target!(|data: &[u8]| {
     let cfg = &configs()[usize::from(sel & 0x3)];
     let noise_first_band = usize::from((sel >> 2) & 0x7);
     let with_noise = sel & 0x20 != 0;
+    let grid = if sel & 0x40 != 0 {
+        NoiseGrid::OctaveSubbands
+    } else {
+        NoiseGrid::ExponentBands
+    };
+    let reuse = if sel & 0x80 != 0 {
+        ReuseRule::Never
+    } else {
+        ReuseRule::TwoChannelShortBlock
+    };
 
     let ba = usize::from(cfg.block_align);
     let mut asm = PacketAssembler::new(cfg);
@@ -51,10 +61,11 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
-    let mut parser = FrameParser::new(cfg, &body_starts);
+    let mut parser = FrameParser::new(cfg, &body_starts).with_reuse(reuse);
     if with_noise {
         parser = parser.with_noise(NoiseSpec {
             start: NoiseStart::Band(noise_first_band),
+            grid,
         });
     }
     let mut reader = stream.reader_at(u64::from(stream.packets[0].header.carry_bits));

@@ -224,7 +224,11 @@ fn packet_layer_holds_on_all_vendor_packets() {
 
 /// Frame-level §2–§4 measurement: parse each packet's declared
 /// frames and compare the landing position against the next packet's
-/// carry boundary — the ground truth §1 embeds. Prints the per-file
+/// carry boundary — the ground truth §1 embeds. A boundary closes
+/// when the parse lands exactly on the next packet's carry offset,
+/// or — when the next packet declares a **zero** carry — when the
+/// declared frames all completed inside the packet (the remainder is
+/// padding; the VBR streams pad most packets). Prints the per-file
 /// closure rate.
 #[test]
 fn frame_parse_closes_on_packet_carry_boundaries() {
@@ -246,8 +250,9 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
         let mut cursor = stream.packets[0].frames_start_bit();
         for (i, rec) in stream.packets.iter().enumerate() {
             if cursor != rec.frames_start_bit() {
-                // Mis-parse upstream: resynchronise at the §1 carry
-                // boundary, as a real decoder would after an error.
+                // Padding skip or mis-parse upstream: resynchronise
+                // at the §1 carry boundary, as the decoder does at
+                // every packet header.
                 cursor = rec.frames_start_bit();
                 parser.raise_latch();
             }
@@ -266,26 +271,36 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
             cursor = reader.position() as u64;
             if let Some(next) = stream.packets.get(i + 1) {
                 boundaries += 1;
-                if !failed && cursor == next.frames_start_bit() {
+                let closed = if next.header.carry_bits > 0 {
+                    cursor == next.frames_start_bit()
+                } else {
+                    // Zero carry: the frames ended inside this
+                    // packet; the rest of its body is padding.
+                    cursor <= next.body_start_bit
+                };
+                if !failed && closed {
                     aligned += 1;
                 }
             }
         }
         eprintln!(
-            "{}: {}/{} boundaries closed exactly, {} frame-parse errors",
+            "{}: {}/{} boundaries closed, {} frame-parse errors",
             l.spec.file, aligned, boundaries, parse_errors
         );
-        // Per-family floors at the measured r439 closure rates (the
+        // Per-family floors at the measured r446 closure rates (the
         // vendor-calibrated F1 pipeline / channel-scoped ALT /
-        // no-reuse-bit parser). A regression below any floor means a
-        // parser change broke a previously-closing family.
+        // two-channel short-block B2 / zero-carry-padding parser).
+        // A regression below any floor means a parser change broke a
+        // previously-closing family. Five of the six families close
+        // completely; the mono 22.05 kHz stream carries the open F1
+        // anomaly (see the round report).
         let floor = match l.spec.file {
             "cand_mono8k_8kbps_v8.wma" => 394,      // 394/394 (100 %)
-            "cand_stereo22k_32kbps_av.wma" => 1080, // 1086/1098
+            "cand_stereo22k_32kbps_av.wma" => 1098, // 1098/1098 (100 %)
             "cand_mono22k_16kbps.wma" => 60,        // 64/122
-            "cand_wmp12_96kbps.wma" => 5,           // 5/133
-            "cand_vbr_q75_stereo.wma" => 2,         // 2/13
-            "cand_apollo8.wma" => 1,                // 1/3
+            "cand_wmp12_96kbps.wma" => 133,         // 133/133 (100 %)
+            "cand_vbr_q75_stereo.wma" => 13,        // 13/13 (100 %)
+            "cand_apollo8.wma" => 3,                // 3/3 (100 %)
             _ => 0,
         };
         assert!(
@@ -298,7 +313,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
     }
     eprintln!("total: {all_aligned}/{all_packets} boundaries closed");
     assert!(
-        all_aligned >= 1540,
+        all_aligned >= 1700,
         "global closure regressed: {all_aligned}/{all_packets}"
     );
 }
@@ -351,13 +366,19 @@ fn vendor_pcm_decodes_and_correlates() {
 
         let mut pcm: Vec<f64> = Vec::new();
         let mut cursor = stream.packets[0].frames_start_bit();
-        for rec in stream.packets.iter() {
+        let mut clean_pad = false;
+        for (i, rec) in stream.packets.iter().enumerate() {
             if cursor != rec.frames_start_bit() {
                 cursor = rec.frames_start_bit();
                 parser.raise_latch();
-                synth.reset();
+                if !clean_pad {
+                    // A real mis-parse (not a padding skip): the
+                    // overlap-add state is unreliable.
+                    synth.reset();
+                }
             }
             let mut reader = stream.reader_at(cursor);
+            let mut failed = false;
             for f in 0..rec.header.frame_count {
                 match parser.parse_frame(&mut reader) {
                     Ok(frame) => {
@@ -378,11 +399,20 @@ fn vendor_pcm_decodes_and_correlates() {
                                 .take(usize::from(l.cfg.frame_length) * remaining),
                         );
                         synth.reset();
+                        failed = true;
                         break;
                     }
                 }
             }
             cursor = reader.position() as u64;
+            // A zero-carry successor after a clean parse means this
+            // packet's tail is padding: the coming cursor jump is
+            // *not* a decode discontinuity.
+            clean_pad = !failed
+                && stream
+                    .packets
+                    .get(i + 1)
+                    .is_some_and(|n| n.header.carry_bits == 0 && cursor <= n.body_start_bit);
         }
         assert!(!pcm.is_empty(), "{}: no PCM produced", l.spec.file);
         assert!(
@@ -391,12 +421,15 @@ fn vendor_pcm_decodes_and_correlates() {
             l.spec.file
         );
 
-        // Best-lag + gain fit over a middle window.
+        // Best-lag + gain fit over a middle window. The decoder's
+        // leading latency is block-aligned, so only block-aligned
+        // lags are candidates (a free election drifts onto spurious
+        // correlation peaks when the residual error is large).
         let sr = l.spec.sample_rate as usize;
         let win = (sr / 2).min(pcm.len().saturating_sub(1));
         let start = (reference.len() / 3).min(reference.len().saturating_sub(win + 1));
         let mut best = (0i64, f64::NEG_INFINITY, 0.0f64);
-        for lag in -5000i64..=5000 {
+        for lag in (-5120i64..=5120).step_by(256) {
             let (mut dot, mut ee, mut rr) = (0.0, 0.0, 0.0);
             for t in (start..start + win).step_by(4) {
                 let u = t as i64 + lag;

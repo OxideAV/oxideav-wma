@@ -32,9 +32,9 @@
 //!   inverse) runs on dequantised coefficients and lives in the
 //!   decode stage.
 //!
-//! ## Vendor-measured calibrations (this round)
+//! ## Vendor-measured calibrations (r439, revised r446)
 //!
-//! Three §2/§5 details were calibrated against the six committed
+//! Four §1/§2/§5 details were calibrated against the six committed
 //! vendor bitstreams, using the §1 carry boundary as ground truth
 //! (`tests/vendor_streams.rs` measures them; the closure counts
 //! quoted below are reproduced there):
@@ -44,16 +44,27 @@
 //!    packet header re-primes (previous, current, next). Under the
 //!    last-field-is-current reading the multi-size streams lose most
 //!    boundaries; under the pipeline the 22.05 kHz stereo stream
-//!    closes 1086 of 1098.
-//! 2. **No B2 reuse bit exists on the wire.** Reading the §2 B2
-//!    row's 1-bit flag desynchronises every stream; without it the
-//!    mono 8 kHz stream closes 394 of 394. Envelopes are always sent
-//!    for coded channels.
+//!    closes 1098 of 1098. (The 22.05 kHz **mono** stream — the one
+//!    committed stream with `n_block_sizes == 4` — still contradicts
+//!    both readings around some 512-sample transitions and is the
+//!    open forensic item; see [`ReuseRule`] and the round report.)
+//! 2. **The B2 reuse bit exists on short blocks of two-channel
+//!    streams, one bit per block** — see [`ReuseRule`], which
+//!    carries the full measurement. This revises r439's "no B2 bit
+//!    exists" (r439 only measured the *unconditional* readings, and
+//!    the mono 8 kHz stream that anchored it has no short blocks at
+//!    all).
 //! 3. **The ALT coefficient tree is channel-scoped.** In a joint
 //!    block only the second channel (the difference channel) uses
 //!    the class's ALT tree; channel 0 keeps the primary tree.
+//! 4. **A zero §1 carry marks the previous packet as padded.** When
+//!    a packet's P3 is 0, the previous packet's frames all completed
+//!    inside it and any remaining body bits there are padding, not
+//!    frame data — the VBR streams pad most packets this way (the
+//!    96 kbps 44.1 kHz stream closes 133 of 133 under this reading,
+//!    83 of 133 under strict end-at-boundary).
 //!
-//! Each calibration is flagged in the final report as a
+//! Each calibration is flagged in the round report as a
 //! docs-erratum/extension ask rather than silently diverging from
 //! the staged text.
 //!
@@ -91,6 +102,10 @@ pub enum Envelope {
     /// §3.1 line-spectral indices (their conversion tables are a
     /// staged gap; the wire data is carried verbatim).
     LspIndices([u8; 10]),
+    /// §2 B2 = 0 — reuse the previously decoded envelope for this
+    /// block size (the §3 per-block-size cache, `ctx+0x24c` in the
+    /// staged trace; the decode stage resolves it).
+    Reused,
 }
 
 /// One channel's share of a parsed block.
@@ -234,10 +249,80 @@ pub enum NoiseStart {
 /// exists to make the enabled hypothesis measurable, not to assert
 /// it: when set, the walk runs over the block's exponent-band
 /// partition starting at the resolved first band.
+/// Which band table the §2.1 noise walk runs over — the staged text
+/// says "the band table" without naming it; both staged grids are
+/// candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoiseGrid {
+    /// The block's exponent-band partition (§3).
+    #[default]
+    ExponentBands,
+    /// The octave subband grid (`tables/subband-freqs`, the staged
+    /// noise/hgain seed walked from its second entry).
+    OctaveSubbands,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoiseSpec {
     /// The §2.1 walk's starting band.
     pub start: NoiseStart,
+    /// The band table the walk runs over.
+    pub grid: NoiseGrid,
+}
+
+/// §2 B2 — when the 1-bit envelope-reuse flag is present on the
+/// wire. The staged §2 row conditions it on the VBL gate **and**
+/// "more than one block size in this frame"; since a block as long
+/// as the frame is always alone in its frame, that condition is
+/// `block_size < frame_length`. The r439 calibration only measured
+/// the two unconditional readings (never / every block) and settled
+/// on "never"; this round's measurement of the conditional readings
+/// against the §1 carry boundaries (`tests/vendor_streams.rs`)
+/// overturns that for two-channel streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReuseRule {
+    /// The vendor-measured rule (this round's calibration): one B2
+    /// bit **per block** (not per channel), read after the F3/F4
+    /// position and before the first coded channel's envelope, on
+    /// blocks shorter than the frame, on **two-channel** streams
+    /// only; 0 = both coded channels reuse the envelope cached for
+    /// this block-size index (§3's per-size cache), 1 = fresh
+    /// envelopes follow. Measured against the §1 carry boundaries:
+    /// the three stereo VBL streams need the bit (the 22.05 kHz
+    /// stereo stream closes 1098/1098 with it vs 1086 without; the
+    /// 96 kbps 44.1 kHz stream 133/133 vs 38/133) and its 0-value
+    /// genuinely reuses (276 short-block channel envelopes skipped
+    /// inside closing packets of the 22.05 kHz stereo stream), while
+    /// the mono 22.05 kHz stream rejects it (64 → 27 when read) and
+    /// the mono 8 kHz stream has no short blocks and is neutral. The
+    /// committed corpus cannot separate `channels == 2` from
+    /// `n_block_sizes ≥ 8` as the true gate — every stereo stream in
+    /// it has ≥ 8 block sizes and the rejecting mono stream has 4 —
+    /// so the channel form is carried and the ambiguity is reported
+    /// as a docs ask. A per-channel placement of the same bit is
+    /// also refuted (the 96 kbps stream closes 25/133 under it).
+    #[default]
+    TwoChannelShortBlock,
+    /// One B2 bit per block on every block shorter than the frame,
+    /// mono included — the ungated form of the rule; the mono
+    /// 22.05 kHz stream refutes it (64 → 27).
+    ShortBlockPerBlock,
+    /// No B2 bit is ever read — the r439 calibration, kept
+    /// measurable as the baseline the regression floors were
+    /// established against.
+    ///
+    /// A measurement caveat recorded for the docs ask: because the
+    /// envelope VLC is self-synchronising, a boundary that closes
+    /// under [`ReuseRule::TwoChannelShortBlock`] often also closes
+    /// under this rule (the missing bit is absorbed within a few
+    /// scale symbols), so closure alone under-counts the difference;
+    /// the discriminating packets are the ones where B2 = 0 skips a
+    /// whole envelope. Repeat-scoped presence readings (bit only
+    /// when the per-size cache holds an envelope) were also measured
+    /// and score marginally worse (1704/1763 stream-scoped, with one
+    /// parse error, vs 1705/1763), so the unconditional short-block
+    /// form is carried.
+    Never,
 }
 
 /// Stateful §2 frame parser over an assembled §1 stream.
@@ -246,6 +331,8 @@ pub struct FrameParser {
     cfg: StreamConfig,
     /// §2.1 hypothesis switch (default `None` = no F3/F4 bits).
     noise: Option<NoiseSpec>,
+    /// §2 B2 presence rule.
+    reuse: ReuseRule,
     /// Packet-body start bits, for raising the three-field latch.
     body_starts: Vec<u64>,
     next_boundary: usize,
@@ -268,6 +355,7 @@ impl FrameParser {
         Self {
             cfg: cfg.clone(),
             noise: None,
+            reuse: ReuseRule::default(),
             body_starts: body_starts.to_vec(),
             next_boundary: if body_starts.first() == Some(&0) {
                 1
@@ -283,6 +371,12 @@ impl FrameParser {
     /// Enable the §2.1 noise-substitution parse hypothesis.
     pub fn with_noise(mut self, noise: NoiseSpec) -> Self {
         self.noise = Some(noise);
+        self
+    }
+
+    /// Select the §2 B2 envelope-reuse presence rule.
+    pub fn with_reuse(mut self, reuse: ReuseRule) -> Self {
+        self.reuse = reuse;
         self
     }
 
@@ -442,6 +536,15 @@ impl FrameParser {
         let mut noise_gains: Vec<Vec<i32>> = vec![Vec::new(); channels];
         let mut noise_widths: Vec<u16> = vec![0; channels];
         if let Some(spec) = self.noise {
+            let octave_edges: Vec<u16>;
+            let (walk_edges, walk_count): (&[u16], usize) = match spec.grid {
+                NoiseGrid::ExponentBands => (&edges, band_count),
+                NoiseGrid::OctaveSubbands => {
+                    octave_edges = octave_noise_edges(self.cfg.sample_rate, block_size);
+                    let n = octave_edges.len() - 1;
+                    (&octave_edges, n)
+                }
+            };
             for ch in 0..channels {
                 if !coded[ch] {
                     continue;
@@ -450,16 +553,16 @@ impl FrameParser {
                     NoiseStart::Band(b) => b,
                     NoiseStart::CoefFraction(frac) => {
                         let cutoff = frac * f64::from(block_size);
-                        (0..band_count)
-                            .find(|&b| f64::from(edges[b]) >= cutoff)
-                            .unwrap_or(band_count)
+                        (0..walk_count)
+                            .find(|&b| f64::from(walk_edges[b]) >= cutoff)
+                            .unwrap_or(walk_count)
                     }
                 };
-                while band < band_count && edges[band] < coef_end {
+                while band < walk_count && walk_edges[band] < coef_end {
                     let flagged = reader.read_bit()?;
                     if flagged {
-                        let lo = edges[band].max(coef_start);
-                        let hi = edges[band + 1].min(coef_end);
+                        let lo = walk_edges[band].max(coef_start);
+                        let hi = walk_edges[band + 1].min(coef_end);
                         noise_widths[ch] += hi.saturating_sub(lo);
                     }
                     noise_flags[ch].push(flagged);
@@ -483,18 +586,30 @@ impl FrameParser {
             }
         }
 
-        // B3/B4 — per coded channel envelopes, channel 0 first.
-        //
-        // No envelope-reuse flag is read here. The §2 B2 row claims a
-        // 1-bit reuse flag under the VBL gate, but the vendor
-        // bitstreams contradict it: with the flag the carry-boundary
-        // closure collapses (e.g. 210 of 394 on the mono 8 kHz
-        // stream), without it the same stream closes 394 of 394 —
-        // measured in tests/vendor_streams.rs. Flagged to the docs
-        // collaborator as an erratum candidate.
+        // B2/B3/B4 — one per-block B2 reuse bit under the configured
+        // [`ReuseRule`], then per coded channel envelopes, channel 0
+        // first. B2 = 0 marks every coded channel's envelope as
+        // reused from the per-block-size cache (§3) — no envelope
+        // bits follow.
+        let b2_short = block_size < self.cfg.frame_length && self.cfg.vbl_enabled;
+        let per_block_condition = match self.reuse {
+            ReuseRule::TwoChannelShortBlock => b2_short && channels == 2,
+            ReuseRule::ShortBlockPerBlock => b2_short,
+            ReuseRule::Never => false,
+        };
+        let block_b2 = if per_block_condition {
+            Some(reader.read_bit()?)
+        } else {
+            None
+        };
         let mut envelopes: Vec<Option<Envelope>> = vec![None; channels];
         for ch in 0..channels {
             if !coded[ch] {
+                continue;
+            }
+            let new_envelope = block_b2.unwrap_or(true);
+            if !new_envelope {
+                envelopes[ch] = Some(Envelope::Reused);
                 continue;
             }
             if self.cfg.exp_vlc {
@@ -565,6 +680,32 @@ impl FrameParser {
                 .collect(),
         })
     }
+}
+
+/// The octave noise-grid edges for an arbitrary block size: the
+/// staged subband seed walked from its second entry, each edge
+/// `round(f_hz · 2M / sample_rate)` clamped to the block, collapsed
+/// duplicates dropped, closed at the block's coefficient count
+/// (the [`crate::exponent_bands`] walk generalised past the typed
+/// block-size set to the short VBL sizes).
+fn octave_noise_edges(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
+    let m = u64::from(block_coefficients);
+    let sr = u64::from(sample_rate.max(1));
+    let mut edges = vec![0u16];
+    for &f_hz in &crate::wire_tables::SUBBAND_FREQS_HZ[1..] {
+        let bin = ((u64::from(f_hz) * 2 * m + sr / 2) / sr).min(m) as u16;
+        let last = *edges.last().expect("non-empty");
+        if bin > last {
+            edges.push(bin);
+        }
+        if u64::from(bin) >= m {
+            break;
+        }
+    }
+    if *edges.last().expect("non-empty") < block_coefficients {
+        edges.push(block_coefficients);
+    }
+    edges
 }
 
 /// §4: decode one channel's run-level coefficient sub-stream into
@@ -857,6 +998,7 @@ mod tests {
             w.write_bit(true); // ch0
             w.write_bit(false); // ch1
             w.write_bits(20, 7);
+            w.write_bit(true); // B2 (short block, stereo): fresh envelope
             write_scale_delta_zero_run(&mut w, bands_512);
             assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         }
@@ -877,10 +1019,10 @@ mod tests {
     }
 
     #[test]
-    fn no_reuse_bit_is_read_before_the_envelope() {
-        // The vendor-measured calibration: no B2 bit exists — the
-        // envelope follows the total gain directly. A frame written
-        // that way parses back exactly.
+    fn no_reuse_bit_is_read_before_a_full_length_blocks_envelope() {
+        // A block as long as the frame carries no B2 bit under the
+        // vendor-measured rule — the envelope follows the total gain
+        // directly. A frame written that way parses back exactly.
         let cfg = stereo_vbl_cfg();
         let bands = crate::band_partition::exponent_band_count(22_050, 1024);
         let mut w = BitWriter::new();
@@ -935,6 +1077,73 @@ mod tests {
     }
 
     #[test]
+    fn stereo_short_block_b2_zero_reuses_both_envelopes() {
+        // B2 = 0 on a short stereo block: no envelope bits follow;
+        // both coded channels carry Envelope::Reused.
+        let cfg = stereo_vbl_cfg();
+        let mut w = BitWriter::new();
+        w.write_bits(1, 2); // previous
+        w.write_bits(1, 2); // current: 512
+        w.write_bits(1, 2); // next
+        w.write_bit(false); // F2a
+        w.write_bit(true); // ch0 coded
+        w.write_bit(true); // ch1 coded
+        w.write_bits(20, 7); // B1
+        w.write_bit(false); // B2 = 0: reuse — envelopes absent
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w)); // ch0 EOB
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w)); // ch1 EOB
+                                                                       // Second block completes the 1024-sample frame.
+        w.write_bits(1, 2); // next
+        w.write_bit(false); // F2a
+        w.write_bit(false); // ch0
+        w.write_bit(false); // ch1 — all-uncoded block ends here
+        let bit_len = w.bit_len();
+        let bytes = w.into_bytes();
+        let mut parser = FrameParser::new(&cfg, &[0]);
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        let frame = parser.parse_frame(&mut r).unwrap();
+        assert_eq!(r.position(), bit_len, "must land exactly");
+        let b = &frame.blocks[0];
+        assert_eq!(b.block_size, 512);
+        assert_eq!(b.channels[0].envelope, Some(Envelope::Reused));
+        assert_eq!(b.channels[1].envelope, Some(Envelope::Reused));
+    }
+
+    #[test]
+    fn mono_short_block_reads_no_b2_bit() {
+        // The vendor-measured gate: mono streams carry no B2 even on
+        // short blocks — the envelope follows the total gain
+        // directly (the mono 22.05 kHz stream rejects the bit;
+        // measured in tests/vendor_streams.rs).
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        assert!(cfg.vbl_enabled);
+        assert_eq!(cfg.n_block_sizes, 4);
+        let bands_512 = crate::band_partition::exponent_band_count(22_050, 512);
+        let mut w = BitWriter::new();
+        w.write_bits(1, 2); // previous
+        w.write_bits(1, 2); // current: 512 (short)
+        w.write_bits(1, 2); // next
+        w.write_bit(true); // F2 (mono)
+        w.write_bits(20, 7); // B1
+                             // No B2: envelope immediately.
+        write_scale_delta_zero_run(&mut w, bands_512);
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
+        // Second 512 block completes the frame (uncoded).
+        w.write_bits(1, 2);
+        w.write_bit(false);
+        let bit_len = w.bit_len();
+        let bytes = w.into_bytes();
+        let mut parser = FrameParser::new(&cfg, &[0]);
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        let frame = parser.parse_frame(&mut r).unwrap();
+        assert_eq!(r.position(), bit_len);
+        match frame.blocks[0].channels[0].envelope.as_ref().unwrap() {
+            Envelope::Exponents(e) => assert_eq!(e.len(), bands_512),
+            other => panic!("unexpected envelope {other:?}"),
+        }
+    }
+
+    #[test]
     fn arbitrary_bytes_never_panic_the_vendor_parser() {
         // Deterministic pseudo-random sweep of the fuzz target's
         // contract: every input parses or fails typed, never panics.
@@ -968,6 +1177,11 @@ mod tests {
             if round % 2 == 0 {
                 parser = parser.with_noise(NoiseSpec {
                     start: NoiseStart::Band(round % 5),
+                    grid: if round % 4 == 0 {
+                        NoiseGrid::OctaveSubbands
+                    } else {
+                        NoiseGrid::ExponentBands
+                    },
                 });
             }
             let mut reader = stream.reader_at(0);
