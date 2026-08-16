@@ -207,7 +207,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 817 unit tests.
+guessing. The crate carries 865 unit tests.
 
 With the r390 wire pass the crate is a **complete, self-consistent
 codec loop at the wire-bit level**: PCM → analysis → quantize →
@@ -217,7 +217,7 @@ synthesis → PCM, round-tripping within the §4 quantizer bound. What
 separates this from decoding *vendor* WMA files is the short list of
 still-unstaged semantic bindings below.
 
-### Vendor-bitstream decode (r439)
+### Vendor-bitstream decode (r439, extended r446)
 
 The freshly staged rounds 3–6 of `docs/audio/wma/` (exact vendor VLC
 codewords for all eight trees, the §0–§5 frame-bit layout with the
@@ -241,29 +241,47 @@ vendor-encoded WMA v2 streams**:
 * Measured on the six committed vendor streams
   (`tests/vendor_streams.rs`, fixtures referenced from the docs
   staging area and never copied here): the §1 packet layer holds on
-  **all 1769 packets**; the frame layer closes **1552 / 1763** §1
-  carry boundaries — mono 8 kHz **394/394 (100 %)**, stereo
-  22.05 kHz A/V **1086/1098 (98.9 %)**, mono 22.05 kHz 64/122, the
-  44.1 kHz high-rate family partial (its 64 kbps stream parses every
-  frame; the 96 kbps+ streams have an unresolved residual) — and
-  the PCM leg reaches corr² 0.96 (13.6 dB) against a black-box
-  reference decode on the 44.1 kHz 64 kbps stereo stream, with
-  ~3.7–3.9 dB per-second medians on the closed mono/stereo families
-  (bounded by the still-open dequantisation-composition and
-  transition-window items).
-* Three §2/§5 details calibrated *differently* from the staged
+  **all 1769 packets**; the frame layer closes **1705 / 1763** §1
+  carry boundaries — **five of the six families completely**: mono
+  8 kHz **394/394**, stereo 22.05 kHz A/V **1098/1098**, and the
+  whole 44.1 kHz high-rate family (**3/3**, **13/13**, **133/133**).
+  Only the mono 22.05 kHz stream stays partial (64/122; below). The
+  PCM leg reaches corr² 0.96 against a black-box reference decode on
+  the 44.1 kHz 64 kbps stereo stream, with ~3.1–3.9 dB per-second
+  medians on the closed mono/stereo families (bounded by the
+  still-open dequantisation-composition and transition-window
+  items).
+* Four §1/§2/§5 details calibrated *differently* from the staged
   reading, with the §1 carry boundary as ground truth (reported to
   the docs staging as erratum/extension asks): the F1 field is a
-  one-ahead **pipeline** of block sizes; **no B2 envelope-reuse
-  bit** exists on the wire; the joint-stereo ALT-tree consequence is
-  **channel-scoped** (second coded channel — the difference channel
-  — only).
+  one-ahead **pipeline** of block sizes; the **B2 envelope-reuse bit
+  exists on short blocks of two-channel streams, one bit per block**
+  (r446 — revising r439's "no B2 bit", which had only measured the
+  unconditional readings; its 0-value skips the coded channels'
+  envelopes in favour of the §3 per-block-size cache, and the
+  committed corpus cannot separate `channels == 2` from
+  `n_block_sizes ≥ 8` as the gate); a **zero §1 carry marks the
+  previous packet as padded** (frames complete inside it, the
+  remainder is filler — the VBR streams pad most packets); and the
+  joint-stereo ALT-tree consequence is **channel-scoped** (second
+  coded channel — the difference channel — only).
 
 ### What is still open
 
+* the **mono 22.05 kHz F1 anomaly**: on the one committed stream
+  with `n_block_sizes == 4`, the one-ahead F1 pipeline reconciles
+  most blocks but not certain 512-sample transitions (a
+  boundary-constrained exhaustive re-parse of its packets pins
+  block-size paths whose F1 fields contradict both the pipeline and
+  the field-is-current readings) — needs a clean-room trace of the
+  block-size latch state flow for the small-`n_block_sizes` mono
+  case;
 * the **§2.1 noise-substitution enable rule** and its band
   table/start (staged as open; the parser carries an off-by-default
-  hypothesis switch);
+  hypothesis switch, now over either staged grid — exponent bands or
+  the octave subband table; no start/grid hypothesis improves any
+  committed stream, consistent with noise coding being disabled in
+  all six);
 * the **dequantisation composition rule** (the 10^(1/16) ladder is
   staged; how exponents, the total gain and the escape widths
   compose into the final scale is not) and the **transition-window
@@ -271,14 +289,12 @@ vendor-encoded WMA v2 streams**:
 * the **§3.1 line-spectral envelope conversion tables** (wire format
   staged and parsed; the index → envelope mapping is not — the mono
   8 kHz stream decodes with a flat envelope meanwhile);
-* the **44.1 kHz high-rate residual**: those streams' frames parse
-  through header + envelopes and their first coefficient streams,
-  and the 64 kbps stream decodes fully, but at 96 kbps+ the §1
-  frame counts and the frame-layout bit budget stop reconciling
-  (forensic notes in the r439 report; needs a clean-room trace of
-  the frame loop's per-frame state at high rates);
 * **WMA v1** specifics (no v1 vendor stream exists in the staged
   set) and the v1 per-channel byte-alignment rule.
+
+(The r439 "44.1 kHz high-rate residual" is **closed**: it was the
+missing B2 reuse bit plus the zero-carry padding semantic — the
+whole family now parses 149/149.)
 
 The [`oxideav_core`] registration will land once the remaining
 families close.

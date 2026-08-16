@@ -6,6 +6,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Reservoir / variable-block-length / stereo calibration pass
+  (r446)** over the round-6 staged docs, driving the vendor-stream
+  frame-layer closure from **1552/1763 to 1705/1763** §1 carry
+  boundaries — five of the six committed families now close
+  completely (mono 8 kHz 394/394, stereo 22.05 kHz 1098/1098,
+  44.1 kHz 3/3 + 13/13 + 133/133); only the mono 22.05 kHz stream
+  stays partial (64/122, the open F1 anomaly below):
+  - **The §2 B2 envelope-reuse bit exists** — one bit **per block**
+    (not per channel), on blocks shorter than the frame, on
+    two-channel streams (`vendor_frame::ReuseRule`, default
+    `TwoChannelShortBlock`). This revises the r439 "no B2 bit exists
+    on the wire" calibration, which had only measured the two
+    unconditional readings; the staged §2 row's own condition ("more
+    than one block size in this frame") is exactly the short-block
+    condition. B2 = 0 skips every coded channel's envelope in favour
+    of the §3 **per-block-size envelope cache**, which `vendor_decode
+    ::BlockSynth` now carries per channel (`Envelope::Reused`
+    resolves from it; flat only right after a reset). The committed
+    corpus cannot separate `channels == 2` from `n_block_sizes ≥ 8`
+    as the true gate (docs ask); repeat-scoped presence readings
+    measure marginally worse; the mono 22.05 kHz stream rejects the
+    bit outright.
+  - **A zero §1 carry marks the previous packet as padded**: its
+    declared frames all completed inside it and the remaining body
+    bits are padding, not frame data (`packet` module docs). The
+    VBR-configured 44.1 kHz streams pad most packets this way; the
+    measurement harness and the PCM leg now treat the padding skip
+    as a clean resynchronisation (no overlap-add reset).
+  - The §2.1 noise-substitution hypothesis carrier (`NoiseSpec`) can
+    now walk **either staged grid** — the exponent-band partition or
+    the octave subband table (`tables/subband-freqs`, the staged
+    noise/hgain seed) — via the new `NoiseGrid` selector. No
+    start-band/grid hypothesis improves any committed stream,
+    consistent with noise coding being disabled in all six.
+  - **Open (docs ask):** the mono 22.05 kHz stream's F1 block-size
+    fields around 512-sample transitions contradict both the
+    one-ahead pipeline and the field-is-current readings (pinned by
+    a boundary-constrained exhaustive re-parse of its packets);
+    needs the block-size latch state flow for the
+    small-`n_block_sizes` mono case.
+  - `tests/vendor_streams.rs` regression floors raised to the new
+    closure rates (global floor 1700/1763); the black-box PCM
+    alignment now searches block-aligned lags only. The
+    `vendor_parse` fuzz target exercises the new `ReuseRule` /
+    `NoiseGrid` switches (bounded re-runs of the vendor-path
+    targets: zero findings).
+
 ### Added
 
 - **Vendor-bitstream decode arc (r439)** — the crate now parses and
