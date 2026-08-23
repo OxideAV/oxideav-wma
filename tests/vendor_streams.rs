@@ -319,11 +319,24 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
 }
 
 /// PCM leg: decode each vendor stream through the full chain
-/// (§1 assembly → §2–§4 parse → §5 mid/side + staged-ladder
-/// dequantisation → synthesis) and compare a mono downmix against a
-/// black-box reference decode (best-lag + scalar-gain fit — the
-/// staged docs leave the absolute dequantisation scale open, so the
-/// gain is fitted; the correlation and SNR are the signal).
+/// (§1 assembly → §2–§4 parse → §5 mid/side + calibrated
+/// dequantisation → variable-size lapped reconstruction) and compare
+/// a mono downmix against a black-box reference decode (best-lag +
+/// scalar-gain fit; with the calibrated absolute scale the fitted
+/// gain converges to ≈ 1, which the closing envelope-coded families
+/// pin below).
+///
+/// The r450 calibration measured here (sweep over composition
+/// candidates, this fit as the score):
+/// * neighbour-matched variable-size lapped reconstruction replaces
+///   the truncation-aligned overlap-add — the three fully-closing
+///   44.1/22.05 kHz families move from ≈ 3 / ≈ 0 dB to ≈ 11–15 dB;
+/// * total gain at 1 dB/step (`10^((g − 64) / 20)`) instead of the
+///   ladder's 1.25 dB/step — those families then reach ≈ 18–27 dB
+///   (the 1/16 and 1/32 exponents both lose ≥ 9 dB);
+/// * the envelope stays on the staged `10^((e − e_max)/16)` ladder
+///   ratio anchored at the block's maximum exponent (a fixed anchor
+///   loses ≥ 10 dB).
 #[test]
 fn vendor_pcm_decodes_and_correlates() {
     use oxideav_wma::vendor_decode::BlockSynth;
@@ -485,19 +498,47 @@ fn vendor_pcm_decodes_and_correlates() {
             chunk_snrs.len()
         );
 
-        // Floors at the measured r439 quality for the families the
-        // parse closes (the dequantisation composition rule is still
-        // an open staged item, so these are correlation floors, not
-        // fidelity claims).
+        // Floors at the measured r450 quality (the calibrated
+        // composition + variable-size lapped reconstruction), with
+        // headroom for float drift. The fitted-gain ≈ 1 pin holds on
+        // the fully-closing envelope-coded families because the
+        // absolute scale is now part of the decode
+        // (`vendor_decode::ABS_SCALE`).
         match l.spec.file {
             "cand_apollo8.wma" => {
                 assert!(corr2 > 0.9, "apollo8 corr² regressed: {corr2}");
             }
-            "cand_mono8k_8kbps_v8.wma" | "cand_stereo22k_32kbps_av.wma" => {
+            "cand_mono8k_8kbps_v8.wma" => {
+                // LSP envelope path (conversion tables unstaged):
+                // flat-envelope decode.
                 assert!(
-                    median > 2.5,
+                    median > 4.0,
                     "{}: median SNR regressed to {median:.2} dB",
                     l.spec.file
+                );
+            }
+            "cand_stereo22k_32kbps_av.wma" => {
+                assert!(corr2 > 0.98, "corr² regressed: {corr2}");
+                assert!(median > 24.0, "median SNR regressed to {median:.2} dB");
+                assert!(
+                    (0.7..1.4).contains(&gain),
+                    "fitted gain {gain} strayed from 1"
+                );
+            }
+            "cand_wmp12_96kbps.wma" => {
+                assert!(corr2 > 0.98, "corr² regressed: {corr2}");
+                assert!(median > 15.0, "median SNR regressed to {median:.2} dB");
+                assert!(
+                    (0.7..1.4).contains(&gain),
+                    "fitted gain {gain} strayed from 1"
+                );
+            }
+            "cand_vbr_q75_stereo.wma" => {
+                assert!(corr2 > 0.98, "corr² regressed: {corr2}");
+                assert!(median > 17.0, "median SNR regressed to {median:.2} dB");
+                assert!(
+                    (0.7..1.4).contains(&gain),
+                    "fitted gain {gain} strayed from 1"
                 );
             }
             _ => {}
