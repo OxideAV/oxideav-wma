@@ -855,6 +855,10 @@ pub mod paircode;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod qband;
+
+/// [`oxideav_core`] registration + the direct [`registration::make_decoder`]
+/// factory (dual API).
+pub mod registration;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod qmatrix;
@@ -979,6 +983,8 @@ pub use frame_encode::{
 #[doc(hidden)]
 pub use gain_ladder::GainLadderError;
 pub use header::{Version, WmaHeader};
+
+pub use registration::{make_decoder, register, WmaDecoder};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use huffman::{HuffmanCode, HuffmanError};
@@ -1105,3 +1111,5 @@ impl std::error::Error for Error {}
 
 /// Crate-local Result alias.
 pub type Result<T> = core::result::Result<T, Error>;
+
+oxideav_core::register!("wma", registration::register);

@@ -318,6 +318,131 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
     );
 }
 
+/// The registered [`oxideav_wma::WmaDecoder`] must produce exactly
+/// the PCM the direct chain produces (same §1/§2 parse, same
+/// synthesiser, same silence-substitution policy), stream-for-stream
+/// — the registration layer adds packet bookkeeping and f32
+/// interleaving, nothing decode-semantic.
+#[test]
+fn registered_decoder_matches_the_direct_chain() {
+    use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, TimeBase};
+    use oxideav_wma::vendor_decode::BlockSynth;
+
+    let loaded = skip_unless_fixtures!();
+    for l in &loaded {
+        // Direct chain (the PCM-leg loop below, without the fit).
+        let mut asm = PacketAssembler::new(&l.cfg);
+        for pkt in &l.packets {
+            asm.push_packet(pkt).unwrap();
+        }
+        let stream = asm.finish();
+        let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
+        let mut parser = FrameParser::new(&l.cfg, &body_starts);
+        let mut synth = BlockSynth::new(&l.cfg);
+        let mut direct: Vec<Vec<f64>> = vec![Vec::new(); usize::from(l.spec.channels)];
+        let mut cursor = stream.packets[0].frames_start_bit();
+        let mut clean_pad = false;
+        for (i, rec) in stream.packets.iter().enumerate() {
+            if cursor != rec.frames_start_bit() {
+                cursor = rec.frames_start_bit();
+                parser.raise_latch();
+                if !clean_pad {
+                    synth.reset();
+                }
+            }
+            let mut reader = stream.reader_at(cursor);
+            let mut failed = false;
+            for f in 0..rec.header.frame_count {
+                match parser.parse_frame(&mut reader) {
+                    Ok(frame) => {
+                        for block in &frame.blocks {
+                            for (ch, chan) in synth.block(block).into_iter().enumerate() {
+                                direct[ch].extend_from_slice(&chan);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        let remaining = usize::from(rec.header.frame_count - f);
+                        for chan in &mut direct {
+                            chan.extend(
+                                std::iter::repeat(0.0)
+                                    .take(usize::from(l.cfg.frame_length) * remaining),
+                            );
+                        }
+                        synth.reset();
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            cursor = reader.position() as u64;
+            clean_pad = !failed
+                && stream
+                    .packets
+                    .get(i + 1)
+                    .is_some_and(|n| n.header.carry_bits == 0 && cursor <= n.body_start_bit);
+        }
+        for (ch, chan) in synth.flush().into_iter().enumerate() {
+            direct[ch].extend_from_slice(&chan);
+        }
+
+        // Registered decoder over the same packets.
+        let mut params = CodecParameters::audio(CodecId::new("wma2"));
+        params.sample_rate = Some(l.spec.sample_rate);
+        params.channels = Some(u16::from(l.spec.channels));
+        params.bit_rate = Some(u64::from(l.spec.avg_bytes_per_sec) * 8);
+        let mut extradata = vec![0u8; 4];
+        extradata.extend_from_slice(&l.spec.flags2.to_le_bytes());
+        params.extradata = extradata;
+        let mut dec = oxideav_wma::make_decoder(&params).unwrap();
+        let tb = TimeBase::new(1, i64::from(l.spec.sample_rate));
+        let mut registered: Vec<f32> = Vec::new();
+        let drain = |dec: &mut Box<dyn Decoder>, out: &mut Vec<f32>| loop {
+            match dec.receive_frame() {
+                Ok(Frame::Audio(f)) => {
+                    out.extend(
+                        f.data[0]
+                            .chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                    );
+                }
+                Ok(_) => panic!("non-audio frame"),
+                Err(_) => break,
+            }
+        };
+        for pkt in &l.packets {
+            dec.send_packet(&oxideav_core::Packet::new(0, tb, pkt.clone()))
+                .unwrap();
+            drain(&mut dec, &mut registered);
+        }
+        dec.flush().unwrap();
+        drain(&mut dec, &mut registered);
+
+        let channels = usize::from(l.spec.channels);
+        assert_eq!(
+            registered.len(),
+            direct[0].len() * channels,
+            "{}: sample-count mismatch",
+            l.spec.file
+        );
+        for (t, frame) in registered.chunks_exact(channels).enumerate() {
+            for (ch, &v) in frame.iter().enumerate() {
+                let want = direct[ch][t] as f32;
+                assert!(
+                    (v - want).abs() <= want.abs() * 1e-6 + 1e-9,
+                    "{}: sample {t} ch {ch}: {v} vs {want}",
+                    l.spec.file
+                );
+            }
+        }
+        eprintln!(
+            "{}: registered decoder matches the direct chain over {} samples/ch",
+            l.spec.file,
+            direct[0].len()
+        );
+    }
+}
+
 /// PCM leg: decode each vendor stream through the full chain
 /// (§1 assembly → §2–§4 parse → §5 mid/side + calibrated
 /// dequantisation → variable-size lapped reconstruction) and compare
