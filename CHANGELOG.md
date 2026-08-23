@@ -6,6 +6,60 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`oxideav_core` registration + `WmaDecoder` + `make_decoder`
+  (r450)** — the crate's dual API surface (`registration` module,
+  `register!` entry point): decoder factories for codec ids
+  `wma1`/`wma2` with their `WAVEFORMATEX` tag claims
+  (`0x0160`/`0x0161`). `WmaDecoder` wraps the full vendor decode
+  chain behind the core `Decoder` trait — one `Packet` = one
+  `block_align`-sized codec packet (`block_align` locks from the
+  first packet's length), one-packet latency for the §1 reservoir
+  carry, interleaved F32 output in the reference ±1.0 convention,
+  silence substitution for unparseable frames (the §1 frame counts
+  keep the timeline), `reset()` for post-seek reuse. Pinned
+  sample-exact against the direct chain on all six committed vendor
+  streams (11.4 M samples).
+- Incremental-decode plumbing: `BitWriter::as_bytes`,
+  `PacketAssembler::total_bits`/`reader_at`,
+  `FrameParser::note_body_start`.
+- `ParsedBlock::prev_size`/`next_size` — the F1 windowing context
+  (the three-field opening's previous size and the one-ahead
+  pipeline's pre-read next size), previously consumed and dropped.
+- The `vendor_parse` fuzz target now drives the full decode chain
+  (parse → synthesis → flush).
+
+### Changed
+
+- **Variable-size lapped reconstruction + calibrated dequantisation
+  composition (r450)**, both selected by measurement against the
+  black-box reference decode of the six committed vendor streams:
+  - the truncation-aligned overlap-add (which dropped the long tail
+    at every long→short block transition) is replaced by the
+    standard variable-block-size lapped construction — each block's
+    2M transform samples centred on its M-sample slot, sine slopes
+    of length `min(M, prev)`/`min(M, next)` centred on the slot
+    boundaries (power-complementary across every transition; equal
+    sizes reduce to the plain sine window); `BlockSynth` now runs an
+    accumulator with a fixed `frame_length/2` lead-in and gains a
+    `flush()`;
+  - the composition rule (open in the staged docs): band weight
+    stays on the staged `10^((e − e_max)/16)` ladder ratio anchored
+    at the block's maximum exponent, total gain folds in at **1 dB
+    per B1 step** (`10^((g − 64)/20)`; the sweep optimum is sharply
+    at 1/20, corroborated by the staged escape-width table), and a
+    single black-box-calibrated absolute scale
+    (`vendor_decode::ABS_SCALE`) lands PCM in the reference's ±1.0
+    float convention with fitted gain ≈ 1.
+  - Measured (per-second median SNR vs the reference, mono
+    downmix): stereo 22.05 kHz **3.10 → 27.28 dB** (corr²
+    0.153 → 0.994), 44.1 kHz 96 kbps **−0.05 → 18.23 dB**
+    (0.082 → 0.995), 44.1 kHz VBR **1.60 → 20.87 dB**
+    (0.129 → 0.999), mono 8 kHz 3.89 → 4.73 dB (LSP envelope still
+    flat — its conversion tables are the remaining staged gap on
+    that family).
+
 ### Changed
 
 - **Reservoir / variable-block-length / stereo calibration pass

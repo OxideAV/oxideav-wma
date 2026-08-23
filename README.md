@@ -217,7 +217,7 @@ synthesis → PCM, round-tripping within the §4 quantizer bound. What
 separates this from decoding *vendor* WMA files is the short list of
 still-unstaged semantic bindings below.
 
-### Vendor-bitstream decode (r439, extended r446)
+### Vendor-bitstream decode (r439, extended r446/r450)
 
 The freshly staged rounds 3–6 of `docs/audio/wma/` (exact vendor VLC
 codewords for all eight trees, the §0–§5 frame-bit layout with the
@@ -245,12 +245,19 @@ vendor-encoded WMA v2 streams**:
   carry boundaries — **five of the six families completely**: mono
   8 kHz **394/394**, stereo 22.05 kHz A/V **1098/1098**, and the
   whole 44.1 kHz high-rate family (**3/3**, **13/13**, **133/133**).
-  Only the mono 22.05 kHz stream stays partial (64/122; below). The
-  PCM leg reaches corr² 0.96 against a black-box reference decode on
-  the 44.1 kHz 64 kbps stereo stream, with ~3.1–3.9 dB per-second
-  medians on the closed mono/stereo families (bounded by the
-  still-open dequantisation-composition and transition-window
-  items).
+  Only the mono 22.05 kHz stream stays partial (64/122; below).
+* The PCM leg (r450: variable-size lapped reconstruction with
+  neighbour-matched sine slopes — the thing the §2 three-field
+  opening's neighbouring block sizes exist for — plus the calibrated
+  dequantisation composition: staged `10^((e − e_max)/16)` ladder
+  ratio anchored at the block's maximum exponent, total gain at 1 dB
+  per B1 step, a single black-box-calibrated absolute scale) reaches
+  **per-second median SNR 27.3 / 20.9 / 18.2 dB** with **corr²
+  0.994 / 0.999 / 0.995** and fitted gain ≈ 1 against a black-box
+  reference decode on the three fully-closing envelope-coded
+  families (stereo 22.05 kHz, 44.1 kHz VBR, 44.1 kHz 96 kbps), and
+  4.7 dB on the mono 8 kHz LSP-envelope stream (its conversion
+  tables are the remaining staged gap on that family).
 * Four §1/§2/§5 details calibrated *differently* from the staged
   reading, with the §1 carry boundary as ground truth (reported to
   the docs staging as erratum/extension asks): the F1 field is a
@@ -282,10 +289,10 @@ vendor-encoded WMA v2 streams**:
   the octave subband table; no start/grid hypothesis improves any
   committed stream, consistent with noise coding being disabled in
   all six);
-* the **dequantisation composition rule** (the 10^(1/16) ladder is
-  staged; how exponents, the total gain and the escape widths
-  compose into the final scale is not) and the **transition-window
-  shape** between unequal block sizes;
+* the **vendor-literal dequantisation composition and
+  transition-window shape** (r450 carries the measured-best
+  realisation of both — see `vendor_decode` — but the decoder
+  binary's own closed forms remain unstaged);
 * the **§3.1 line-spectral envelope conversion tables** (wire format
   staged and parsed; the index → envelope mapping is not — the mono
   8 kHz stream decodes with a flat envelope meanwhile);
@@ -296,8 +303,20 @@ vendor-encoded WMA v2 streams**:
 missing B2 reuse bit plus the zero-carry padding semantic — the
 whole family now parses 149/149.)
 
-The [`oxideav_core`] registration will land once the remaining
-families close.
+### Framework registration (r450)
+
+The crate registers into [`oxideav_core`] with the framework's dual
+API ([`registration`]): `register(ctx)` installs decoder factories
+for codec ids `wma1` / `wma2` with their `WAVEFORMATEX` tag claims
+(`0x0160` / `0x0161`), and [`make_decoder`] is the direct factory.
+[`WmaDecoder`] wraps the vendor decode chain behind the core
+`Decoder` trait — one `Packet` per `block_align`-sized codec packet,
+one-packet latency for the §1 reservoir carry, interleaved F32
+output in the reference ±1.0 convention, silence substitution for
+unparseable frames so the §1 frame counts keep the timeline, and
+`reset()` for post-seek reuse. The registration layer is pinned
+sample-exact against the direct chain on all six committed vendor
+streams (11.4 M samples).
 
 ## Public surface
 
