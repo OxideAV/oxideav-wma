@@ -1,18 +1,21 @@
 #![no_main]
 
-//! Fuzz: arbitrary bytes through the vendor-path §1 packet layer and
-//! the §2–§4 frame parser (the calibrated vendor decode front end).
+//! Fuzz: arbitrary bytes through the vendor-path §1 packet layer,
+//! the §2–§4 frame parser, and the §5 synthesiser (the full vendor
+//! decode chain).
 //!
 //! Four real stream configurations spanning the staged vendor-stream
 //! families (mono/stereo, LSP/exp-VLC envelopes, 1/2/3-bit F1
 //! fields). Contract: pure panic-freedom — every input either parses
-//! to typed frames or returns a typed error; nothing panics and
-//! nothing runs unbounded.
+//! to typed frames (whose synthesis emits exactly block_size samples
+//! per channel) or returns a typed error; nothing panics and nothing
+//! runs unbounded.
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_wma::header::Version;
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
+use oxideav_wma::vendor_decode::BlockSynth;
 use oxideav_wma::vendor_frame::{FrameParser, NoiseGrid, NoiseSpec, NoiseStart, ReuseRule};
 use std::sync::OnceLock;
 
@@ -69,9 +72,19 @@ fuzz_target!(|data: &[u8]| {
         });
     }
     let mut reader = stream.reader_at(u64::from(stream.packets[0].header.carry_bits));
+    let mut synth = BlockSynth::new(cfg);
     for _ in 0..24 {
-        if parser.parse_frame(&mut reader).is_err() {
-            break;
+        match parser.parse_frame(&mut reader) {
+            Ok(frame) => {
+                for block in &frame.blocks {
+                    let pcm = synth.block(block);
+                    for chan in &pcm {
+                        assert_eq!(chan.len(), usize::from(block.block_size));
+                    }
+                }
+            }
+            Err(_) => break,
         }
     }
+    let _ = synth.flush();
 });
