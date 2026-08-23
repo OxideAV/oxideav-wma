@@ -210,7 +210,7 @@ impl Analysis {
     /// encoder flush), so the next [`Analysis::block`] behaves as if
     /// this stage were freshly constructed.
     pub fn reset(&mut self) {
-        self.prev.iter_mut().for_each(|s| *s = 0.0);
+        self.prev.fill(0.0);
     }
 }
 

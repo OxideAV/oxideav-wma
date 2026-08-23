@@ -315,9 +315,7 @@ impl NoiseFiller {
                     coeffs[start..end].copy_from_slice(&filled);
                 }
                 Some(BandPolicy::Truncated) => {
-                    for c in &mut coeffs[start..end] {
-                        *c = 0.0;
-                    }
+                    coeffs[start..end].fill(0.0);
                 }
                 None => {
                     // Unreachable: the constructor pinned plan.len() ==

@@ -183,9 +183,7 @@ impl OverlapAdd {
     /// "previous block" is not the stream's true predecessor and
     /// summing it in would carry old samples forward.
     pub fn reset(&mut self) {
-        for s in &mut self.tail {
-            *s = 0.0;
-        }
+        self.tail.fill(0.0);
     }
 
     /// Feed one post-windowed `2M`-sample inverse-MLT block and emit
