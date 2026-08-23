@@ -132,6 +132,18 @@ pub struct ParsedBlock {
     pub block_size: u16,
     /// The F1 index (0 for a fixed-block stream).
     pub size_index: u8,
+    /// The previous block's size — the left windowing context a
+    /// lapped transform needs (§2: the three-field opening carries
+    /// the neighbouring sizes for exactly this reason). `None` when
+    /// the three-field opening's previous-size field decodes to an
+    /// out-of-range index (carried leniently: only the windowing
+    /// uses it).
+    pub prev_size: Option<u16>,
+    /// The next block's size from the F1 one-ahead pipeline — the
+    /// right windowing context. `None` when the pre-read index is
+    /// out of range or the stream is not variable-block-length
+    /// (fixed streams always neighbour same-size blocks).
+    pub next_size: Option<u16>,
     /// F2a — joint-stereo flag (always `false` for mono).
     pub joint_stereo: bool,
     /// B1 — the accumulated total gain.
@@ -343,6 +355,9 @@ pub struct FrameParser {
     /// The previous-block size index from the three-field opening
     /// (windowing context; carried for the decode stage).
     prev_size: Option<u8>,
+    /// The last decoded block's size (windowing context for blocks
+    /// past the three-field opening).
+    last_size: Option<u16>,
 }
 
 impl FrameParser {
@@ -365,6 +380,7 @@ impl FrameParser {
             latch: true,
             next_size: None,
             prev_size: None,
+            last_size: None,
         }
     }
 
@@ -386,6 +402,7 @@ impl FrameParser {
         self.latch = true;
         self.next_size = None;
         self.prev_size = None;
+        self.last_size = None;
     }
 
     /// Lower the latch (diagnostic use).
@@ -450,19 +467,24 @@ impl FrameParser {
         // staged streams the carry-boundary closure rate is strictly
         // higher than under the last-field-is-current reading of the
         // §2 F1 note (measured in tests/vendor_streams.rs).
-        let size_index = if self.cfg.vbl_enabled {
-            let cur = if self.latch {
+        let (size_index, prev_size, next_size) = if self.cfg.vbl_enabled {
+            let (cur, prev_size) = if self.latch {
                 let prev = reader.read_bits(self.cfg.w_bs)? as u8;
                 self.prev_size = Some(prev);
-                reader.read_bits(self.cfg.w_bs)? as u8
+                let cur = reader.read_bits(self.cfg.w_bs)? as u8;
+                // The opening's previous-size field is windowing
+                // context only: resolve leniently.
+                (cur, self.cfg.block_size_for_index(prev))
             } else {
-                self.next_size.unwrap_or(0)
+                (self.next_size.unwrap_or(0), self.last_size)
             };
             self.latch = false;
-            self.next_size = Some(reader.read_bits(self.cfg.w_bs)? as u8);
-            cur
+            let next = reader.read_bits(self.cfg.w_bs)? as u8;
+            self.next_size = Some(next);
+            (cur, prev_size, self.cfg.block_size_for_index(next))
         } else {
-            0
+            let full = Some(self.cfg.frame_length);
+            (0, full, full)
         };
         let block_size = self
             .cfg
@@ -474,6 +496,7 @@ impl FrameParser {
                 remaining,
             });
         }
+        self.last_size = Some(block_size);
 
         let channels = usize::from(self.cfg.channels);
 
@@ -496,6 +519,8 @@ impl FrameParser {
             return Ok(ParsedBlock {
                 block_size,
                 size_index,
+                prev_size,
+                next_size,
                 joint_stereo,
                 total_gain: 0,
                 n_coef: 0,
@@ -666,6 +691,8 @@ impl FrameParser {
         Ok(ParsedBlock {
             block_size,
             size_index,
+            prev_size,
+            next_size,
             joint_stereo,
             total_gain,
             n_coef: base_coef,
@@ -815,6 +842,9 @@ mod tests {
         assert_eq!(frame.blocks.len(), 1);
         let b = &frame.blocks[0];
         assert_eq!(b.block_size, 2048);
+        // Fixed-block streams always neighbour full-length blocks.
+        assert_eq!(b.prev_size, Some(2048));
+        assert_eq!(b.next_size, Some(2048));
         assert_eq!(b.total_gain, 51);
         assert!(!b.joint_stereo);
         assert_eq!(b.n_coef, 2048 - 184);
@@ -1010,6 +1040,12 @@ mod tests {
         assert_eq!(r.position(), bit_len);
         assert_eq!(frame.blocks.len(), 2);
         assert!(frame.blocks.iter().all(|b| b.block_size == 512));
+        // Windowing context: the opening's previous field and the
+        // pipeline's pre-read next resolve on both blocks.
+        assert_eq!(frame.blocks[0].prev_size, Some(512));
+        assert_eq!(frame.blocks[0].next_size, Some(512));
+        assert_eq!(frame.blocks[1].prev_size, Some(512));
+        assert_eq!(frame.blocks[1].next_size, Some(512));
         // The 512-coefficient partition at 22.05 kHz is the staged
         // "lo"-arm… no: 512 is not tabulated for lo — computed walk.
         match frame.blocks[0].channels[0].envelope.as_ref().unwrap() {

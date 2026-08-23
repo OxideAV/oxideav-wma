@@ -278,6 +278,8 @@ mod tests {
         ParsedBlock {
             block_size: 2048,
             size_index: 0,
+            prev_size: Some(2048),
+            next_size: Some(2048),
             joint_stereo: joint,
             total_gain: 64,
             n_coef: 1864,
@@ -408,6 +410,8 @@ mod tests {
         let block = ParsedBlock {
             block_size: 128,
             size_index: 3,
+            prev_size: Some(128),
+            next_size: Some(128),
             joint_stereo: false,
             total_gain: 20,
             n_coef: 117,
