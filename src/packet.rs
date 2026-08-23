@@ -270,6 +270,29 @@ impl PacketAssembler {
         &self.packets
     }
 
+    /// Total assembled body bits so far.
+    pub fn total_bits(&self) -> u64 {
+        self.body_cursor_bits
+    }
+
+    /// A reader over the body bits assembled **so far**, positioned
+    /// at `bit_offset` — the incremental counterpart of
+    /// [`AssembledStream::reader_at`] for streaming decode (a frame
+    /// that rides the §1 reservoir carry can only be parsed once the
+    /// packet holding its tail has been pushed).
+    pub fn reader_at(&self, bit_offset: u64) -> BitReader<'_> {
+        let mut r = BitReader::with_bit_len(self.writer.as_bytes(), self.body_cursor_bits as usize);
+        let mut left = bit_offset;
+        while left > 0 {
+            let step = left.min(32) as u8;
+            if r.read_bits(step).is_err() {
+                break;
+            }
+            left -= u64::from(step);
+        }
+        r
+    }
+
     /// Close the walk and hand back the assembled stream.
     pub fn finish(self) -> AssembledStream {
         let total_bits = self.body_cursor_bits;

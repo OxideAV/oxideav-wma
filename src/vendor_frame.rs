@@ -396,6 +396,17 @@ impl FrameParser {
         self
     }
 
+    /// Record a further packet-body start (streaming decode: the
+    /// §1 layer discovers boundaries one packet at a time). Offsets
+    /// must arrive in increasing order; a non-increasing offset is
+    /// ignored.
+    pub fn note_body_start(&mut self, bit: u64) {
+        let increasing = !self.body_starts.last().is_some_and(|&b| b >= bit);
+        if increasing {
+            self.body_starts.push(bit);
+        }
+    }
+
     /// Re-raise the three-field latch (a §1 discontinuity resync —
     /// the block-sequencer's packet-start state raises it too).
     pub fn raise_latch(&mut self) {

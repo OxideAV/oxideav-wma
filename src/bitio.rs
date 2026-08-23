@@ -108,6 +108,16 @@ impl BitWriter {
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+
+    /// Borrow the bytes written so far without finishing. A trailing
+    /// partial byte is included, zero-padded exactly as
+    /// [`BitWriter::into_bytes`] would emit it — pair with
+    /// [`BitWriter::bit_len`] to read the live buffer through
+    /// [`BitReader::with_bit_len`] while continuing to append later
+    /// (the incremental-decode path).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 /// The reader ran past the end of the bit stream.
