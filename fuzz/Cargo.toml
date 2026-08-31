@@ -72,3 +72,16 @@ path = "fuzz_targets/vendor_parse.rs"
 test = false
 doc = false
 bench = false
+
+# Target 6: structure-aware vendor-wire ENCODER round trip. Sanitized
+# EncBlockData frames (valid schedules, clamped envelopes/levels)
+# through VendorBitWriter -> packets -> PacketAssembler/FrameParser/
+# BlockSynth must come back field-exact with every par.1 boundary
+# closing; plus a PCM leg through VendorEncoder (finite output, valid
+# packets). Spans the measured noise-policy family.
+[[bin]]
+name = "vendor_encode_roundtrip"
+path = "fuzz_targets/vendor_encode_roundtrip.rs"
+test = false
+doc = false
+bench = false
