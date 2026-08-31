@@ -906,6 +906,7 @@ pub mod terminator;
 pub mod vendor_decode;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod vendor_analysis;
 pub mod vendor_encode;
 pub mod vendor_frame;
 // internal — exposed for tests/fuzz; not part of the stable API
@@ -1048,6 +1049,9 @@ pub use transient::{TransientMechanism, TransientPlan, TransientSwitch};
 pub use window::{Window, WindowPair, WindowShape};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub use vendor_analysis::{
+    BlockPolicy, EncodeError as VendorEncodeError, EncoderSettings, StereoMode, VendorEncoder,
+};
 pub use vendor_encode::{
     EmitError, EncBlockData, EncChannelData, EncEnvelope, FrameEmitter, VendorBitWriter,
 };

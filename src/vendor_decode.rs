@@ -312,7 +312,7 @@ impl BlockSynth {
 /// ladder's own 1.25 dB/step ratio anchored at the block's loudest
 /// band (module docs). LSP-path and absent envelopes yield a flat
 /// weight.
-fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: usize) -> Vec<f64> {
+pub(crate) fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: usize) -> Vec<f64> {
     let exponents = match envelope {
         Some(Envelope::Exponents(e)) if !e.is_empty() => e,
         // §3.1 conversion tables unstaged / uncoded: flat envelope.
@@ -333,7 +333,7 @@ fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: usize) -> Ve
 
 /// `ladder[a] / ladder[b]` on the staged dequant ladder, with the
 /// ladder's own `10^(1/16)` ratio extended outside its 113 entries.
-fn ladder_ratio(a: i32, b: i32) -> f64 {
+pub(crate) fn ladder_ratio(a: i32, b: i32) -> f64 {
     let idx = |e: i32| -> f64 {
         let clamped = e.clamp(0, (DEQUANT_GAIN_LUT.len() - 1) as i32);
         let base = f64::from(DEQUANT_GAIN_LUT[clamped as usize]);
@@ -345,7 +345,7 @@ fn ladder_ratio(a: i32, b: i32) -> f64 {
 
 /// Total-gain multiplier: `10^((g − 64) / 20)` — 1 dB per B1 step,
 /// the calibrated composition (module docs).
-fn total_gain_multiplier(total_gain: u32) -> f64 {
+pub(crate) fn total_gain_multiplier(total_gain: u32) -> f64 {
     10f64.powf(f64::from(total_gain as i32 - 64) / 20.0)
 }
 
@@ -353,7 +353,7 @@ fn total_gain_multiplier(total_gain: u32) -> f64 {
 /// 512, 1024, 2048, 4096}`-sample blocks, a direct evaluation of the
 /// same oddly-stacked basis for the short sizes outside the typed
 /// set (e.g. 128).
-fn inverse_transform(coeffs: &[f64]) -> Vec<f64> {
+pub(crate) fn inverse_transform(coeffs: &[f64]) -> Vec<f64> {
     let m = coeffs.len();
     if let Ok(bs) = crate::block::BlockSize::from_samples(m as u16) {
         let mlt = Mlt::new(bs);
@@ -383,7 +383,7 @@ fn inverse_transform(coeffs: &[f64]) -> Vec<f64> {
 /// centred on the left boundary and a falling one of length
 /// `min(M, next)` on the right; flat 1 between the slopes, 0
 /// outside. Equal-size neighbours reproduce the plain sine window.
-fn transition_window(time: &mut [f64], prev: usize, next: usize) {
+pub(crate) fn transition_window(time: &mut [f64], prev: usize, next: usize) {
     let two_m = time.len();
     let m = two_m / 2;
     let lr = m.min(prev.max(1)) as f64;
