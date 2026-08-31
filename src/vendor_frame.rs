@@ -252,6 +252,13 @@ pub enum NoiseStart {
     /// of the block's coefficient count (a frequency cutoff expressed
     /// on the coefficient axis, so it scales across block sizes).
     CoefFraction(f64),
+    /// A per-block-size table of start **edges** (bin indices): the
+    /// walk starts at the first band whose lower edge is at or above
+    /// the entry for the block's size; a size with no entry walks no
+    /// bands. This is the carrier for black-box-measured start
+    /// positions whose closed-form rule is still open (see
+    /// [`measured_noise_policy`]).
+    StartEdges(&'static [(u16, u16)]),
 }
 
 /// The §2.1 noise-substitution parse hypothesis. The open-time
@@ -367,10 +374,17 @@ impl FrameParser {
     /// The latch starts raised: the first block of the stream
     /// follows the first packet header.
     pub fn new(cfg: &StreamConfig, body_starts: &[u64]) -> Self {
+        // The r454 measured noise policy is the default for the
+        // configurations it covers ([`measured_noise_policy`]);
+        // `with_noise` / `with_reuse` override it for measurement.
+        let (noise, reuse) = match measured_noise_policy(cfg) {
+            Some((spec, rule)) => (Some(spec), rule),
+            None => (None, ReuseRule::default()),
+        };
         Self {
             cfg: cfg.clone(),
-            noise: None,
-            reuse: ReuseRule::default(),
+            noise,
+            reuse,
             body_starts: body_starts.to_vec(),
             next_boundary: if body_starts.first() == Some(&0) {
                 1
@@ -585,15 +599,7 @@ impl FrameParser {
                 if !coded[ch] {
                     continue;
                 }
-                let mut band = match spec.start {
-                    NoiseStart::Band(b) => b,
-                    NoiseStart::CoefFraction(frac) => {
-                        let cutoff = frac * f64::from(block_size);
-                        (0..walk_count)
-                            .find(|&b| f64::from(walk_edges[b]) >= cutoff)
-                            .unwrap_or(walk_count)
-                    }
-                };
+                let mut band = noise_walk_start(&spec.start, walk_edges, walk_count, block_size);
                 while band < walk_count && walk_edges[band] < coef_end {
                     let flagged = reader.read_bit()?;
                     if flagged {
@@ -726,7 +732,86 @@ impl FrameParser {
 /// duplicates dropped, closed at the block's coefficient count
 /// (the [`crate::exponent_bands`] walk generalised past the typed
 /// block-size set to the short VBL sizes).
-fn octave_noise_edges(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
+/// Resolve a [`NoiseStart`] to the first walked band index.
+pub(crate) fn noise_walk_start(
+    start: &NoiseStart,
+    walk_edges: &[u16],
+    walk_count: usize,
+    block_size: u16,
+) -> usize {
+    match *start {
+        NoiseStart::Band(b) => b,
+        NoiseStart::CoefFraction(frac) => {
+            let cutoff = frac * f64::from(block_size);
+            (0..walk_count)
+                .find(|&b| f64::from(walk_edges[b]) >= cutoff)
+                .unwrap_or(walk_count)
+        }
+        NoiseStart::StartEdges(table) => table
+            .iter()
+            .find(|&&(bs, _)| bs == block_size)
+            .map(|&(_, edge)| {
+                (0..walk_count)
+                    .find(|&b| walk_edges[b] >= edge)
+                    .unwrap_or(walk_count)
+            })
+            .unwrap_or(walk_count),
+    }
+}
+
+/// The measured §2.1 noise-walk start edges for the 22.05 kHz
+/// low-rate family, per block size (r454 black-box calibration; see
+/// [`measured_noise_policy`]): 1024-sample blocks walk 2 bands from
+/// edge 716, 512-sample blocks 2 bands from 356, 256-sample blocks
+/// 3 bands from 148. Each start is pinned only up to the walk's
+/// flag count (any start inside the same band is wire-identical);
+/// the closed-form rule behind them is an open docs ask.
+pub const MEASURED_NOISE_START_EDGES_22050: [(u16, u16); 3] = [(1024, 716), (512, 356), (256, 148)];
+
+/// The r454 black-box-measured §2.1 noise-substitution policy: which
+/// configurations parse with the F3/F4 sub-stream active, and the B2
+/// rule that accompanies it.
+///
+/// Measured by emitting crafted frames through this crate's own
+/// emitter mirror and checking which hypothesis the black-box
+/// reference decoder accepts (corr² ≈ 1 against the mirrored own
+/// decode; the wrong hypotheses decode to garbage or hard-error):
+///
+/// * **Enabled** exactly for `sample_rate == 22050` with the §0.2
+///   rate float **below the staged 1.16 class-selector threshold**
+///   (`wma-class-selector-thresholds`): measured ON at rate floats
+///   0.581–1.090 (mono 2003/2503/3005 B/s, stereo 3005 B/s) and OFF
+///   at 1.163+ (stereo 4006 B/s, mono 3503 B/s and up). 44.1 kHz
+///   streams measure OFF even at low rate floats. (Below ≈ 0.58,
+///   and at 16/32 kHz, the reference diverges in further unmeasured
+///   ways — open asks; those configurations are rare and unstaged.)
+/// * On enabled streams **every short block carries the B2 bit**
+///   ([`ReuseRule::ShortBlockPerBlock`]), mono included — r446's
+///   mono rejection of B2 was confounded by the then-unknown F3
+///   bits, which this calibration supersedes.
+/// * The walk runs over the block's exponent-band partition from the
+///   per-size start edges of [`MEASURED_NOISE_START_EDGES_22050`].
+///
+/// This is what makes the staged `cand_mono22k_16kbps` vendor stream
+/// (the old "F1 anomaly" family — the anomaly was never F1) parse.
+pub fn measured_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule)> {
+    use crate::wire_tables::CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD;
+    (cfg.sample_rate == 22_050 && cfg.rate_float < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD)
+        .then_some((
+            NoiseSpec {
+                start: NoiseStart::StartEdges(&MEASURED_NOISE_START_EDGES_22050),
+                grid: NoiseGrid::ExponentBands,
+            },
+            ReuseRule::ShortBlockPerBlock,
+        ))
+}
+
+/// Crate-internal accessor for the emitter mirror.
+pub(crate) fn octave_noise_edges_for(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
+    octave_noise_edges(sample_rate, block_coefficients)
+}
+
+pub(crate) fn octave_noise_edges(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
     let m = u64::from(block_coefficients);
     let sr = u64::from(sample_rate.max(1));
     let mut edges = vec![0u16];
@@ -1188,14 +1273,17 @@ mod tests {
     }
 
     #[test]
-    fn mono_short_block_reads_no_b2_bit() {
-        // The vendor-measured gate: mono streams carry no B2 even on
-        // short blocks — the envelope follows the total gain
-        // directly (the mono 22.05 kHz stream rejects the bit;
-        // measured in tests/vendor_streams.rs).
+    fn noise_enabled_mono_short_block_reads_f3_and_b2() {
+        // The r454 measured policy ([`measured_noise_policy`]): the
+        // 22.05 kHz low-rate config parses with the F3 walk active
+        // (2 flags on a 512-sample block, from start edge 356) and
+        // the per-block B2 bit on short blocks, mono included —
+        // superseding r446's "mono reads no B2", which was
+        // confounded by the then-unknown F3 bits.
         let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
         assert!(cfg.vbl_enabled);
         assert_eq!(cfg.n_block_sizes, 4);
+        assert!(measured_noise_policy(&cfg).is_some());
         let bands_512 = crate::band_partition::exponent_band_count(22_050, 512);
         let mut w = BitWriter::new();
         w.write_bits(1, 2); // previous
@@ -1203,7 +1291,44 @@ mod tests {
         w.write_bits(1, 2); // next
         w.write_bit(true); // F2 (mono)
         w.write_bits(20, 7); // B1
-                             // No B2: envelope immediately.
+        w.write_bit(false); // F3: band at edge 356 not substituted
+        w.write_bit(false); // F3: band at edge 440 not substituted
+        w.write_bit(true); // B2 = 1: fresh envelope follows
+        write_scale_delta_zero_run(&mut w, bands_512);
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
+        // Second 512 block completes the frame (uncoded).
+        w.write_bits(1, 2);
+        w.write_bit(false);
+        let bit_len = w.bit_len();
+        let bytes = w.into_bytes();
+        let mut parser = FrameParser::new(&cfg, &[0]);
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        let frame = parser.parse_frame(&mut r).unwrap();
+        assert_eq!(r.position(), bit_len);
+        let ch = &frame.blocks[0].channels[0];
+        assert_eq!(ch.noise_flags, vec![false, false]);
+        match ch.envelope.as_ref().unwrap() {
+            Envelope::Exponents(e) => assert_eq!(e.len(), bands_512),
+            other => panic!("unexpected envelope {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mono_short_block_outside_the_policy_reads_no_b2_bit() {
+        // Outside the measured noise policy (rate float >= the 1.16
+        // threshold) the r446 reading stands: mono short blocks carry
+        // neither F3 bits nor a B2 bit.
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 4005, 744, 0x000f).unwrap();
+        assert!(cfg.vbl_enabled);
+        assert!(measured_noise_policy(&cfg).is_none());
+        let bands_512 = crate::band_partition::exponent_band_count(22_050, 512);
+        let mut w = BitWriter::new();
+        w.write_bits(1, 2); // previous
+        w.write_bits(1, 2); // current: 512 (short)
+        w.write_bits(1, 2); // next
+        w.write_bit(true); // F2 (mono)
+        w.write_bits(20, 7); // B1
+                             // No F3, no B2: envelope immediately.
         write_scale_delta_zero_run(&mut w, bands_512);
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         // Second 512 block completes the frame (uncoded).

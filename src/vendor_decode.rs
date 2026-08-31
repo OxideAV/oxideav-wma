@@ -280,14 +280,36 @@ impl BlockSynth {
             };
             let weights = band_weights(&self.cfg, envelope.as_ref(), m);
             let gain = total_gain_multiplier(block.total_gain) * ABS_SCALE;
-            for (i, &q) in chan.coefficients.iter().enumerate() {
-                if q == 0 {
-                    continue;
+            // §2.1: a noise-substituted band contributes no coded
+            // coefficients — the coefficient sub-stream skips its
+            // bins. Rebuild that mapping when the block carries
+            // noise flags (the parser's default measured policy).
+            // The substituted bands themselves stay zero: the vendor
+            // noise generator is unstaged (the F4 gains are parsed
+            // and carried, but synthesising vendor-shaped noise from
+            // them is an open ask), and zero-fill is the
+            // conservative reconstruction.
+            let excluded: Vec<(u16, u16)> = if chan.noise_flags.iter().any(|&f| f) {
+                noise_excluded_ranges(&self.cfg, block, &chan.noise_flags)
+            } else {
+                Vec::new()
+            };
+            let coef_end = usize::from(self.cfg.coef_end(block.block_size));
+            let mut k = coef_start;
+            for &q in chan.coefficients.iter() {
+                while excluded
+                    .iter()
+                    .any(|&(lo, hi)| (usize::from(lo)..usize::from(hi)).contains(&k))
+                {
+                    k += 1;
                 }
-                let k = coef_start + i;
-                if k < m {
+                if k >= coef_end || k >= m {
+                    break;
+                }
+                if q != 0 {
                     spec[ch][k] = f64::from(q) * weights[k] * gain;
                 }
+                k += 1;
             }
         }
 
@@ -305,6 +327,50 @@ impl BlockSynth {
         }
         spec
     }
+}
+
+/// The §2.1 flagged-band bin ranges of a parsed block, recomputed
+/// from the same measured walk the parser used
+/// (`vendor_frame::measured_noise_policy`).
+fn noise_excluded_ranges(
+    cfg: &StreamConfig,
+    block: &ParsedBlock,
+    flags: &[bool],
+) -> Vec<(u16, u16)> {
+    let Some((spec, _)) = crate::vendor_frame::measured_noise_policy(cfg) else {
+        return Vec::new();
+    };
+    let walk_edges = match spec.grid {
+        crate::vendor_frame::NoiseGrid::ExponentBands => {
+            crate::band_partition::exponent_band_edges(cfg.sample_rate, block.block_size)
+        }
+        crate::vendor_frame::NoiseGrid::OctaveSubbands => {
+            crate::vendor_frame::octave_noise_edges_for(cfg.sample_rate, block.block_size)
+        }
+    };
+    let walk_count = walk_edges.len() - 1;
+    let start = crate::vendor_frame::noise_walk_start(
+        &spec.start,
+        &walk_edges,
+        walk_count,
+        block.block_size,
+    );
+    let coef_start = cfg.coef_start(block.block_size);
+    let coef_end = cfg.coef_end(block.block_size);
+    flags
+        .iter()
+        .enumerate()
+        .filter(|&(_, &f)| f)
+        .filter_map(|(i, _)| {
+            let band = start + i;
+            if band >= walk_count {
+                return None;
+            }
+            let lo = walk_edges[band].max(coef_start);
+            let hi = walk_edges[band + 1].min(coef_end);
+            (lo < hi).then_some((lo, hi))
+        })
+        .collect()
 }
 
 /// The staged-ladder band weights over the coefficient axis: for each

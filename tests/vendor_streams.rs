@@ -297,7 +297,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
         let floor = match l.spec.file {
             "cand_mono8k_8kbps_v8.wma" => 394,      // 394/394 (100 %)
             "cand_stereo22k_32kbps_av.wma" => 1098, // 1098/1098 (100 %)
-            "cand_mono22k_16kbps.wma" => 60,        // 64/122
+            "cand_mono22k_16kbps.wma" => 90,        // 97/122 (r454 noise policy)
             "cand_wmp12_96kbps.wma" => 133,         // 133/133 (100 %)
             "cand_vbr_q75_stereo.wma" => 13,        // 13/13 (100 %)
             "cand_apollo8.wma" => 3,                // 3/3 (100 %)
@@ -313,7 +313,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
     }
     eprintln!("total: {all_aligned}/{all_packets} boundaries closed");
     assert!(
-        all_aligned >= 1700,
+        all_aligned >= 1730,
         "global closure regressed: {all_aligned}/{all_packets}"
     );
 }
@@ -642,9 +642,18 @@ fn vendor_pcm_decodes_and_correlates() {
                     l.spec.file
                 );
             }
+            "cand_mono22k_16kbps.wma" => {
+                // r454: the measured noise-substitution policy
+                // (vendor_frame::measured_noise_policy) opened this
+                // family — the old "F1 anomaly" was the missing
+                // F3/B2 parse. 97/122 closures, corr² 0.95,
+                // ≈ 14 dB median.
+                assert!(corr2 > 0.9, "corr² regressed: {corr2}");
+                assert!(median > 10.0, "median SNR regressed to {median:.2} dB");
+            }
             "cand_stereo22k_32kbps_av.wma" => {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 24.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 38.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.7..1.4).contains(&gain),
                     "fitted gain {gain} strayed from 1"
@@ -652,7 +661,7 @@ fn vendor_pcm_decodes_and_correlates() {
             }
             "cand_wmp12_96kbps.wma" => {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 15.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 44.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.7..1.4).contains(&gain),
                     "fitted gain {gain} strayed from 1"
@@ -660,7 +669,7 @@ fn vendor_pcm_decodes_and_correlates() {
             }
             "cand_vbr_q75_stereo.wma" => {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 17.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 52.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.7..1.4).contains(&gain),
                     "fitted gain {gain} strayed from 1"

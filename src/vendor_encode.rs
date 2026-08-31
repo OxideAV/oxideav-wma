@@ -66,7 +66,9 @@
 use crate::bitio::{BitReader, BitWriter};
 use crate::header::Version;
 use crate::stream_config::StreamConfig;
-use crate::vendor_frame::escape_level_width;
+use crate::vendor_frame::{
+    escape_level_width, measured_noise_policy, NoiseGrid, NoiseSpec, ReuseRule,
+};
 use crate::wire_vlc::{coef_vlc, runlevel_index, scale_vlc};
 
 /// A channel's envelope, encoder side. The §3.1 LSP form is absent
@@ -269,6 +271,15 @@ impl std::error::Error for EmitError {}
 #[derive(Debug, Clone)]
 pub struct FrameEmitter {
     cfg: StreamConfig,
+    /// §2 B2 presence rule (mirror of the parser's `with_reuse`).
+    reuse: ReuseRule,
+    /// §2.1 noise-substitution emission hypothesis (mirror of the
+    /// parser's `with_noise`): when set, every coded channel emits
+    /// the F3 band-flag walk — all-clear (this encoder never
+    /// substitutes a band, so no F4 gains follow), which is the
+    /// wire-legal "no noise in this block" spelling a
+    /// noise-enabled decoder expects.
+    noise: Option<NoiseSpec>,
     /// The §2 three-field latch, raised at stream start, on every
     /// packet-body boundary crossing, and by [`Self::raise_latch`].
     latch: bool,
@@ -294,13 +305,33 @@ impl FrameEmitter {
         if !cfg.exp_vlc {
             return Err(EmitError::LspPathUnsupported);
         }
+        let (noise, reuse) = match measured_noise_policy(cfg) {
+            Some((spec, rule)) => (Some(spec), rule),
+            None => (None, ReuseRule::default()),
+        };
         Ok(Self {
             cfg: cfg.clone(),
+            reuse,
+            noise,
             latch: true,
             promised_next: None,
             last_size_index: None,
             next_boundary: u64::from(cfg.packet_body_bits()),
         })
+    }
+
+    /// Enable the §2.1 noise-substitution emission hypothesis
+    /// (mirror of [`crate::vendor_frame::FrameParser::with_noise`]).
+    pub fn with_noise(mut self, noise: NoiseSpec) -> Self {
+        self.noise = Some(noise);
+        self
+    }
+
+    /// Select the §2 B2 envelope-reuse presence rule (mirror of
+    /// [`crate::vendor_frame::FrameParser::with_reuse`]).
+    pub fn with_reuse(mut self, reuse: ReuseRule) -> Self {
+        self.reuse = reuse;
+        self
     }
 
     /// Mirror of the parser's `raise_latch`: force the three-field
@@ -426,10 +457,46 @@ impl FrameEmitter {
         }
         out.write_bits(u64::from(rem), 7);
 
+        // F3 — noise-substitution band flags (hypothesis-gated, all
+        // channels' flags before all channels' gains; this encoder
+        // flags nothing, so no F4 gains follow). The walk mirrors
+        // the parser's exactly.
+        if let Some(spec) = self.noise {
+            let walk_edges: Vec<u16> = match spec.grid {
+                NoiseGrid::ExponentBands => {
+                    crate::band_partition::exponent_band_edges(self.cfg.sample_rate, block_size)
+                }
+                NoiseGrid::OctaveSubbands => {
+                    crate::vendor_frame::octave_noise_edges_for(self.cfg.sample_rate, block_size)
+                }
+            };
+            let walk_count = walk_edges.len() - 1;
+            let coef_end = self.cfg.coef_end(block_size);
+            for ch in &block.channels {
+                if !ch.coded {
+                    continue;
+                }
+                let mut band = crate::vendor_frame::noise_walk_start(
+                    &spec.start,
+                    &walk_edges,
+                    walk_count,
+                    block_size,
+                );
+                while band < walk_count && walk_edges[band] < coef_end {
+                    out.write_bit(false);
+                    band += 1;
+                }
+            }
+        }
+
         // B2 — the vendor-measured per-block reuse bit
         // (ReuseRule::TwoChannelShortBlock).
-        let b2_present =
-            self.cfg.vbl_enabled && block_size < self.cfg.frame_length && channels == 2;
+        let b2_short = self.cfg.vbl_enabled && block_size < self.cfg.frame_length;
+        let b2_present = match self.reuse {
+            ReuseRule::TwoChannelShortBlock => b2_short && channels == 2,
+            ReuseRule::ShortBlockPerBlock => b2_short,
+            ReuseRule::Never => false,
+        };
         let reuse_flags: Vec<bool> = block
             .channels
             .iter()
@@ -612,6 +679,20 @@ impl VendorBitWriter {
             body: BitWriter::new(),
             frames: Vec::new(),
         })
+    }
+
+    /// Enable the §2.1 noise-substitution emission hypothesis on the
+    /// underlying emitter (all-clear F3 walks; see
+    /// [`FrameEmitter::with_noise`]).
+    pub fn with_noise(mut self, noise: crate::vendor_frame::NoiseSpec) -> Self {
+        self.emitter = self.emitter.clone().with_noise(noise);
+        self
+    }
+
+    /// Select the §2 B2 presence rule on the underlying emitter.
+    pub fn with_reuse(mut self, reuse: crate::vendor_frame::ReuseRule) -> Self {
+        self.emitter = self.emitter.clone().with_reuse(reuse);
+        self
     }
 
     /// Current absolute body-bit position.
