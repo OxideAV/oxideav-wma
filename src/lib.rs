@@ -986,7 +986,7 @@ pub use frame_encode::{
 pub use gain_ladder::GainLadderError;
 pub use header::{Version, WmaHeader};
 
-pub use registration::{make_decoder, register, WmaDecoder};
+pub use registration::{make_decoder, make_encoder, register, WmaDecoder, WmaEncoder};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use huffman::{HuffmanCode, HuffmanError};
