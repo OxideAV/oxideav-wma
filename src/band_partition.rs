@@ -19,9 +19,14 @@
 //!   `trunc(f_Hz · 2 · block_coefficients / sample_rate / 4) · 4` —
 //!   appended when it exceeds the previous edge; the walk stops at
 //!   the first edge past the block and that edge is replaced by the
-//!   block's coefficient count. For a 2048-coefficient block at
-//!   44100 Hz this yields 25 bands, the count `frame-bit-layout.md`
-//!   §3 recorded independently from the decoder's envelope loop.
+//!   block's coefficient count. The `.meta` flags the truncation as
+//!   a reconstruction whose exact rounding was not read out; the
+//!   r454 black-box edge probe (see `computed_partition`) resolves
+//!   it to the staged hard-table post-pass `((e + 2) >> 2) << 2`
+//!   applied to the truncated conversion. For a 2048-coefficient
+//!   block at 44100 Hz the walk yields 25 bands, the count
+//!   `frame-bit-layout.md` §3 recorded independently from the
+//!   decoder's envelope loop.
 //!
 //! Band `b` covers coefficients `[edge[b], edge[b+1])`; the band
 //! count (`edges.len() − 1`) is the number of spectral-envelope
@@ -94,8 +99,20 @@ fn hard_partition(sample_rate: u32, block_coefficients: u16) -> Option<&'static 
 fn computed_partition(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
     let mut edges: Vec<u16> = vec![0];
     for &f_hz in &CRITICAL_BAND_FREQS_HZ {
-        let edge =
-            (u64::from(f_hz) * 2 * u64::from(block_coefficients) / u64::from(sample_rate) / 4) * 4;
+        // The staged .meta states the truncate-to-multiple-of-four
+        // reconstruction with an explicit caveat (the x87
+        // intermediate's rounding was "not read out instruction by
+        // instruction"). A black-box edge probe against the
+        // reference decoder (r454: crafted single-coefficient frames
+        // with a 20 dB envelope step straddling every computed edge
+        // at 22050 Hz / 1024 coefficients) resolves that caveat: the
+        // deviating edges are exactly the ones where
+        // round-to-nearest-four differs from truncate-to-four, i.e.
+        // the vendor applies the same `((e + 2) >> 2) << 2` post-pass
+        // the staged hard-coded tables document, to the truncated
+        // conversion.
+        let raw = u64::from(f_hz) * 2 * u64::from(block_coefficients) / u64::from(sample_rate);
+        let edge = ((raw + 2) >> 2) << 2;
         if edge >= u64::from(block_coefficients) {
             edges.push(block_coefficients);
             break;

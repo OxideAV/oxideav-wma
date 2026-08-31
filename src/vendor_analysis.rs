@@ -548,9 +548,16 @@ struct PreparedChannel {
 /// The anchor exponent the loudest band sits at (inside both the
 /// staged ladder's 113 entries and the v1 base field's range).
 const ENVELOPE_ANCHOR: i32 = 40;
-/// How far below the anchor a band's exponent may fall (30 dB on the
-/// ladder's 1.25 dB steps; quieter bands quantise to zero anyway).
-const ENVELOPE_FLOOR: i32 = ENVELOPE_ANCHOR - 48;
+/// How far below the anchor a band's exponent may fall — 24 steps
+/// (30 dB). Measured against the black-box reference decoder
+/// (crafted single-coefficient frames sweeping the band exponent
+/// with the anchor pinned): the per-band weight laws agree within
+/// 0.4 dB down to 24 steps below the anchor, then diverge sharply
+/// (the reference decays ~5 dB faster by 40 steps and saturates,
+/// and clamps below exponent 0), so the encoder keeps every emitted
+/// exponent inside the well-matched regime — quieter bands spend a
+/// few more bits instead of landing in the divergent region.
+const ENVELOPE_FLOOR: i32 = ENVELOPE_ANCHOR - 24;
 
 fn prepare_channel(
     cfg: &StreamConfig,
