@@ -259,6 +259,92 @@ pub fn gain_vlc() -> &'static ExactVlc {
     singleton(&GAIN, &GAIN_CODES)
 }
 
+/// Reverse companion lookup for the encoder mirror: `(run, |level|)`
+/// → coefficient symbol, over a staged 2-based companion map. When a
+/// pair appears more than once in a map (the staged tables carry a
+/// handful of duplicate rows), the symbol with the **shortest staged
+/// codeword** wins — the choice an encoder wants and one every
+/// decoder resolves identically (both symbols expand to the same
+/// pair).
+#[derive(Debug, Clone)]
+pub struct RunLevelIndex {
+    by_pair: HashMap<(u16, u16), u16>,
+}
+
+impl RunLevelIndex {
+    fn build(map: &[(u16, u16)], vlc: &ExactVlc) -> Self {
+        let mut by_pair: HashMap<(u16, u16), u16> = HashMap::new();
+        for (i, &(run, level)) in map.iter().enumerate() {
+            if level == 0 {
+                // The class-2 maps close with a literal (0, 0) row —
+                // a sentinel, not an emittable pair (§4: level 0 is
+                // never an event).
+                continue;
+            }
+            let symbol = (i + 2) as u16;
+            match by_pair.entry((run, level)) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(symbol);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let cur = *e.get();
+                    let cur_len = vlc
+                        .entry(usize::from(cur))
+                        .map(|(l, _)| l)
+                        .unwrap_or(u8::MAX);
+                    let new_len = vlc
+                        .entry(usize::from(symbol))
+                        .map(|(l, _)| l)
+                        .unwrap_or(u8::MAX);
+                    if new_len < cur_len {
+                        e.insert(symbol);
+                    }
+                }
+            }
+        }
+        Self { by_pair }
+    }
+
+    /// The symbol coding `(run, |level|)`, if the map carries the
+    /// pair. `level` must be the absolute value (signs travel as the
+    /// §4 trailing sign bit).
+    pub fn symbol(&self, run: u16, level: u16) -> Option<u16> {
+        self.by_pair.get(&(run, level)).copied()
+    }
+}
+
+/// The reverse `(run, |level|) → symbol` index for `(class, alt)` —
+/// the encoder-side counterpart of [`runlevel_map`].
+pub fn runlevel_index(class: u8, alt: bool) -> Option<&'static RunLevelIndex> {
+    static IDX: OnceLock<[RunLevelIndex; 6]> = OnceLock::new();
+    let all = IDX.get_or_init(|| {
+        let combos = [
+            (1u8, false),
+            (2, false),
+            (3, false),
+            (1, true),
+            (2, true),
+            (3, true),
+        ];
+        combos.map(|(c, a)| {
+            RunLevelIndex::build(
+                runlevel_map(c, a).expect("staged combo"),
+                coef_vlc(c, a).expect("staged combo"),
+            )
+        })
+    });
+    let slot = match (class, alt) {
+        (1, false) => 0,
+        (2, false) => 1,
+        (3, false) => 2,
+        (1, true) => 3,
+        (2, true) => 4,
+        (3, true) => 5,
+        _ => return None,
+    };
+    Some(&all[slot])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +495,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn runlevel_index_inverts_every_emittable_pair() {
+        for (class, alt) in [
+            (1, false),
+            (2, false),
+            (3, false),
+            (1, true),
+            (2, true),
+            (3, true),
+        ] {
+            let map = runlevel_map(class, alt).unwrap();
+            let idx = runlevel_index(class, alt).unwrap();
+            let vlc = coef_vlc(class, alt).unwrap();
+            for (i, &(run, level)) in map.iter().enumerate() {
+                if level == 0 {
+                    continue; // the class-2 (0, 0) sentinel row
+                }
+                let sym = idx
+                    .symbol(run, level)
+                    .unwrap_or_else(|| panic!("class {class} alt {alt}: ({run},{level}) missing"));
+                // The chosen symbol expands back to the same pair …
+                let (r2, l2) = map[usize::from(sym) - 2];
+                assert_eq!((r2, l2), (run, level), "class {class} alt {alt}");
+                // … and codes no longer than the row it stands for.
+                let chosen_len = vlc.entry(usize::from(sym)).unwrap().0;
+                let row_len = vlc.entry(i + 2).unwrap().0;
+                assert!(
+                    chosen_len <= row_len,
+                    "class {class} alt {alt} symbol {sym}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runlevel_index_rejects_uncoded_pairs() {
+        let idx = runlevel_index(3, false).unwrap();
+        // Level 0 is never an event; absurd pairs are absent.
+        assert_eq!(idx.symbol(0, 0), None);
+        assert_eq!(idx.symbol(5000, 1), None);
+        assert_eq!(idx.symbol(0, 60_000), None);
+        assert!(runlevel_index(0, false).is_none());
+        assert!(runlevel_index(4, true).is_none());
     }
 }
