@@ -8,6 +8,62 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Vendor-wire encoder, end-to-end (r454)** — the encoder mirror is
+  no longer self-consistent-only: `vendor_encode` carries the §2–§4
+  frame/block bit **emitter** (`FrameEmitter`: F1 one-ahead pipeline
+  with the three-field opening latch, F2a/F2, B1 gain chaining, the
+  per-block B2 rule, §3 scale-VLC envelopes incl. the v1 base, §4
+  run-level coefficients over the staged vendor codes with
+  companion pairs / escapes / EOB / channel-scoped ALT) and the §1
+  packet writer (`VendorBitWriter`: back-to-back body stream, P1/P2/P3
+  derived from where frame boundaries fell, zero-carry padding as the
+  flush mechanism, hard per-frame §1 bounds). `vendor_analysis`
+  supplies the signal stage (forward lapped transform at the
+  synthesiser's own slot geometry, envelope extraction on the staged
+  ladder scale, quantisation by the exact decode composition, §5
+  mid/side fold with the encoder-side halving, a transient block
+  scheduler, per-frame rate control with the gain floored at the
+  escape-level ceiling), and `VendorEncoder` drives PCM → packets.
+  `wire_vlc::runlevel_index` provides the reverse `(run, |level|) →
+  symbol` lookup.
+- **Encoder registration** — `WmaEncoder` (core `Encoder` impl,
+  interleaved-F32 in / `block_align` §1 packets out at flush) and
+  `make_encoder`; the registry entries install the encoder factory
+  alongside the decoder.
+- **Measured §2.1 noise-substitution policy**
+  (`vendor_frame::measured_noise_policy`, r454 black-box
+  calibration): enabled at 22.05 kHz below the staged 1.16
+  class-selector threshold on the rate float; exponent-band walk
+  from per-size start edges 716/356/148 (1024/512/256); every short
+  block carries the B2 bit on enabled streams (supersedes r446's
+  "mono reads no B2", which the then-unknown F3 bits confounded).
+  Parser, emitter and synthesiser apply it by default;
+  `NoiseStart::StartEdges` carries the measured starts. This opens
+  the `cand_mono22k_16kbps` vendor stream — the old "F1 anomaly"
+  family: closures 64/122 → 97/122, corr² 0.004 → 0.951, ≈ 14 dB
+  median SNR.
+- Encoder acceptance tests (`tests/encoder_streams.rs`): per-family
+  own-chain SNR floors plus black-box wire-format acceptance
+  (RIFF/WAVEFORMATEX wrap → reference decode, corr² 0.98–0.995 at
+  fitted gain ≈ 1), and a structure-aware encoder round-trip fuzz
+  target (`vendor_encode_roundtrip`).
+
+### Changed
+
+- **Computed exponent-band partition rounding** (r454 black-box edge
+  probe): the critical-band walk rounds to the **nearest** multiple
+  of four (the staged hard-table `((e + 2) >> 2) << 2` post-pass),
+  not truncation — resolving the staged `.meta`'s explicit rounding
+  caveat. This was the decoder's dominant residual error: vendor
+  per-second median SNR moves 27.3 → 45.3 dB (stereo 22.05 kHz),
+  18.2 → 60.4 dB (44.1 kHz VBR), 20.9 → 50.3 dB (96 kbps);
+  regression floors raised accordingly.
+- `BlockSynth` maps coefficients around flagged §2.1 noise bands
+  (substituted bands zero-fill; the vendor noise generator is
+  unstaged, F4 gains are parsed and carried).
+
+### Added
+
 - **`oxideav_core` registration + `WmaDecoder` + `make_decoder`
   (r450)** — the crate's dual API surface (`registration` module,
   `register!` entry point): decoder factories for codec ids

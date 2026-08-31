@@ -178,9 +178,9 @@ each pinned to the patent it is disclosed in:
   hold it down — plus codec-level hardening sweeps (every strict bit
   prefix of a valid frame fails with a typed error, single-bit
   corruption never panics the parser, arbitrary bytes never panic
-  the packet entry point) and a `fuzz/` sub-crate with four
+  the packet entry point) and a `fuzz/` sub-crate with six
   libFuzzer targets over the header, wire-parse, wire-round-trip,
-  and staged-VLC surfaces.
+  staged-VLC, vendor-decode and vendor-encoder-round-trip surfaces.
 * **Wire frame codec** ([`wire_chain`]): [`select_decode_class`]
   carries the staged §4b rule with the staged threshold constants
   wired in (class 3 pinned below 32 kHz; above the gate the
@@ -207,7 +207,7 @@ leaves the encoder's tuning constants (band-size exponents, decision
 thresholds, generator construction) as caller-supplied parameters,
 never fabricated. The patent trace marks several bitstream specifics as
 gaps (`[GAP]`), which the typed carriers name side-by-side rather than
-guessing. The crate carries 865 unit tests.
+guessing. The crate carries 900+ unit tests.
 
 With the r390 wire pass the crate is a **complete, self-consistent
 codec loop at the wire-bit level**: PCM → analysis → quantize →
@@ -217,7 +217,7 @@ synthesis → PCM, round-tripping within the §4 quantizer bound. What
 separates this from decoding *vendor* WMA files is the short list of
 still-unstaged semantic bindings below.
 
-### Vendor-bitstream decode (r439, extended r446/r450)
+### Vendor-bitstream decode (r439, extended r446/r450/r454)
 
 The freshly staged rounds 3–6 of `docs/audio/wma/` (exact vendor VLC
 codewords for all eight trees, the §0–§5 frame-bit layout with the
@@ -241,23 +241,29 @@ vendor-encoded WMA v2 streams**:
 * Measured on the six committed vendor streams
   (`tests/vendor_streams.rs`, fixtures referenced from the docs
   staging area and never copied here): the §1 packet layer holds on
-  **all 1769 packets**; the frame layer closes **1705 / 1763** §1
-  carry boundaries — **five of the six families completely**: mono
-  8 kHz **394/394**, stereo 22.05 kHz A/V **1098/1098**, and the
-  whole 44.1 kHz high-rate family (**3/3**, **13/13**, **133/133**).
-  Only the mono 22.05 kHz stream stays partial (64/122; below).
+  **all 1769 packets**; the frame layer closes **1738 / 1763** §1
+  carry boundaries — five families completely (mono 8 kHz
+  **394/394**, stereo 22.05 kHz A/V **1098/1098**, the whole
+  44.1 kHz high-rate family **3/3**, **13/13**, **133/133**), and
+  the mono 22.05 kHz stream — the old "F1 anomaly", which turned
+  out to be the §2.1 noise-substitution sub-stream, not F1 —
+  **97/122** under the r454 measured noise policy (below).
 * The PCM leg (r450: variable-size lapped reconstruction with
   neighbour-matched sine slopes — the thing the §2 three-field
   opening's neighbouring block sizes exist for — plus the calibrated
   dequantisation composition: staged `10^((e − e_max)/16)` ladder
   ratio anchored at the block's maximum exponent, total gain at 1 dB
-  per B1 step, a single black-box-calibrated absolute scale) reaches
-  **per-second median SNR 27.3 / 20.9 / 18.2 dB** with **corr²
-  0.994 / 0.999 / 0.995** and fitted gain ≈ 1 against a black-box
-  reference decode on the three fully-closing envelope-coded
-  families (stereo 22.05 kHz, 44.1 kHz VBR, 44.1 kHz 96 kbps), and
-  4.7 dB on the mono 8 kHz LSP-envelope stream (its conversion
-  tables are the remaining staged gap on that family).
+  per B1 step, a single black-box-calibrated absolute scale) — sharpened in r454 by the computed band partition rounding to
+  the **nearest** multiple of four (the staged hard-table post-pass,
+  resolving the staged `.meta`'s rounding caveat; this was the
+  dominant residual error) — reaches **per-second median SNR
+  45.3 / 50.3 / 60.4 dB** with **corr² 0.998–1.000** and fitted
+  gain ≈ 1 against a black-box reference decode on the three
+  fully-closing envelope-coded families (stereo 22.05 kHz, 44.1 kHz
+  96 kbps, 44.1 kHz VBR), **13.9 dB / corr² 0.951** on the mono
+  22.05 kHz noise-substitution family, and 4.7 dB on the mono 8 kHz
+  LSP-envelope stream (its conversion tables are the remaining
+  staged gap on that family).
 * Four §1/§2/§5 details calibrated *differently* from the staged
   reading, with the §1 carry boundary as ground truth (reported to
   the docs staging as erratum/extension asks): the F1 field is a
@@ -273,42 +279,103 @@ vendor-encoded WMA v2 streams**:
   joint-stereo ALT-tree consequence is **channel-scoped** (second
   coded channel — the difference channel — only).
 
+* The **§2.1 noise-substitution policy is measured** (r454, via the
+  crate's own encoder mirror judged by the black-box reference):
+  enabled at 22.05 kHz below the staged 1.16 class-selector
+  threshold on the §0.2 rate float; the walk runs over the
+  exponent-band partition from per-size start edges 716/356/148
+  (1024/512/256-coefficient blocks, each pinned up to its 2/2/3
+  flag count); on enabled streams **every short block carries the
+  B2 bit, mono included** — r446's contrary mono reading was
+  confounded by the then-unknown F3 bits.
+  `vendor_frame::measured_noise_policy` carries the rule; parser,
+  emitter and synthesiser apply it by default (substituted bands
+  zero-fill: the vendor noise generator is unstaged).
+
 ### What is still open
 
-* the **mono 22.05 kHz F1 anomaly**: on the one committed stream
-  with `n_block_sizes == 4`, the one-ahead F1 pipeline reconciles
-  most blocks but not certain 512-sample transitions (a
-  boundary-constrained exhaustive re-parse of its packets pins
-  block-size paths whose F1 fields contradict both the pipeline and
-  the field-is-current readings) — needs a clean-room trace of the
-  block-size latch state flow for the small-`n_block_sizes` mono
-  case;
-* the **§2.1 noise-substitution enable rule** and its band
-  table/start (staged as open; the parser carries an off-by-default
-  hypothesis switch, now over either staged grid — exponent bands or
-  the octave subband table; no start/grid hypothesis improves any
-  committed stream, consistent with noise coding being disabled in
-  all six);
+* the **§2.1 noise-substitution closed forms**: the r454 policy is
+  a black-box measurement, not a staged fact — still open are the
+  closed-form start rule behind the measured per-size edges
+  (716/356/148), the exact enable rule beyond the measured bracket
+  (rate floats below ≈ 0.58 diverge in further unmeasured ways, and
+  16/32 kHz configurations diverge for reasons not yet isolated),
+  the vendor **noise generator** (flagged bands currently
+  zero-fill; the F4 gains are parsed but unused), and the remaining
+  25 mono-22.05 kHz carry boundaries;
 * the **vendor-literal dequantisation composition and
-  transition-window shape** (r450 carries the measured-best
-  realisation of both — see `vendor_decode` — but the decoder
-  binary's own closed forms remain unstaged);
+  transition-window shape** (r450/r454 carry the measured-best
+  realisation — the r454 weight-law probe shows agreement within
+  0.4 dB down to 24 ladder steps below the block maximum, with a
+  divergence beyond that whose closed form is unstaged);
 * the **§3.1 line-spectral envelope conversion tables** (wire format
   staged and parsed; the index → envelope mapping is not — the mono
   8 kHz stream decodes with a flat envelope meanwhile);
 * **WMA v1** specifics (no v1 vendor stream exists in the staged
   set) and the v1 per-channel byte-alignment rule.
 
-(The r439 "44.1 kHz high-rate residual" is **closed**: it was the
-missing B2 reuse bit plus the zero-carry padding semantic — the
-whole family now parses 149/149.)
+(The r439 "44.1 kHz high-rate residual" is **closed** — it was the
+missing B2 reuse bit plus the zero-carry padding semantic; the
+family parses 149/149. The r450 "mono 22.05 kHz F1 anomaly" is
+likewise **closed**: it was never F1 but the §2.1
+noise-substitution sub-stream, whose measured policy the crate now
+carries.)
 
-### Framework registration (r450)
+### Vendor-wire encoder (r454)
+
+The encoder mirror is complete end-to-end at the vendor wire level —
+no longer the self-consistent-only §8 chain:
+
+* [`vendor_encode`] — the §2–§4 **frame/block emitter**
+  ([`FrameEmitter`], the field-for-field inverse of the vendor
+  parser's latch / F1-pipeline state machine: three-field openings
+  exactly where a packet-body boundary was crossed, the one-ahead F1
+  pipeline, F2a before the channel flags, B1 `0x7f` chaining, the
+  per-block B2 rule, §3 scale-VLC envelope deltas with the v1 base,
+  §2.1 all-clear F3 walks under the measured policy, and §4
+  run-level coefficients over the staged vendor codes — companion
+  pairs via the reverse index (`wire_vlc::runlevel_index`), escapes
+  at the gain-mapped widths, EOB, per-event signs, channel-scoped
+  ALT in joint blocks) and the §1 **packet writer**
+  ([`VendorBitWriter`]: frames laid back-to-back, every packet's
+  P1/P2/P3 derived from where the boundaries fell, zero-carry
+  padding as the flush mechanism, hard per-frame §1 bounds from the
+  packet body and the P3 field width).
+* [`vendor_analysis`] — the signal stage: forward lapped transform
+  at the synthesiser's own slot geometry (TDAC identity pinned by
+  test, uniform and mixed-size), per-band envelope extraction on the
+  staged ladder scale kept inside the reference-measured matched
+  regime, quantisation by the exact decode composition (the shared
+  decode-side functions), the §5 mid/side fold with the
+  encoder-side halving, a transient-probe block scheduler for VBL
+  streams, and per-frame rate control (one gain offset searched
+  against the configuration's average bits per frame, floored so
+  the peak |q| always fits the gain tier's escape ceiling).
+  [`VendorEncoder`] drives PCM → `block_align` §1 packets.
+* Measured (`tests/encoder_streams.rs`), per family: **own-chain
+  SNR 19–26 dB** (encode → this crate's own vendor decode), and
+  **black-box wire-format acceptance** — the reference decoder
+  accepts a minimal RIFF/`WAVEFORMATEX` wrap of the emitted packets
+  and decodes it at **corr² 0.98–0.995 with fitted gain ≈ 1.0**
+  (stereo/mono 22.05 kHz VBL incl. the noise-policy family,
+  44.1 kHz 96 kbps, and the ACM catalogue's 186-byte headerless
+  configuration with its vendor-declared extradata bytes).
+  Acceptance is the bar; bit-parity with a vendor encoder is not
+  claimed. The §3.1 LSP envelope path is not encodable (its
+  conversion tables are a staged gap) and is refused at
+  construction.
+
+### Framework registration (r450, encoder r454)
 
 The crate registers into [`oxideav_core`] with the framework's dual
-API ([`registration`]): `register(ctx)` installs decoder factories
-for codec ids `wma1` / `wma2` with their `WAVEFORMATEX` tag claims
-(`0x0160` / `0x0161`), and [`make_decoder`] is the direct factory.
+API ([`registration`]): `register(ctx)` installs decoder **and
+encoder** factories for codec ids `wma1` / `wma2` with their
+`WAVEFORMATEX` tag claims (`0x0160` / `0x0161`); [`make_decoder`]
+and [`make_encoder`] are the direct factories. [`WmaEncoder`] takes
+interleaved-F32 frames and emits `block_align`-byte §1 codec packets
+at flush (packets sized at eight average frames, the staged vendor
+configurations' own ratio), with `output_params` carrying the
+`WAVEFORMATEX`-shaped extradata a muxer needs.
 [`WmaDecoder`] wraps the vendor decode chain behind the core
 `Decoder` trait — one `Packet` per `block_align`-sized codec packet,
 one-packet latency for the §1 reservoir carry, interleaved F32
