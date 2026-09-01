@@ -907,7 +907,11 @@ pub mod vendor_decode;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod vendor_analysis;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod vendor_encode;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod vendor_frame;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -1052,9 +1056,13 @@ pub use window::{Window, WindowPair, WindowShape};
 pub use vendor_analysis::{
     BlockPolicy, EncodeError as VendorEncodeError, EncoderSettings, StereoMode, VendorEncoder,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use vendor_encode::{
     EmitError, EncBlockData, EncChannelData, EncEnvelope, FrameEmitter, VendorBitWriter,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use wire_chain::{
     clamp_rate_float, rate_float_region, select_decode_class, DecodeClassSelection,
     RateFloatRegion, WireBlockConfig, WireChainError, WireFrameCodec,
