@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-wma/compare/v0.0.3...v0.0.4) - 2026-08-31
+
+### Other
+
+- README/CHANGELOG for the r454 encoder + calibration arc
+- vendor_encode_roundtrip — structure-aware encoder round trip
+- encoder end-to-end acceptance — own-chain floors + black-box wire acceptance
+- the measured par.2.1 noise-substitution policy
+- computed-walk rounding is nearest-multiple-of-four (black-box calibrated)
+- WmaEncoder + make_encoder — the dual-API encoder surface
+- PCM -> packets encoder (forward mirror of the vendor decode chain)
+- par.2-par.4 frame emitter + par.1 packet writer (encoder wire mirror)
+- reverse (run, level) -> symbol index for the encoder mirror
+
 ### Added
 
 - **Vendor-wire encoder, end-to-end (r454)** — the encoder mirror is
