@@ -49,6 +49,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Encoder ladder** (`tests/encoder_ladder.rs`): every encodable
+  WMA v2 cell of the staged ACM catalogue (21 cells: 22.05–48 kHz,
+  mono/stereo, 16–160 kbps, headerless and reservoir/VBL geometries)
+  plus the vendor-stream geometries, each encoded under the default
+  transient-splitting schedule and a fixed full-block schedule,
+  decoded through the own chain and the black-box reference, reported
+  per cell (own SNR / reference corr² / gain / SNR / rate used) and
+  held to reference-tracks-own acceptance. Baseline at r457: own
+  20–29 dB, reference 22–37 dB, gain 0.99–1.01 on all 26 cells.
+  Shared helpers moved to `tests/common/mod.rs`.
 - `BlockPolicy::Pattern` — explicit per-frame block schedules;
   `EncoderSettings::noise` (`NoisePolicy::Measured` / `Off` / `Spec`) and
   `FrameParser::without_noise` / `FrameEmitter::without_noise` — the
