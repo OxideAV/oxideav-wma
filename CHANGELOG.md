@@ -6,6 +6,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-wma/compare/v0.0.4...v0.0.5) - 2026-09-06
+
+### Other
+
+- README for the r457 encoder campaign + noise-substitution / policy findings
+- noise substitution end to end: F3/F4 emission, measured level law, decoder synthesis, cost election; cutoff-bin walk start
+- per-frame allocation + stereo election by a masking-aware cost; dead zone; bisected reservoir-paced rate control
+- encoder ladder — every encodable v2 catalogue cell, own chain + black-box reference per cell
+- noise-substitution policy across the sample-rate axis + per-short-block B2 on every stream
+- ABS_SCALE recalibrated per channel — the r450 fit absorbed the reference downmix's 1/sqrt2
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Fixed
 
 - **Absolute output scale recalibrated (r457)** — `vendor_decode::ABS_SCALE`
