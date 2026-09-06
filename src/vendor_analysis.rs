@@ -42,7 +42,7 @@
 use crate::stream_config::StreamConfig;
 use crate::vendor_decode::{band_weights, total_gain_multiplier, transition_window, ABS_SCALE};
 use crate::vendor_encode::{EmitError, EncBlockData, EncChannelData, EncEnvelope, VendorBitWriter};
-use crate::vendor_frame::{escape_level_width, Envelope};
+use crate::vendor_frame::{escape_level_width, Envelope, NoiseSpec, ReuseRule};
 
 /// Per-block stereo policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,11 +67,36 @@ pub enum BlockPolicy {
     Auto,
     /// Every frame uses this size index for all its blocks.
     Fixed(u8),
+    /// Every frame uses this explicit schedule: the first `len`
+    /// entries of `indices` are size indices whose sizes must sum to
+    /// `frame_length` (checked at construction).
+    Pattern {
+        /// Size indices (only the first `len` are used).
+        indices: [u8; 8],
+        /// Number of live entries in `indices` (1..=8).
+        len: u8,
+    },
+}
+
+/// Which §2.1 noise-substitution sub-stream policy the emitter
+/// follows.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum NoisePolicy {
+    /// The black-box-measured policy for the configuration
+    /// ([`crate::vendor_frame::measured_noise_policy`]).
+    #[default]
+    Measured,
+    /// No F3/F4 bits at all (measurement hook).
+    Off,
+    /// An explicit parse hypothesis (measurement hook).
+    Spec(NoiseSpec, ReuseRule),
 }
 
 /// Encoder tuning (all fields have working defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EncoderSettings {
+    /// The §2.1 sub-stream policy.
+    pub noise: NoisePolicy,
     /// Stereo folding policy.
     pub stereo: StereoMode,
     /// Block-size scheduling policy.
@@ -91,6 +116,7 @@ pub struct EncoderSettings {
 impl Default for EncoderSettings {
     fn default() -> Self {
         Self {
+            noise: NoisePolicy::Measured,
             stereo: StereoMode::Auto,
             blocks: BlockPolicy::Auto,
             target_peak_q: 350.0,
@@ -190,12 +216,34 @@ impl VendorEncoder {
         cfg: &StreamConfig,
         settings: EncoderSettings,
     ) -> Result<Self, EncodeError> {
-        if let BlockPolicy::Fixed(index) = settings.blocks {
-            if cfg.block_size_for_index(index).is_none() || (!cfg.vbl_enabled && index != 0) {
-                return Err(EncodeError::BadPolicyIndex { index });
+        match settings.blocks {
+            BlockPolicy::Fixed(index) => {
+                if cfg.block_size_for_index(index).is_none() || (!cfg.vbl_enabled && index != 0) {
+                    return Err(EncodeError::BadPolicyIndex { index });
+                }
             }
+            BlockPolicy::Pattern { indices, len } => {
+                let len = usize::from(len).clamp(1, indices.len());
+                let mut total = 0u32;
+                for &index in &indices[..len] {
+                    match cfg.block_size_for_index(index) {
+                        Some(size) if cfg.vbl_enabled || index == 0 => total += u32::from(size),
+                        _ => return Err(EncodeError::BadPolicyIndex { index }),
+                    }
+                }
+                if total != u32::from(cfg.frame_length) {
+                    return Err(EncodeError::BadPolicyIndex { index: indices[0] });
+                }
+            }
+            BlockPolicy::Auto => {}
         }
-        let writer = VendorBitWriter::new(cfg)?;
+        let writer = match settings.noise {
+            NoisePolicy::Measured => VendorBitWriter::new(cfg)?,
+            NoisePolicy::Off => VendorBitWriter::new(cfg)?.without_noise(),
+            NoisePolicy::Spec(spec, reuse) => VendorBitWriter::new(cfg)?
+                .with_noise(spec)
+                .with_reuse(reuse),
+        };
         let target_frame_bits =
             (u64::from(cfg.avg_bytes_per_sec) * 8 * u64::from(cfg.frame_length))
                 / u64::from(cfg.sample_rate);
@@ -308,6 +356,9 @@ impl VendorEncoder {
         }
         let split_index = match self.settings.blocks {
             BlockPolicy::Fixed(i) => return vec![i; 1usize << i],
+            BlockPolicy::Pattern { indices, len } => {
+                return indices[..usize::from(len).clamp(1, indices.len())].to_vec();
+            }
             BlockPolicy::Auto => {
                 // Deepest split considered: index 2 (quarter frame)
                 // where the stream allows it, else 1.

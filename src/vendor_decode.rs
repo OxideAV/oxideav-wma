@@ -364,6 +364,7 @@ fn noise_excluded_ranges(
         &walk_edges,
         walk_count,
         block.block_size,
+        cfg.sample_rate,
     );
     let coef_start = cfg.coef_start(block.block_size);
     let coef_end = cfg.coef_end(block.block_size);

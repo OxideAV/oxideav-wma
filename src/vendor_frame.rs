@@ -255,10 +255,29 @@ pub enum NoiseStart {
     /// A per-block-size table of start **edges** (bin indices): the
     /// walk starts at the first band whose lower edge is at or above
     /// the entry for the block's size; a size with no entry walks no
-    /// bands. This is the carrier for black-box-measured start
-    /// positions whose closed-form rule is still open (see
-    /// [`measured_noise_policy`]).
+    /// bands. The r454 carrier for black-box-measured start positions
+    /// (superseded as the default by [`NoiseStart::CutoffHz`], which
+    /// reproduces every measured entry and generalises across block
+    /// sizes and sample rates).
     StartEdges(&'static [(u16, u16)]),
+    /// A cutoff **frequency**: for a block of `M` coefficients the
+    /// cutoff bin is `f · 2M / sample_rate` rounded to the nearest
+    /// multiple of four (the same rounding the staged band-partition
+    /// post-pass applies), and the walk starts at the band that
+    /// **contains** that bin (`edge[b] ≤ bin < edge[b+1]`). r457
+    /// black-box measurement across 11.025–48 kHz and every block
+    /// size 128–2048 (see [`measured_noise_policy`]); the cutoff
+    /// values are the staged critical-band seeds 3700 / 6400 / 7700 /
+    /// 9500 Hz.
+    CutoffHz(u32),
+    /// [`NoiseStart::CutoffHz`] with per-block-size **overrides**
+    /// (`(block size, start edge)`, first band whose lower edge is at
+    /// or above the edge) consulted before the cutoff rule — the
+    /// carrier for the one measured case the cutoff rule does not
+    /// reproduce (22.05 kHz, 256-coefficient blocks: the vendor mono
+    /// stream closes 97/122 §1 boundaries from edge 148 and 61/122
+    /// from the rule's 180).
+    CutoffHzWithOverrides(u32, &'static [(u16, u16)]),
 }
 
 /// The §2.1 noise-substitution parse hypothesis. The open-time
@@ -300,11 +319,11 @@ pub struct NoiseSpec {
 /// overturns that for two-channel streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReuseRule {
-    /// The vendor-measured rule (this round's calibration): one B2
-    /// bit **per block** (not per channel), read after the F3/F4
-    /// position and before the first coded channel's envelope, on
-    /// blocks shorter than the frame, on **two-channel** streams
-    /// only; 0 = both coded channels reuse the envelope cached for
+    /// The r446 vendor-measured rule: one B2 bit **per block** (not
+    /// per channel), read after the F3/F4 position and before the
+    /// first coded channel's envelope, on blocks shorter than the
+    /// frame, on **two-channel** streams only (superseded — see
+    /// [`ReuseRule::ShortBlockPerBlock`]); 0 = both coded channels reuse the envelope cached for
     /// this block-size index (§3's per-size cache), 1 = fresh
     /// envelopes follow. Measured against the §1 carry boundaries:
     /// the three stereo VBL streams need the bit (the 22.05 kHz
@@ -320,11 +339,19 @@ pub enum ReuseRule {
     /// so the channel form is carried and the ambiguity is reported
     /// as a docs ask. A per-channel placement of the same bit is
     /// also refuted (the 96 kbps stream closes 25/133 under it).
-    #[default]
     TwoChannelShortBlock,
     /// One B2 bit per block on every block shorter than the frame,
-    /// mono included — the ungated form of the rule; the mono
-    /// 22.05 kHz stream refutes it (64 → 27).
+    /// mono included — the **default since r457**. r446's mono
+    /// rejection (64 → 27 on the mono 22.05 kHz stream) was
+    /// confounded by the then-unknown F3 bits; r454 found the bit on
+    /// every short block of noise-enabled streams, and the r457
+    /// black-box sweep finds it on every short block of
+    /// noise-**disabled** mono streams too (48 kHz / 44.1 kHz /
+    /// 22.05 kHz / 8 kHz mono, every short size 1024–128: the
+    /// reference decodes only the per-block-bit emission; both
+    /// bit-less forms desync). The two-channel gate above is thereby
+    /// the same rule restricted to stereo.
+    #[default]
     ShortBlockPerBlock,
     /// No B2 bit is ever read — the r439 calibration, kept
     /// measurable as the baseline the regression floors were
@@ -407,6 +434,13 @@ impl FrameParser {
     /// Select the §2 B2 envelope-reuse presence rule.
     pub fn with_reuse(mut self, reuse: ReuseRule) -> Self {
         self.reuse = reuse;
+        self
+    }
+
+    /// Disable the §2.1 sub-stream (no F3/F4 bits read), whatever
+    /// the measured policy says — a measurement hook.
+    pub fn without_noise(mut self) -> Self {
+        self.noise = None;
         self
     }
 
@@ -599,7 +633,13 @@ impl FrameParser {
                 if !coded[ch] {
                     continue;
                 }
-                let mut band = noise_walk_start(&spec.start, walk_edges, walk_count, block_size);
+                let mut band = noise_walk_start(
+                    &spec.start,
+                    walk_edges,
+                    walk_count,
+                    block_size,
+                    self.cfg.sample_rate,
+                );
                 while band < walk_count && walk_edges[band] < coef_end {
                     let flagged = reader.read_bit()?;
                     if flagged {
@@ -738,8 +778,27 @@ pub(crate) fn noise_walk_start(
     walk_edges: &[u16],
     walk_count: usize,
     block_size: u16,
+    sample_rate: u32,
 ) -> usize {
+    let cutoff = |f: u32| -> usize {
+        let bin = f64::from(f) * 2.0 * f64::from(block_size) / f64::from(sample_rate.max(1));
+        let bin = ((bin / 4.0).round() * 4.0) as u16;
+        (0..walk_count)
+            .rev()
+            .find(|&b| walk_edges[b] <= bin)
+            .unwrap_or(walk_count)
+    };
     match *start {
+        NoiseStart::CutoffHz(f) => cutoff(f),
+        NoiseStart::CutoffHzWithOverrides(f, overrides) => overrides
+            .iter()
+            .find(|&&(bs, _)| bs == block_size)
+            .map(|&(_, edge)| {
+                (0..walk_count)
+                    .find(|&b| walk_edges[b] >= edge)
+                    .unwrap_or(walk_count)
+            })
+            .unwrap_or_else(|| cutoff(f)),
         NoiseStart::Band(b) => b,
         NoiseStart::CoefFraction(frac) => {
             let cutoff = frac * f64::from(block_size);
@@ -759,52 +818,92 @@ pub(crate) fn noise_walk_start(
     }
 }
 
-/// The measured §2.1 noise-walk start edges for the 22.05 kHz
-/// low-rate family, per block size (r454 black-box calibration; see
-/// [`measured_noise_policy`]): 1024-sample blocks walk 2 bands from
-/// edge 716, 512-sample blocks 2 bands from 356, 256-sample blocks
-/// 3 bands from 148. Each start is pinned only up to the walk's
-/// flag count (any start inside the same band is wire-identical);
-/// the closed-form rule behind them is an open docs ask.
+/// The r454 measured §2.1 noise-walk start edges for the 22.05 kHz
+/// low-rate family, per block size: 1024-sample blocks from edge
+/// 716, 512-sample blocks from 356, 256-sample blocks from 148.
+/// Kept as the r454 record; [`measured_noise_policy`] now derives
+/// the starts from a cutoff frequency ([`NoiseStart::CutoffHz`]),
+/// which reproduces 716 / 356, plus the 256 entry as an explicit
+/// override (the containing-band rule would say 180 there; the
+/// vendor mono 22.05 kHz stream closes 97/122 §1 boundaries from
+/// 148 and 61/122 from 180, so 148 stands).
 pub const MEASURED_NOISE_START_EDGES_22050: [(u16, u16); 3] = [(1024, 716), (512, 356), (256, 148)];
 
-/// The r454 black-box-measured §2.1 noise-substitution policy: which
-/// configurations parse with the F3/F4 sub-stream active, and the B2
-/// rule that accompanies it.
+/// The black-box-measured §2.1 noise-substitution policy: whether a
+/// configuration parses with the F3/F4 sub-stream active, the cutoff
+/// frequency its walk starts at, and the B2 rule that accompanies it.
 ///
-/// Measured by emitting crafted frames through this crate's own
-/// emitter mirror and checking which hypothesis the black-box
-/// reference decoder accepts (corr² ≈ 1 against the mirrored own
-/// decode; the wrong hypotheses decode to garbage or hard-error):
+/// Measured (r454, extended across the sample-rate axis in r457) by
+/// emitting crafted frames through this crate's own emitter mirror
+/// and checking which hypothesis the black-box reference decoder
+/// accepts (per-channel corr² and SNR tracking the own-chain decode;
+/// wrong hypotheses decode to garbage or hard-error). Mono
+/// configurations at every block size 128–2048 through explicit
+/// mixed block schedules, stereo spot-checked; `rate` is the §0
+/// rate float (`bps · 1.6` for two channels):
 ///
-/// * **Enabled** exactly for `sample_rate == 22050` with the §0.2
-///   rate float **below the staged 1.16 class-selector threshold**
-///   (`wma-class-selector-thresholds`): measured ON at rate floats
-///   0.581–1.090 (mono 2003/2503/3005 B/s, stereo 3005 B/s) and OFF
-///   at 1.163+ (stereo 4006 B/s, mono 3503 B/s and up). 44.1 kHz
-///   streams measure OFF even at low rate floats. (Below ≈ 0.58,
-///   and at 16/32 kHz, the reference diverges in further unmeasured
-///   ways — open asks; those configurations are rare and unstaged.)
-/// * On enabled streams **every short block carries the B2 bit**
-///   ([`ReuseRule::ShortBlockPerBlock`]), mono included — r446's
-///   mono rejection of B2 was confounded by the then-unknown F3
-///   bits, which this calibration supersedes.
-/// * The walk runs over the block's exponent-band partition from the
-///   per-size start edges of [`MEASURED_NOISE_START_EDGES_22050`].
+/// | sample rate | enabled when | cutoff |
+/// | ----------- | ------------ | ------ |
+/// | 8000 | never (rate 1.0–1.5 measured off) | — |
+/// | 11025 | always (rate 0.73–1.31 measured on) | 3700 Hz |
+/// | 16000 | always (rate 0.80–1.20 measured on) | 3700 Hz |
+/// | 22050 | `rate < 1.16` (r454; 1.143 on, 1.161 off) | 6400 Hz below `rate 0.72` (0.689 → 6400, 0.727 → 7700), 7700 Hz above |
+/// | 32000 | `rate < 1.16` (1.150 on, 1.163 off; classes 1 and 2) | 9500 Hz |
+/// | 44100 | `rate ≤ 0.6` (0.599 on, 0.617 off) | 7700 Hz |
+/// | 48000 | `rate ≤ 0.6` (0.600 on, 0.617 off) | 9500 Hz |
 ///
-/// This is what makes the staged `cand_mono22k_16kbps` vendor stream
-/// (the old "F1 anomaly" family — the anomaly was never F1) parse.
+/// The 22.05 / 32 kHz enable threshold is the staged class-2
+/// selector constant and the 22.05 kHz cutoff switch sits at the
+/// class-1 constant (`wma-class-selector-thresholds`); the cutoffs
+/// are critical-band seeds (`critical-band-freqs`). The start band
+/// is the band **containing** the cutoff bin rounded to a multiple
+/// of four ([`NoiseStart::CutoffHz`]) — verified at every size:
+/// 32 kHz 1216/608/304/152/76, 44.1 kHz 716/356/180, 48 kHz
+/// 812/404/180, 22.05 kHz 716/356 (+ 596 at the low cutoff), 16 kHz
+/// 236, 11.025 kHz 344. The closed form behind the table is an open
+/// docs ask; the table is what the reference accepts.
+///
+/// On enabled streams every short block carries the B2 bit
+/// ([`ReuseRule::ShortBlockPerBlock`] — since r457 the default for
+/// every stream).
 pub fn measured_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule)> {
-    use crate::wire_tables::CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD;
-    (cfg.sample_rate == 22_050 && cfg.rate_float < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD)
-        .then_some((
-            NoiseSpec {
-                start: NoiseStart::StartEdges(&MEASURED_NOISE_START_EDGES_22050),
-                grid: NoiseGrid::ExponentBands,
-            },
-            ReuseRule::ShortBlockPerBlock,
-        ))
+    use crate::wire_tables::{
+        CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD, CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
+    };
+    let rate = cfg.rate_float;
+    let start = match cfg.sample_rate {
+        11_025 | 16_000 => NoiseStart::CutoffHz(3700),
+        22_050 if rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD => {
+            if rate < CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD {
+                NoiseStart::CutoffHz(6400)
+            } else {
+                NoiseStart::CutoffHzWithOverrides(7700, &MEASURED_NOISE_START_OVERRIDES_22050)
+            }
+        }
+        32_000 if rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD => NoiseStart::CutoffHz(9500),
+        44_100 if rate <= NOISE_ENABLE_HIGH_RATE_THRESHOLD => NoiseStart::CutoffHz(7700),
+        48_000 if rate <= NOISE_ENABLE_HIGH_RATE_THRESHOLD => NoiseStart::CutoffHz(9500),
+        _ => return None,
+    };
+    Some((
+        NoiseSpec {
+            start,
+            grid: NoiseGrid::ExponentBands,
+        },
+        ReuseRule::ShortBlockPerBlock,
+    ))
 }
+
+/// The per-size start-edge overrides the 22.05 kHz 7700 Hz cutoff
+/// carries (see [`NoiseStart::CutoffHzWithOverrides`]): the
+/// 256-coefficient block starts one band below the cutoff rule's
+/// answer, the r454 vendor-stream-validated reading.
+pub const MEASURED_NOISE_START_OVERRIDES_22050: [(u16, u16); 1] = [(256, 148)];
+
+/// The measured §2.1 enable threshold on the §0 rate float at 44.1
+/// and 48 kHz (on at 0.599 / 0.600, off at 0.617 — see
+/// [`measured_noise_policy`]).
+pub const NOISE_ENABLE_HIGH_RATE_THRESHOLD: f32 = 0.6;
 
 /// Crate-internal accessor for the emitter mirror.
 pub(crate) fn octave_noise_edges_for(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
@@ -1314,10 +1413,12 @@ mod tests {
     }
 
     #[test]
-    fn mono_short_block_outside_the_policy_reads_no_b2_bit() {
-        // Outside the measured noise policy (rate float >= the 1.16
-        // threshold) the r446 reading stands: mono short blocks carry
-        // neither F3 bits nor a B2 bit.
+    fn mono_short_block_outside_the_policy_reads_the_b2_bit() {
+        // Mono 22.05 kHz at a rate float above the measured noise
+        // enable (4005 B/s -> 1.45): no F3 bits, but the B2 bit is
+        // still there on the short block — since r457 the per-block
+        // reuse bit is read on every short block of every stream
+        // (ReuseRule::ShortBlockPerBlock is the default).
         let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 4005, 744, 0x000f).unwrap();
         assert!(cfg.vbl_enabled);
         assert!(measured_noise_policy(&cfg).is_none());
@@ -1328,12 +1429,16 @@ mod tests {
         w.write_bits(1, 2); // next
         w.write_bit(true); // F2 (mono)
         w.write_bits(20, 7); // B1
-                             // No F3, no B2: envelope immediately.
+        w.write_bit(true); // B2: fresh envelope follows (no F3).
         write_scale_delta_zero_run(&mut w, bands_512);
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
-        // Second 512 block completes the frame (uncoded).
+        // Second 512 block: B2 = 0 reuses the cached envelope, then
+        // its (empty) coefficient sub-stream.
         w.write_bits(1, 2);
+        w.write_bit(true);
+        w.write_bits(20, 7);
         w.write_bit(false);
+        assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         let bit_len = w.bit_len();
         let bytes = w.into_bytes();
         let mut parser = FrameParser::new(&cfg, &[0]);
@@ -1344,6 +1449,7 @@ mod tests {
             Envelope::Exponents(e) => assert_eq!(e.len(), bands_512),
             other => panic!("unexpected envelope {other:?}"),
         }
+        assert_eq!(frame.blocks[1].channels[0].envelope, Some(Envelope::Reused));
     }
 
     #[test]

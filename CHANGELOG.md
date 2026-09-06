@@ -24,8 +24,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reference SNR tracks the own-chain SNR within ≈ 0.5 dB, 20–30 dB on
   the four families).
 
+- **§2.1 noise-substitution policy generalised across the
+  sample-rate axis (r457)** — `vendor_frame::measured_noise_policy`
+  now covers 11.025–48 kHz: enabled always at 11.025/16 kHz, below the
+  staged 1.16 class-2 threshold at 22.05 **and 32 kHz**, at rate
+  floats ≤ 0.6 at 44.1/48 kHz, never at 8 kHz; the walk starts at the
+  band containing the bin of a critical-band-seed cutoff
+  (`NoiseStart::CutoffHz`: 3700 Hz at 11.025/16 kHz, 6400/7700 Hz at
+  22.05 kHz switching at the 0.72 class-1 threshold, 9500 Hz at 32 and
+  48 kHz, 7700 Hz at 44.1 kHz), verified at every block size 128–2048
+  through explicit mixed block schedules against the black-box
+  reference; the r454 22.05 kHz 256-block start (148) stays as an
+  override the vendor mono stream votes for (97/122 vs 61/122). This
+  isolates the README's "16/32 kHz divergence": every 32 kHz class-2
+  configuration (rate float 0.72–1.16) — nine ACM catalogue cells —
+  decoded to garbage at the reference and now decodes at 21–26 dB.
+- **B2 envelope-reuse bit is per short block on every stream
+  (r457)** — `ReuseRule::ShortBlockPerBlock` is the default: measured
+  on noise-disabled mono configurations at 48 / 44.1 / 22.05 / 8 kHz
+  (every short size 1024–128) the reference decodes only the
+  per-block-bit emission; r446's two-channel gate was the same rule
+  restricted to the stereo streams it could see. Vendor closure
+  unchanged (1738/1763).
+
 ### Added
 
+- `BlockPolicy::Pattern` — explicit per-frame block schedules;
+  `EncoderSettings::noise` (`NoisePolicy::Measured` / `Off` / `Spec`) and
+  `FrameParser::without_noise` / `FrameEmitter::without_noise` — the
+  measurement hooks the policy sweep runs through.
 - `EncoderSettings::envelope_anchor` / `envelope_range` — the envelope
   anchor and depth are settings (defaults 40 / 24, the r454 constants,
   now `pub` as `ENVELOPE_ANCHOR` / `ENVELOPE_RANGE`). Black-box sweep:

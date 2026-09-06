@@ -17,7 +17,7 @@ use std::process::Command;
 use oxideav_wma::header::Version;
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
-use oxideav_wma::vendor_frame::FrameParser;
+use oxideav_wma::vendor_frame::{Envelope, FrameParser};
 
 /// One committed vendor stream's container configuration, from the
 /// staged `reference/vendor-streams/README.md` table.
@@ -245,6 +245,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
         let mut parser = FrameParser::new(&l.cfg, &body_starts);
 
         let mut aligned = 0usize;
+        let mut size_histogram = std::collections::BTreeMap::<(u16, bool, bool), usize>::new();
         let mut parse_errors = 0usize;
         let mut boundaries = 0usize;
         let mut cursor = stream.packets[0].frames_start_bit();
@@ -260,7 +261,21 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
             let mut failed = false;
             for _ in 0..rec.header.frame_count {
                 match parser.parse_frame(&mut reader) {
-                    Ok(_) => {}
+                    Ok(frame) => {
+                        for b in &frame.blocks {
+                            let fresh = b
+                                .channels
+                                .iter()
+                                .any(|c| matches!(c.envelope, Some(Envelope::Exponents(_))));
+                            let reused = b
+                                .channels
+                                .iter()
+                                .any(|c| matches!(c.envelope, Some(Envelope::Reused)));
+                            *size_histogram
+                                .entry((b.block_size, fresh, reused))
+                                .or_insert(0usize) += 1;
+                        }
+                    }
                     Err(_) => {
                         parse_errors += 1;
                         failed = true;
@@ -284,8 +299,8 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
             }
         }
         eprintln!(
-            "{}: {}/{} boundaries closed, {} frame-parse errors",
-            l.spec.file, aligned, boundaries, parse_errors
+            "{}: {}/{} boundaries closed, {} frame-parse errors; (size, fresh, reused) {:?}",
+            l.spec.file, aligned, boundaries, parse_errors, size_histogram
         );
         // Per-family floors at the measured r446 closure rates (the
         // vendor-calibrated F1 pipeline / channel-scoped ALT /

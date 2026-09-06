@@ -334,6 +334,13 @@ impl FrameEmitter {
         self
     }
 
+    /// Disable the §2.1 sub-stream (no F3/F4 bits at all), whatever
+    /// the measured policy says — a measurement hook.
+    pub fn without_noise(mut self) -> Self {
+        self.noise = None;
+        self
+    }
+
     /// Mirror of the parser's `raise_latch`: force the three-field
     /// opening on the next frame and restart the F1 pipeline — the
     /// state a decoder reaches after a padding skip (§1 zero-carry).
@@ -481,6 +488,7 @@ impl FrameEmitter {
                     &walk_edges,
                     walk_count,
                     block_size,
+                    self.cfg.sample_rate,
                 );
                 while band < walk_count && walk_edges[band] < coef_end {
                     out.write_bit(false);
@@ -692,6 +700,13 @@ impl VendorBitWriter {
     /// Select the §2 B2 presence rule on the underlying emitter.
     pub fn with_reuse(mut self, reuse: crate::vendor_frame::ReuseRule) -> Self {
         self.emitter = self.emitter.clone().with_reuse(reuse);
+        self
+    }
+
+    /// Disable the §2.1 sub-stream on the underlying emitter (see
+    /// [`FrameEmitter::without_noise`]).
+    pub fn without_noise(mut self) -> Self {
+        self.emitter = self.emitter.clone().without_noise();
         self
     }
 
