@@ -99,7 +99,17 @@ use crate::wire_tables::DEQUANT_GAIN_LUT;
 /// Black-box-calibrated absolute output scale (module docs): places
 /// decoded PCM in the reference's ±1.0 float convention; the sign
 /// absorbs the reconstruction's phase convention.
-pub const ABS_SCALE: f64 = -6.85e-2;
+///
+/// r457 recalibration: the r450 value (`-6.85e-2`) was fitted
+/// against the reference's stereo→mono *downmix* compared with this
+/// decoder's `(L + R) / 2`; the reference's downmix weights are
+/// `1/√2` per channel, so that fit absorbed a factor √2 and the
+/// decoder ran 3 dB loud (the mono 22.05 kHz family's fitted gain
+/// of 1.40 in r454 was the tell). Measured per channel, the
+/// reference's fitted gain is now ≈ 1.0 on every family, mono
+/// included, and on this crate's own encoded streams at every
+/// total gain and envelope anchor.
+pub const ABS_SCALE: f64 = -4.844e-2;
 
 /// Stateful PCM synthesiser for parsed vendor blocks: per-channel
 /// lapped-transform accumulator carried across blocks, frames and

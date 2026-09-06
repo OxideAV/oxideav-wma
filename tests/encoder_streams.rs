@@ -12,7 +12,12 @@
 //!    reference parses the stream and produces PCM that correlates
 //!    with the input at fitted gain ≈ 1 — is the bar; bit-parity
 //!    with a vendor encoder is not claimed. Skipped when the binary
-//!    is unavailable.
+//!    is unavailable. The reference is decoded at the stream's own
+//!    channel count and fitted per channel over the overlapping
+//!    interior (r457: the r454 leg compared a stereo→mono downmix
+//!    and counted the reference's shorter tail as error, which
+//!    capped every family near 14 dB; measured like for like the
+//!    reference SNR tracks the own-chain SNR within ≈ 0.5 dB).
 //!
 //! The WAV path itself is validated against the reference decoder's
 //! own ASF unwrap in `tests/vendor_streams.rs` fixtures territory:
@@ -56,7 +61,7 @@ fn families() -> Vec<Family> {
             cfg: StreamConfig::derive(Version::V2, 22_050, 2, 4005, 186, 0x0001).unwrap(),
             extradata: *b"\x00\x04\x00\x00\x01\x00\xba\x00\x00\x00",
             own_floor: 5.0,
-            reference_floor: 3.0,
+            reference_floor: 12.0,
         },
         Family {
             // The staged cand_stereo22k geometry: stereo VBL + reservoir.
@@ -64,7 +69,7 @@ fn families() -> Vec<Family> {
             cfg: StreamConfig::derive(Version::V2, 22_050, 2, 4006, 744, 0x0017).unwrap(),
             extradata: mk_extra(0x0017),
             own_floor: 8.0,
-            reference_floor: 5.0,
+            reference_floor: 12.0,
         },
         Family {
             // The staged cand_mono22k geometry: mono VBL + reservoir.
@@ -72,7 +77,7 @@ fn families() -> Vec<Family> {
             cfg: StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap(),
             extradata: mk_extra(0x000f),
             own_floor: 6.0,
-            reference_floor: 4.0,
+            reference_floor: 11.0,
         },
         Family {
             // The staged cand_wmp12 geometry: stereo 44.1 kHz 96 kbps.
@@ -80,7 +85,7 @@ fn families() -> Vec<Family> {
             cfg: StreamConfig::derive(Version::V2, 44_100, 2, 12_003, 4459, 0x000f).unwrap(),
             extradata: mk_extra(0x000f),
             own_floor: 14.0,
-            reference_floor: 10.0,
+            reference_floor: 12.0,
         },
     ]
 }
@@ -191,8 +196,8 @@ fn wav_wrap(cfg: &StreamConfig, extradata: &[u8; 10], packets: &[Vec<u8>]) -> Ve
     out
 }
 
-/// Black-box reference decode of a WAV file to mono f32le PCM.
-fn reference_decode_mono(wav: &[u8]) -> Option<Vec<f64>> {
+/// Black-box reference decode of a WAV file to per-channel f32 PCM.
+fn reference_decode(wav: &[u8], channels: usize) -> Option<Vec<Vec<f64>>> {
     let dir = std::env::temp_dir().join(format!("oxideav-wma-encoder-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("probe.wav");
@@ -200,7 +205,7 @@ fn reference_decode_mono(wav: &[u8]) -> Option<Vec<f64>> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&path)
-        .args(["-f", "f32le", "-ac", "1", "-"])
+        .args(["-f", "f32le", "-ac", &channels.to_string(), "-"])
         .output()
         .ok()?;
     let _ = std::fs::remove_file(&path);
@@ -211,22 +216,23 @@ fn reference_decode_mono(wav: &[u8]) -> Option<Vec<f64>> {
         );
         return None;
     }
-    Some(
-        out.stdout
-            .chunks_exact(4)
-            .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
-            .collect(),
-    )
+    let mut per = vec![Vec::new(); channels];
+    for (i, c) in out.stdout.chunks_exact(4).enumerate() {
+        per[i % channels].push(f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
+    }
+    Some(per)
 }
 
-/// Best block-aligned lag + scalar gain fit of `decoded` against
-/// `original`; returns `(lag, corr2, gain, snr_db)`.
+/// Best lag (block-aligned coarse search, then sample-exact) +
+/// scalar gain fit of `decoded` against `original`; returns
+/// `(lag, corr2, gain, snr_db)`. The SNR is taken over the interior
+/// of the overlap (2048 samples off either edge), so a decoder that
+/// emits a shorter tail is not charged for it.
 fn fit(original: &[f64], decoded: &[f64]) -> (i64, f64, f64, f64) {
     let n = original.len();
-    let mut best = (0i64, f64::NEG_INFINITY, 0.0f64);
-    for lag in (-4096i64..=8192).step_by(64) {
+    let score = |lag: i64, step: usize| -> (f64, f64) {
         let (mut dot, mut ee, mut rr) = (0.0, 0.0, 0.0);
-        for (t, &a) in original.iter().enumerate().take(n).step_by(4) {
+        for (t, &a) in original.iter().enumerate().take(n).step_by(step) {
             let u = t as i64 + lag;
             if u < 0 || u as usize >= decoded.len() {
                 continue;
@@ -237,22 +243,32 @@ fn fit(original: &[f64], decoded: &[f64]) -> (i64, f64, f64, f64) {
             rr += a * a;
         }
         if ee == 0.0 || rr == 0.0 {
-            continue;
+            return (f64::NEG_INFINITY, 0.0);
         }
-        let corr = dot * dot / (ee * rr);
-        if corr > best.1 {
-            best = (lag, corr, dot / ee);
+        (dot * dot / (ee * rr), dot / ee)
+    };
+    let mut best = (0i64, f64::NEG_INFINITY, 0.0f64);
+    for lag in (-8192i64..=8192).step_by(64) {
+        let (c, g) = score(lag, 8);
+        if c > best.1 {
+            best = (lag, c, g);
+        }
+    }
+    let centre = best.0;
+    for lag in centre - 96..=centre + 96 {
+        let (c, g) = score(lag, 1);
+        if c > best.1 {
+            best = (lag, c, g);
         }
     }
     let (lag, corr2, gain) = best;
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     for (t, &a) in original.iter().enumerate().take(n) {
         let u = t as i64 + lag;
-        let b = if u >= 0 && (u as usize) < decoded.len() {
-            decoded[u as usize] * gain
-        } else {
-            0.0
-        };
+        if u < 2048 || (u as usize) + 2048 >= decoded.len() || t < 2048 || t + 2048 >= n {
+            continue;
+        }
+        let b = decoded[u as usize] * gain;
         sig += a * a;
         err += (a - b) * (a - b);
     }
@@ -332,36 +348,34 @@ fn black_box_reference_accepts_the_emitted_wire_format() {
         let pcm = family_pcm(fam);
         let packets = encode_family(fam, &pcm);
         let wav = wav_wrap(&fam.cfg, &fam.extradata, &packets);
-        let reference = match reference_decode_mono(&wav) {
+        let reference = match reference_decode(&wav, pcm.len()) {
             Some(r) => r,
             None => panic!("{}: reference decoder rejected the stream", fam.name),
         };
-        // Mono mix of the input for the fit.
-        let mix: Vec<f64> = (0..pcm[0].len())
-            .map(|t| pcm.iter().map(|c| c[t]).sum::<f64>() / pcm.len() as f64)
-            .collect();
-        let (lag, corr2, gain, snr) = fit(&mix, &reference);
-        eprintln!(
-            "{}: reference decode {} samples, lag {lag}, corr2 {corr2:.3}, gain {gain:.3}, SNR {snr:.2} dB",
-            fam.name,
-            reference.len()
-        );
         assert!(
-            reference.len() * 2 > pcm[0].len(),
+            reference[0].len() * 2 > pcm[0].len(),
             "{}: reference produced too few samples",
             fam.name
         );
-        assert!(corr2 > 0.8, "{}: corr2 {corr2:.3}", fam.name);
-        assert!(
-            (0.4..2.5).contains(&gain),
-            "{}: fitted gain {gain:.3} strayed from 1",
-            fam.name
-        );
-        assert!(
-            snr > fam.reference_floor,
-            "{}: reference SNR {snr:.2} dB below floor {}",
-            fam.name,
-            fam.reference_floor
-        );
+        for (ch, orig) in pcm.iter().enumerate() {
+            let (lag, corr2, gain, snr) = fit(orig, &reference[ch]);
+            eprintln!(
+                "{} ch{ch}: reference decode {} samples, lag {lag}, corr2 {corr2:.3}, gain {gain:.3}, SNR {snr:.2} dB",
+                fam.name,
+                reference[ch].len()
+            );
+            assert!(corr2 > 0.95, "{}: corr2 {corr2:.3}", fam.name);
+            assert!(
+                (0.8..1.25).contains(&gain),
+                "{}: fitted gain {gain:.3} strayed from 1",
+                fam.name
+            );
+            assert!(
+                snr > fam.reference_floor,
+                "{}: reference SNR {snr:.2} dB below floor {}",
+                fam.name,
+                fam.reference_floor
+            );
+        }
     }
 }

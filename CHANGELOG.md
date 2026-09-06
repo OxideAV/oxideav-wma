@@ -6,6 +6,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Absolute output scale recalibrated (r457)** — `vendor_decode::ABS_SCALE`
+  was fitted in r450 against the black-box reference's stereo→mono
+  downmix compared with this decoder's `(L + R) / 2`; the reference's
+  downmix weights are `1/√2` per channel, so the fit absorbed a factor
+  √2 and every decode ran 3 dB loud (the mono 22.05 kHz family's r454
+  fitted gain of 1.40 was the tell). The scale is now `-4.844e-2`;
+  measured per channel the reference's fitted gain is 0.99–1.00 on the
+  three fully-closing vendor families and on this crate's own encoded
+  streams at every total gain and envelope anchor. The vendor-stream and
+  encoder acceptance tests now decode the reference at the stream's own
+  channel count and fit per channel; the encoder leg also measures SNR
+  over the overlap interior (the r454 leg charged the reference's shorter
+  tail as error, which capped every family near 14 dB — like for like the
+  reference SNR tracks the own-chain SNR within ≈ 0.5 dB, 20–30 dB on
+  the four families).
+
+### Added
+
+- `EncoderSettings::envelope_anchor` / `envelope_range` — the envelope
+  anchor and depth are settings (defaults 40 / 24, the r454 constants,
+  now `pub` as `ENVELOPE_ANCHOR` / `ENVELOPE_RANGE`). Black-box sweep:
+  anchors 32–80 decode identically at the reference; 16/24 lose 8–16 dB
+  (exponents clamp at 0); 100 is rejected outright.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-wma/compare/v0.0.3...v0.0.4) - 2026-08-31
 
 ### Other

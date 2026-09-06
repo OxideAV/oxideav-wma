@@ -79,6 +79,13 @@ pub struct EncoderSettings {
     /// Target peak |q| the per-block base gain aims at (clamped to
     /// the escape ceiling of the resulting gain tier).
     pub target_peak_q: f64,
+    /// The exponent the loudest band of every envelope sits at (the
+    /// staged ladder's index scale, 1.25 dB/step); see
+    /// [`ENVELOPE_ANCHOR`].
+    pub envelope_anchor: i32,
+    /// How many ladder steps below the anchor an exponent may fall;
+    /// see [`ENVELOPE_RANGE`].
+    pub envelope_range: i32,
 }
 
 impl Default for EncoderSettings {
@@ -87,6 +94,8 @@ impl Default for EncoderSettings {
             stereo: StereoMode::Auto,
             blocks: BlockPolicy::Auto,
             target_peak_q: 350.0,
+            envelope_anchor: ENVELOPE_ANCHOR,
+            envelope_range: ENVELOPE_RANGE,
         }
     }
 }
@@ -486,7 +495,7 @@ impl VendorEncoder {
                 &edges,
                 coef_start,
                 coef_end,
-                self.settings.target_peak_q,
+                &self.settings,
             ));
         }
         let peak = chans
@@ -547,7 +556,7 @@ struct PreparedChannel {
 
 /// The anchor exponent the loudest band sits at (inside both the
 /// staged ladder's 113 entries and the v1 base field's range).
-const ENVELOPE_ANCHOR: i32 = 40;
+pub const ENVELOPE_ANCHOR: i32 = 40;
 /// How far below the anchor a band's exponent may fall — 24 steps
 /// (30 dB). Measured against the black-box reference decoder
 /// (crafted single-coefficient frames sweeping the band exponent
@@ -557,7 +566,7 @@ const ENVELOPE_ANCHOR: i32 = 40;
 /// and clamps below exponent 0), so the encoder keeps every emitted
 /// exponent inside the well-matched regime — quieter bands spend a
 /// few more bits instead of landing in the divergent region.
-const ENVELOPE_FLOOR: i32 = ENVELOPE_ANCHOR - 24;
+pub const ENVELOPE_RANGE: i32 = 24;
 
 fn prepare_channel(
     cfg: &StreamConfig,
@@ -566,8 +575,12 @@ fn prepare_channel(
     edges: &[u16],
     coef_start: usize,
     coef_end: usize,
-    target_peak_q: f64,
+    settings: &EncoderSettings,
 ) -> Option<PreparedChannel> {
+    let target_peak_q = settings.target_peak_q;
+    let anchor = settings.envelope_anchor;
+    let range = settings.envelope_range;
+    let floor = anchor - range;
     // Per-band RMS over the coded range.
     let bands = edges.len() - 1;
     let mut rms = vec![0.0f64; bands];
@@ -596,9 +609,9 @@ fn prepare_channel(
         let rel = if *r > 0.0 {
             (16.0 * (r / rms_max).log10()).round() as i32
         } else {
-            ENVELOPE_FLOOR - ENVELOPE_ANCHOR
+            -range
         };
-        let mut e = (ENVELOPE_ANCHOR + rel).clamp(ENVELOPE_FLOOR, ENVELOPE_ANCHOR);
+        let mut e = (anchor + rel).clamp(floor, anchor);
         if let Some(p) = prev {
             e = e.clamp(p - 60, p + 60);
         } else if cfg.version == crate::header::Version::V1 {

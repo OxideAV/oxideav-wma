@@ -475,18 +475,27 @@ fn vendor_pcm_decodes_and_correlates() {
     };
     let loaded = skip_unless_fixtures!();
     for l in &loaded {
-        // Black-box reference decode: mono downmix, f32le.
+        // Black-box reference decode at the stream's own channel
+        // count, f32le interleaved, de-interleaved per channel. (The
+        // r450 calibration compared the reference's stereo→mono
+        // downmix with this decoder's `(L + R) / 2`; the reference's
+        // downmix weights are 1/√2 per channel, which is the factor
+        // the r457 `ABS_SCALE` recalibration removed — the fit is
+        // per channel now, like for like.)
+        let channels = usize::from(l.cfg.channels);
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(dir.join(l.spec.file))
-            .args(["-f", "f32le", "-ac", "1", "-"])
+            .args(["-f", "f32le", "-ac", &channels.to_string(), "-"])
             .output();
-        let reference: Vec<f64> = match out {
-            Ok(o) if o.status.success() => o
-                .stdout
-                .chunks_exact(4)
-                .map(|c| f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
-                .collect(),
+        let reference: Vec<Vec<f64>> = match out {
+            Ok(o) if o.status.success() => {
+                let mut per = vec![Vec::new(); channels];
+                for (i, c) in o.stdout.chunks_exact(4).enumerate() {
+                    per[i % channels].push(f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
+                }
+                per
+            }
             _ => {
                 eprintln!("skipping PCM leg: reference decoder unavailable");
                 return;
@@ -502,7 +511,7 @@ fn vendor_pcm_decodes_and_correlates() {
         let mut parser = FrameParser::new(&l.cfg, &body_starts);
         let mut synth = BlockSynth::new(&l.cfg);
 
-        let mut pcm: Vec<f64> = Vec::new();
+        let mut pcm: Vec<Vec<f64>> = vec![Vec::new(); channels];
         let mut cursor = stream.packets[0].frames_start_bit();
         let mut clean_pad = false;
         for (i, rec) in stream.packets.iter().enumerate() {
@@ -521,10 +530,8 @@ fn vendor_pcm_decodes_and_correlates() {
                 match parser.parse_frame(&mut reader) {
                     Ok(frame) => {
                         for block in &frame.blocks {
-                            let chans = synth.block(block);
-                            for t in 0..chans[0].len() {
-                                let sum: f64 = chans.iter().map(|c| c[t]).sum();
-                                pcm.push(sum / chans.len() as f64);
+                            for (ch, chan) in synth.block(block).into_iter().enumerate() {
+                                pcm[ch].extend_from_slice(&chan);
                             }
                         }
                     }
@@ -532,10 +539,12 @@ fn vendor_pcm_decodes_and_correlates() {
                         // Zero-fill the remaining declared frames so
                         // the timeline stays aligned to the §1 counts.
                         let remaining = usize::from(rec.header.frame_count - f);
-                        pcm.extend(
-                            std::iter::repeat(0.0)
-                                .take(usize::from(l.cfg.frame_length) * remaining),
-                        );
+                        for chan in &mut pcm {
+                            chan.extend(
+                                std::iter::repeat(0.0)
+                                    .take(usize::from(l.cfg.frame_length) * remaining),
+                            );
+                        }
                         synth.reset();
                         failed = true;
                         break;
@@ -552,9 +561,9 @@ fn vendor_pcm_decodes_and_correlates() {
                     .get(i + 1)
                     .is_some_and(|n| n.header.carry_bits == 0 && cursor <= n.body_start_bit);
         }
-        assert!(!pcm.is_empty(), "{}: no PCM produced", l.spec.file);
+        assert!(!pcm[0].is_empty(), "{}: no PCM produced", l.spec.file);
         assert!(
-            pcm.iter().all(|x| x.is_finite()),
+            pcm.iter().flatten().all(|x| x.is_finite()),
             "{}: non-finite PCM",
             l.spec.file
         );
@@ -563,21 +572,26 @@ fn vendor_pcm_decodes_and_correlates() {
         // leading latency is block-aligned, so only block-aligned
         // lags are candidates (a free election drifts onto spurious
         // correlation peaks when the residual error is large).
+        // One lag and one gain shared by every channel (the
+        // per-channel sums are pooled).
         let sr = l.spec.sample_rate as usize;
-        let win = (sr / 2).min(pcm.len().saturating_sub(1));
-        let start = (reference.len() / 3).min(reference.len().saturating_sub(win + 1));
+        let win = (sr / 2).min(pcm[0].len().saturating_sub(1));
+        let ref_len = reference[0].len();
+        let start = (ref_len / 3).min(ref_len.saturating_sub(win + 1));
         let mut best = (0i64, f64::NEG_INFINITY, 0.0f64);
         for lag in (-5120i64..=5120).step_by(256) {
             let (mut dot, mut ee, mut rr) = (0.0, 0.0, 0.0);
-            for t in (start..start + win).step_by(4) {
-                let u = t as i64 + lag;
-                if u < 0 || u as usize >= pcm.len() {
-                    continue;
+            for (r, p) in reference.iter().zip(pcm.iter()) {
+                for t in (start..start + win).step_by(4) {
+                    let u = t as i64 + lag;
+                    if u < 0 || u as usize >= p.len() {
+                        continue;
+                    }
+                    let (a, b) = (r[t], p[u as usize]);
+                    dot += a * b;
+                    ee += b * b;
+                    rr += a * a;
                 }
-                let (a, b) = (reference[t], pcm[u as usize]);
-                dot += a * b;
-                ee += b * b;
-                rr += a * a;
             }
             if ee == 0.0 || rr == 0.0 {
                 continue;
@@ -589,25 +603,28 @@ fn vendor_pcm_decodes_and_correlates() {
         }
         let (lag, corr2, gain) = best;
 
-        // Per-second SNR over live (non-filled) chunks; median.
+        // Per-second SNR over live (non-filled) chunks, all channels
+        // pooled; median.
         let mut chunk_snrs: Vec<f64> = Vec::new();
         let mut t0 = sr;
-        while t0 + sr < reference.len().saturating_sub(sr) {
+        while t0 + sr < ref_len.saturating_sub(sr) {
             let (mut num, mut den) = (0.0, 0.0);
             let mut live = 0usize;
-            for (t, &a) in reference.iter().enumerate().skip(t0).take(sr) {
-                let u = t as i64 + lag;
-                if u < 0 || u as usize >= pcm.len() {
-                    continue;
+            for (r, p) in reference.iter().zip(pcm.iter()) {
+                for (t, &a) in r.iter().enumerate().skip(t0).take(sr) {
+                    let u = t as i64 + lag;
+                    if u < 0 || u as usize >= p.len() {
+                        continue;
+                    }
+                    let b = p[u as usize] * gain;
+                    if b != 0.0 {
+                        live += 1;
+                    }
+                    num += a * a;
+                    den += (a - b) * (a - b);
                 }
-                let b = pcm[u as usize] * gain;
-                if b != 0.0 {
-                    live += 1;
-                }
-                num += a * a;
-                den += (a - b) * (a - b);
             }
-            if live > sr / 2 && num > 1e-9 {
+            if live > channels * sr / 2 && num > 1e-9 {
                 chunk_snrs.push(10.0 * (num / den.max(1e-30)).log10());
             }
             t0 += sr;
@@ -618,7 +635,7 @@ fn vendor_pcm_decodes_and_correlates() {
             .copied()
             .unwrap_or(f64::NAN);
         eprintln!(
-            "{}: lag {lag}, corr² {corr2:.3}, per-sec median SNR {median:.2} dB ({} chunks)",
+            "{}: lag {lag}, corr² {corr2:.3}, gain {gain:.3}, per-sec median SNR {median:.2} dB ({} chunks)",
             l.spec.file,
             chunk_snrs.len()
         );
@@ -627,8 +644,9 @@ fn vendor_pcm_decodes_and_correlates() {
         // composition + variable-size lapped reconstruction), with
         // headroom for float drift. The fitted-gain ≈ 1 pin holds on
         // the fully-closing envelope-coded families because the
-        // absolute scale is now part of the decode
-        // (`vendor_decode::ABS_SCALE`).
+        // absolute scale is part of the decode
+        // (`vendor_decode::ABS_SCALE`, recalibrated per channel in
+        // r457) — and, since r457, on the mono family too.
         match l.spec.file {
             "cand_apollo8.wma" => {
                 assert!(corr2 > 0.9, "apollo8 corr² regressed: {corr2}");
@@ -650,12 +668,16 @@ fn vendor_pcm_decodes_and_correlates() {
                 // ≈ 14 dB median.
                 assert!(corr2 > 0.9, "corr² regressed: {corr2}");
                 assert!(median > 10.0, "median SNR regressed to {median:.2} dB");
+                assert!(
+                    (0.8..1.25).contains(&gain),
+                    "fitted gain {gain} strayed from 1"
+                );
             }
             "cand_stereo22k_32kbps_av.wma" => {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
                 assert!(median > 38.0, "median SNR regressed to {median:.2} dB");
                 assert!(
-                    (0.7..1.4).contains(&gain),
+                    (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"
                 );
             }
@@ -663,7 +685,7 @@ fn vendor_pcm_decodes_and_correlates() {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
                 assert!(median > 44.0, "median SNR regressed to {median:.2} dB");
                 assert!(
-                    (0.7..1.4).contains(&gain),
+                    (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"
                 );
             }
@@ -671,7 +693,7 @@ fn vendor_pcm_decodes_and_correlates() {
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
                 assert!(median > 52.0, "median SNR regressed to {median:.2} dB");
                 assert!(
-                    (0.7..1.4).contains(&gain),
+                    (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"
                 );
             }
