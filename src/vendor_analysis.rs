@@ -47,8 +47,10 @@ use crate::vendor_frame::{escape_level_width, Envelope, NoiseSpec, ReuseRule};
 /// Per-block stereo policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StereoMode {
-    /// Decide per block: joint (mid/side) when the side channel
-    /// carries much less energy than the pair.
+    /// Elect per frame: both the independent and the mid/side
+    /// realisation are rate-controlled to the frame's bit target and
+    /// the lower noise-to-mask cost wins (r457; the r454 rule was an
+    /// open-loop side-energy threshold).
     #[default]
     Auto,
     /// Never fold; both channels code independently.
@@ -92,11 +94,73 @@ pub enum NoisePolicy {
     Spec(NoiseSpec, ReuseRule),
 }
 
+/// How the per-band envelope (the §4 weighting matrix the decoder
+/// shapes the quantisation noise with) is elected.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Allocation {
+    /// **Per-frame election** (the default): the flat, half-whitened
+    /// and full masking-curve envelopes ([`ADAPTIVE_BETAS`]) are each
+    /// rate-controlled to the frame's bit target and the one with the
+    /// lowest noise-to-mask cost wins. Measured rate-matched (r457):
+    /// at 16–64 kbps the flat envelope wins both SNR and
+    /// noise-to-mask (shaping spends bits on masked bands and forces
+    /// a coarser global step), at 128 kbps and above — where the
+    /// format's 9-bit peak ceiling binds and bits are free — the
+    /// shaped envelopes win noise-to-mask; the election tracks that
+    /// crossover per frame instead of fixing a rule.
+    #[default]
+    Adaptive,
+    /// Exponents from the per-band RMS: the quantisation noise
+    /// follows the band energy (constant per-band SNR). The r454
+    /// rule.
+    Rms,
+    /// **Masking-driven** (the default): the patent §4 Bark-scale
+    /// masking curve — every band's energy spread across the Bark
+    /// axis at the patent-pinned asymmetric slopes
+    /// ([`crate::masking::SpreadingSlopes::PATENT`]), combined by
+    /// maximum — sets the exponents, so the noise follows the
+    /// masking threshold instead of the band energy: bands the
+    /// spread curve says are masked by louder neighbours are
+    /// quantised coarser (their bits go to the bands that are
+    /// heard), bands standing clear of the curve keep their
+    /// resolution. `beta` is the patent's optional partial-whitening
+    /// exponent applied to the energy weights (`1.0` = the full
+    /// curve, `0.0` = flat).
+    Masking {
+        /// Partial-whitening exponent β ∈ [0, 1].
+        beta: f64,
+    },
+    /// Every band at the anchor: unshaped (white) quantisation noise
+    /// — the MSE-optimal allocation at a given rate, and the
+    /// measurement baseline the two shaped rules are compared
+    /// against.
+    Flat,
+}
+
+/// The default quantiser dead zone (rounding threshold offset, in
+/// steps; r457 rate-matched measurement).
+pub const DEFAULT_DEAD_ZONE: f64 = 0.2;
+
+/// The partial-whitening exponents [`Allocation::Adaptive`] elects
+/// between per frame: flat (β = 0), half-whitened, and the full
+/// masking curve.
+pub const ADAPTIVE_BETAS: [f64; 3] = [0.0, 0.5, 1.0];
+
 /// Encoder tuning (all fields have working defaults).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EncoderSettings {
     /// The §2.1 sub-stream policy.
     pub noise: NoisePolicy,
+    /// Envelope / bit-allocation rule.
+    pub allocation: Allocation,
+    /// Quantiser dead zone: the rounding threshold offset in steps,
+    /// `0.0` = round-to-nearest, `0.5` = truncate toward zero.
+    /// Values around 0.15–0.25 are the usual rate–distortion sweet
+    /// spot for entropy-coded uniform quantisers (a coefficient just
+    /// above half a step costs more bits than the distortion it
+    /// removes); the rate controller re-spends the saved bits as a
+    /// finer step.
+    pub dead_zone: f64,
     /// Stereo folding policy.
     pub stereo: StereoMode,
     /// Block-size scheduling policy.
@@ -117,6 +181,8 @@ impl Default for EncoderSettings {
     fn default() -> Self {
         Self {
             noise: NoisePolicy::Measured,
+            allocation: Allocation::default(),
+            dead_zone: DEFAULT_DEAD_ZONE,
             stereo: StereoMode::Auto,
             blocks: BlockPolicy::Auto,
             target_peak_q: 350.0,
@@ -406,10 +472,11 @@ impl VendorEncoder {
             Some(self.schedule(k + 1)[0])
         };
 
-        // Analyse every block of the frame once (gain-independent).
+        // Analyse every block of the frame once (gain- and
+        // envelope-independent): the forward transform per channel.
         let flen = i64::from(self.cfg.frame_length);
         let mut pos = k as i64 * flen;
-        let mut prepared: Vec<PreparedBlock> = Vec::with_capacity(sched.len());
+        let mut analysed: Vec<(u8, Vec<Vec<f64>>)> = Vec::with_capacity(sched.len());
         for (bi, &idx) in sched.iter().enumerate() {
             let m = i64::from(
                 self.cfg
@@ -443,50 +510,70 @@ impl VendorEncoder {
                 transition_window(&mut time, prev as usize, next as usize);
                 specs.push(forward_transform(&time));
             }
-            prepared.push(self.prepare_block(idx, specs));
+            analysed.push((idx, specs));
             self.prev_block_size = Some(m as u16);
             pos += m;
         }
 
-        // Rate control: shared gain offset over the per-block base
-        // gains; §1 bounds are hard, the configuration's average
-        // bits/frame is the soft target.
+        // The frame's bit target. The §1 bounds are hard; the target
+        // paces the stream at the configuration's average bits per
+        // frame with a reservoir: the budget not spent by earlier
+        // frames (or overspent) carries forward, so busy frames may
+        // borrow up to one average frame and quiet frames hand their
+        // surplus on — total rate lands at the nominal while the
+        // per-frame allocation follows the material.
         let max_bits = self.writer.max_frame_bits().saturating_sub(8);
-        let target = self.target_frame_bits.min(max_bits);
-        let mut offset: i32 = 0;
-        let mut best: Option<(u64, Vec<EncBlockData>)> = None;
-        let mut prev_bits: Option<u64> = None;
-        for _ in 0..16 {
-            let blocks: Vec<EncBlockData> =
-                prepared.iter().map(|p| realise_block(p, offset)).collect();
-            let bits = self.writer.trial_frame_bits(&blocks, next_first)?;
-            if bits <= max_bits {
-                let better = match &best {
-                    Some((b, _)) => bits.abs_diff(target) < b.abs_diff(target),
+        let avg = self.target_frame_bits as i64;
+        let planned = (k as i64 + 1) * avg;
+        let credit = planned - self.writer.position() as i64;
+        let target = (avg + credit.clamp(-avg / 2, avg)).clamp(avg / 4, max_bits as i64) as u64;
+
+        // Candidates: envelope rule × stereo mode, each rate-controlled
+        // to the same target; the lowest noise-to-mask cost wins.
+        let allocations: Vec<Allocation> = match self.settings.allocation {
+            Allocation::Adaptive => ADAPTIVE_BETAS
+                .iter()
+                .map(|&beta| Allocation::Masking { beta })
+                .collect(),
+            other => vec![other],
+        };
+        let stereo_modes: Vec<bool> = if self.input.len() == 2 {
+            match self.settings.stereo {
+                StereoMode::Independent => vec![false],
+                StereoMode::Joint => vec![true],
+                StereoMode::Auto => vec![false, true],
+            }
+        } else {
+            vec![false]
+        };
+        let mut elected: Option<(FrameCost, Vec<EncBlockData>)> = None;
+        for &allocation in &allocations {
+            for &joint in &stereo_modes {
+                let prepared: Vec<PreparedBlock> = analysed
+                    .iter()
+                    .map(|(idx, specs)| self.prepare_block(*idx, specs.clone(), allocation, joint))
+                    .collect();
+                let Some((_, blocks)) =
+                    self.rate_control(&prepared, target, max_bits, next_first)?
+                else {
+                    continue;
+                };
+                let cost = frame_cost(&prepared, &blocks);
+                let better = match &elected {
+                    Some((c, _)) => cost.better_than(c),
                     None => true,
                 };
                 if better {
-                    best = Some((bits, blocks));
+                    elected = Some((cost, blocks));
                 }
-                if bits > target {
-                    offset += 3; // coarser, toward the target
-                } else if bits * 2 < target && offset > -40 && prev_bits != Some(bits) {
-                    offset -= 4; // finer, use the budget
-                } else {
-                    break;
-                }
-                prev_bits = Some(bits);
-            } else {
-                // Over the hard bound: markedly coarser.
-                offset += 8;
-            }
-            if offset > 140 {
-                break;
             }
         }
-        let blocks = match best {
+        let blocks = match elected {
             Some((_, b)) => b,
-            None => prepared.iter().map(silent_block).collect(),
+            None => analysed
+                .iter()
+                .map(|(idx, specs)| silent_block(*idx, specs.len()))
+                .collect(),
         };
         self.writer.write_frame(&blocks, next_first)?;
         self.encoded_frames = k + 1;
@@ -494,35 +581,64 @@ impl VendorEncoder {
         Ok(())
     }
 
+    /// Rate control for one candidate realisation: one shared gain
+    /// offset over the per-block base gains, bisected to the finest
+    /// setting whose frame fits `target` (bits(offset) is monotone
+    /// non-increasing up to VLC granularity). `None` when even the
+    /// coarsest realisation breaks the hard §1 bound.
+    fn rate_control(
+        &self,
+        prepared: &[PreparedBlock],
+        target: u64,
+        max_bits: u64,
+        next_first: Option<u8>,
+    ) -> Result<Option<(u64, Vec<EncBlockData>)>, EncodeError> {
+        let dead_zone = self.settings.dead_zone;
+        let realise = |offset: i32| -> Vec<EncBlockData> {
+            prepared
+                .iter()
+                .map(|p| realise_block(p, offset, dead_zone))
+                .collect()
+        };
+        let (mut lo, mut hi) = (-80i32, 160i32);
+        let coarse = realise(hi);
+        let coarse_bits = self.writer.trial_frame_bits(&coarse, next_first)?;
+        if coarse_bits > max_bits {
+            return Ok(None);
+        }
+        let mut best = (coarse_bits, coarse);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let blocks = realise(mid);
+            let bits = self.writer.trial_frame_bits(&blocks, next_first)?;
+            if bits <= target {
+                hi = mid;
+                best = (bits, blocks);
+            } else {
+                lo = mid;
+            }
+        }
+        Ok(Some(best))
+    }
+
     /// Envelope + normalised spectra + base gain for one block
-    /// (everything gain-offset-independent).
-    fn prepare_block(&self, size_index: u8, mut specs: Vec<Vec<f64>>) -> PreparedBlock {
+    /// (everything gain-offset-independent) under one envelope rule
+    /// and stereo mode.
+    fn prepare_block(
+        &self,
+        size_index: u8,
+        mut specs: Vec<Vec<f64>>,
+        allocation: Allocation,
+        joint: bool,
+    ) -> PreparedBlock {
         let block_size = self
             .cfg
             .block_size_for_index(size_index)
             .expect("valid index");
         let channels = specs.len();
+        let joint = joint && channels == 2;
 
         // §5 stereo fold (with the encoder-side halving).
-        let joint = if channels == 2 {
-            let (e_mid, e_side) = {
-                let (mut em, mut es) = (0.0f64, 0.0f64);
-                for (l, r) in specs[0].iter().zip(specs[1].iter()) {
-                    let m = (l + r) / 2.0;
-                    let s = (l - r) / 2.0;
-                    em += m * m;
-                    es += s * s;
-                }
-                (em, es)
-            };
-            match self.settings.stereo {
-                StereoMode::Independent => false,
-                StereoMode::Joint => true,
-                StereoMode::Auto => e_side * 4.0 < e_mid + 1e-24,
-            }
-        } else {
-            false
-        };
         if joint {
             let (a, b) = specs.split_at_mut(1);
             for (l, r) in a[0].iter_mut().zip(b[0].iter_mut()) {
@@ -537,16 +653,20 @@ impl VendorEncoder {
         let coef_end = usize::from(self.cfg.coef_end(block_size));
         let edges = crate::band_partition::exponent_band_edges(self.cfg.sample_rate, block_size);
 
+        let axis = BlockAxis {
+            block_size,
+            edges: &edges,
+            coef_start,
+            coef_end,
+        };
         let mut chans = Vec::with_capacity(channels);
         for spec in &specs {
             chans.push(prepare_channel(
                 &self.cfg,
                 spec,
-                block_size,
-                &edges,
-                coef_start,
-                coef_end,
+                &axis,
                 &self.settings,
+                allocation,
             ));
         }
         let peak = chans
@@ -559,8 +679,98 @@ impl VendorEncoder {
             joint_stereo: joint,
             chans,
             min_gain: min_gain_for_peak(peak),
+            edges,
+            coef_start,
         }
     }
+}
+
+/// The election cost of a realised frame (see [`frame_cost`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FrameCost {
+    /// Reconstruction noise energy **above the masking threshold**,
+    /// summed over every coded channel and band — the audible part.
+    audible: f64,
+    /// Total reconstruction noise energy (the MSE).
+    mse: f64,
+}
+
+impl FrameCost {
+    /// The scalar the election minimises: the MSE, inflated by the
+    /// fraction of it that is audible — `mse · (1 + audible/mse)^γ`
+    /// with γ = [`AUDIBLE_FRACTION_EXPONENT`]. Two candidates whose
+    /// noise is all masked compare by plain MSE; a candidate with a
+    /// third of its noise above threshold must beat an all-masked
+    /// one by ≈ 2.5 dB of MSE to win.
+    fn scalar(&self) -> f64 {
+        if self.mse <= 0.0 {
+            return 0.0;
+        }
+        self.mse * (1.0 + self.audible / self.mse).powf(AUDIBLE_FRACTION_EXPONENT)
+    }
+
+    fn better_than(&self, other: &FrameCost) -> bool {
+        self.scalar() < other.scalar()
+    }
+}
+
+/// γ in the election scalar ([`FrameCost::scalar`]) — encoder
+/// tuning, chosen on the r457 rate-matched sweep so that the flat
+/// envelope keeps winning where it wins both SNR and noise-to-mask
+/// (≤ 64 kbps) and the shaped envelopes take over where audibility
+/// improves at a small SNR cost (128 kbps and above).
+const AUDIBLE_FRACTION_EXPONENT: f64 = 2.0;
+
+/// How far below the §4 Bark-spread masker curve the masking
+/// threshold sits, in dB (the masker-to-threshold offset the patent
+/// excerpt does not pin — encoder tuning; a single constant serves
+/// every band since only the audibility test uses it, the envelope
+/// shaping being relative).
+const MASKING_OFFSET_DB: f64 = 10.0;
+
+/// The election cost of a realised frame: over every coded channel
+/// and band the reconstruction noise (the decode composition on the
+/// coded axis, `q · w · step`, against the analysed spectrum) is
+/// split into the part above the band's masking threshold — the
+/// Bark-spread curve over the band energies at the patent slopes,
+/// [`MASKING_OFFSET_DB`] down — and the total; [`FrameCost::scalar`]
+/// folds the two into the number the election minimises.
+fn frame_cost(prepared: &[PreparedBlock], blocks: &[EncBlockData]) -> FrameCost {
+    let offset = 10f64.powf(-MASKING_OFFSET_DB / 10.0);
+    let mut cost = FrameCost {
+        audible: 0.0,
+        mse: 0.0,
+    };
+    for (prep, block) in prepared.iter().zip(blocks.iter()) {
+        let divisor = total_gain_multiplier(block.total_gain.max(1)) * ABS_SCALE;
+        for (chan, enc) in prep.chans.iter().zip(block.channels.iter()) {
+            let Some(chan) = chan else { continue };
+            let bands = prep.edges.len() - 1;
+            for b in 0..bands {
+                let lo = usize::from(prep.edges[b]).max(prep.coef_start) - prep.coef_start;
+                let hi = usize::from(prep.edges[b + 1])
+                    .min(prep.coef_start + chan.normalised.len())
+                    .saturating_sub(prep.coef_start);
+                if lo >= hi {
+                    continue;
+                }
+                let mut noise = 0.0;
+                for k in lo..hi {
+                    let q = if enc.coded {
+                        f64::from(enc.coefficients[k])
+                    } else {
+                        0.0
+                    };
+                    let err = (chan.normalised[k] - q * divisor) * chan.weights[k];
+                    noise += err * err;
+                }
+                let threshold = chan.band_threshold[b] * offset * (hi - lo) as f64;
+                cost.audible += (noise - threshold).max(0.0);
+                cost.mse += noise;
+            }
+        }
+    }
+    cost
 }
 
 /// The smallest gain in `[1, 250]` whose escape ceiling
@@ -590,6 +800,10 @@ struct PreparedBlock {
     /// block's peak |q| (the level literal is `w_lvl(g)` bits, so a
     /// finer gain must never push the peak past `2^w_lvl - 1`).
     min_gain: u32,
+    /// The block's exponent-band partition (bin edges).
+    edges: Vec<u16>,
+    /// First coded bin (§0.3).
+    coef_start: usize,
 }
 
 /// A channel with signal: its envelope and envelope-normalised
@@ -603,6 +817,12 @@ struct PreparedChannel {
     base_gain: u32,
     /// Peak |spec / w| over the coded axis.
     peak: f64,
+    /// The band weights on the coded axis (`w_band[k]`).
+    weights: Vec<f64>,
+    /// Per band, the masking-threshold power per coefficient (the
+    /// Bark-spread curve over the band energies, patent slopes) the
+    /// election cost divides the reconstruction noise by.
+    band_threshold: Vec<f64>,
 }
 
 /// The anchor exponent the loudest band sits at (inside both the
@@ -619,15 +839,28 @@ pub const ENVELOPE_ANCHOR: i32 = 40;
 /// few more bits instead of landing in the divergent region.
 pub const ENVELOPE_RANGE: i32 = 24;
 
+/// A block's coefficient axis: its size, exponent-band partition and
+/// coded range (§0.3).
+struct BlockAxis<'a> {
+    block_size: u16,
+    edges: &'a [u16],
+    coef_start: usize,
+    coef_end: usize,
+}
+
 fn prepare_channel(
     cfg: &StreamConfig,
     spec: &[f64],
-    block_size: u16,
-    edges: &[u16],
-    coef_start: usize,
-    coef_end: usize,
+    axis: &BlockAxis<'_>,
     settings: &EncoderSettings,
+    allocation: Allocation,
 ) -> Option<PreparedChannel> {
+    let BlockAxis {
+        block_size,
+        edges,
+        coef_start,
+        coef_end,
+    } = *axis;
     let target_peak_q = settings.target_peak_q;
     let anchor = settings.envelope_anchor;
     let range = settings.envelope_range;
@@ -649,16 +882,51 @@ fn prepare_channel(
         return None; // silent channel: F2 = 0
     }
 
-    // Exponents on the ladder's 1.25 dB/step scale, loudest band at
-    // the anchor, chain-clamped to the scale VLC's ±60 delta range
-    // (the ±60 clamp is vacuous inside [floor, anchor] but kept for
-    // the v1 base path, whose first exponent is clamped to the 5-bit
-    // field).
+    // The §4 masking curve over the band energies: every band's
+    // per-coefficient level (dB) spread across the Bark axis at the
+    // patent slopes, combined by maximum. Silent bands sit far below
+    // every masker.
+    let barks: Vec<f64> = (0..bands)
+        .map(|b| {
+            let centre = (f64::from(edges[b]) + f64::from(edges[b + 1])) / 2.0;
+            crate::masking::bark_from_hz(
+                centre * f64::from(cfg.sample_rate) / (2.0 * f64::from(block_size)),
+            )
+        })
+        .collect();
+    let levels: Vec<f64> = rms
+        .iter()
+        .map(|r| 20.0 * (r.max(rms_max * 1e-6)).log10())
+        .collect();
+    let curve =
+        crate::masking::spread_masking(&levels, &barks, crate::masking::SpreadingSlopes::PATENT);
+    let band_threshold: Vec<f64> = curve.iter().map(|m| 10f64.powf(m / 10.0)).collect();
+
+    // The per-band weight target the exponents follow (module docs
+    // and [`Allocation`]): band RMS, the masking curve partially
+    // whitened by β (energy weights 10^(m/10) raised to β, back in
+    // the amplitude domain: 10^(m·β/20)), or flat.
+    let target: Vec<f64> = match allocation {
+        Allocation::Rms => rms.clone(),
+        Allocation::Flat => vec![rms_max; bands],
+        Allocation::Masking { beta } => {
+            let beta = beta.clamp(0.0, 1.0);
+            curve.iter().map(|m| 10f64.powf(m * beta / 20.0)).collect()
+        }
+        Allocation::Adaptive => unreachable!("expanded to its candidates by the frame loop"),
+    };
+    let target_max = target.iter().cloned().fold(0.0, f64::max).max(1e-300);
+
+    // Exponents on the ladder's 1.25 dB/step scale, the loudest
+    // target at the anchor, chain-clamped to the scale VLC's ±60
+    // delta range (the ±60 clamp is vacuous inside [floor, anchor]
+    // but kept for the v1 base path, whose first exponent is clamped
+    // to the 5-bit field).
     let mut exponents = Vec::with_capacity(bands);
     let mut prev: Option<i32> = None;
-    for r in &rms {
-        let rel = if *r > 0.0 {
-            (16.0 * (r / rms_max).log10()).round() as i32
+    for (b, t) in target.iter().enumerate() {
+        let rel = if *t > 0.0 && rms[b] > 0.0 {
+            (16.0 * (t / target_max).log10()).round() as i32
         } else {
             -range
         };
@@ -682,6 +950,7 @@ fn prepare_channel(
     let normalised: Vec<f64> = (coef_start..coef_end)
         .map(|k| spec[k] / weights[k])
         .collect();
+    let weights: Vec<f64> = weights[coef_start..coef_end].to_vec();
 
     // Base gain: peak |q| ≈ target under the decode composition
     // |spec| = |q| · w · 10^((g − 64)/20) · |ABS_SCALE|.
@@ -697,13 +966,15 @@ fn prepare_channel(
         normalised,
         base_gain,
         peak,
+        weights,
+        band_threshold,
     })
 }
 
 /// Realise a prepared block at a gain offset: round the normalised
 /// spectra with the block's B1 gain, clamping |q| to the escape
 /// ceiling of the gain's level-width tier.
-fn realise_block(prep: &PreparedBlock, offset: i32) -> EncBlockData {
+fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockData {
     let base = prep
         .chans
         .iter()
@@ -729,8 +1000,9 @@ fn realise_block(prep: &PreparedBlock, offset: i32) -> EncBlockData {
                     .normalised
                     .iter()
                     .map(|v| {
-                        let q = (v / divisor).round() as i64;
-                        let q = q.clamp(-ceiling, ceiling) as i32;
+                        let x = v / divisor;
+                        let q = (x.abs() + 0.5 - dead_zone).floor().max(0.0) as i64;
+                        let q = q.min(ceiling) as i32 * if x < 0.0 { -1 } else { 1 };
                         any |= q != 0;
                         q
                     })
@@ -760,14 +1032,12 @@ fn realise_block(prep: &PreparedBlock, offset: i32) -> EncBlockData {
 }
 
 /// The all-uncoded fallback (rate control found nothing feasible).
-fn silent_block(prep: &PreparedBlock) -> EncBlockData {
+fn silent_block(size_index: u8, channels: usize) -> EncBlockData {
     EncBlockData {
-        size_index: prep.size_index,
+        size_index,
         joint_stereo: false,
         total_gain: 1,
-        channels: prep
-            .chans
-            .iter()
+        channels: (0..channels)
             .map(|_| EncChannelData {
                 coded: false,
                 envelope: None,

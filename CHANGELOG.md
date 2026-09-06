@@ -47,6 +47,39 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restricted to the stereo streams it could see. Vendor closure
   unchanged (1738/1763).
 
+### Changed
+
+- **Encoder allocation: per-frame election by a masking-aware cost
+  (r457)** — `EncoderSettings::allocation` (`Allocation::Adaptive`,
+  the default) rate-controls three envelopes per frame — flat, the
+  patent §4 Bark-spread masking curve half-whitened (β = 0.5) and in
+  full (β = 1) — and, on stereo streams under `StereoMode::Auto`,
+  both the independent and the mid/side realisation, all to the same
+  bit target, and keeps the candidate with the lowest
+  `mse · (1 + audible/mse)²` where `audible` is the reconstruction
+  noise above the masking threshold. `Allocation::Rms` (the r454
+  rule), `Masking { beta }` and `Flat` remain selectable. The
+  rate-matched measurement that shaped this (own chain, five catalogue
+  cells × four materials): at 16–64 kbps the **flat** envelope beats
+  both the RMS and the masking-shaped envelopes on SNR *and* on
+  noise-to-mask (mono 22.05 kHz / 16 kbps "varying": flat 17.7 dB /
+  NMR −10.4 vs masking-β0.7 14.5 / −7.7 vs RMS 10.8 / −6.3), because
+  shaping spends bits on masked bands and forces a coarser global
+  step; from 128 kbps, where the format's 9-bit peak ceiling binds,
+  shaping wins noise-to-mask (−28.7 vs −24.1 dB) at a small SNR cost.
+  The election tracks that crossover: against the r454 encoder on the
+  ladder it is +3–9 dB own-chain SNR on every cell (stereo 22.05 kHz /
+  32 kbps 21.0 → 30.6 dB on tones, 14.6 → 21.3 dB on modulated
+  material, 2.3 → 6.3 dB on wideband noise) at the same rate, with
+  the mid/side election adding 3–4 dB on correlated stereo over
+  either fixed mode.
+- **Quantiser dead zone** (`EncoderSettings::dead_zone`, default
+  0.2 steps): +0.5–1.3 dB at equal rate on every cell.
+- **Rate control**: the gain offset is bisected (finest realisation
+  that fits) against a reservoir-paced per-frame target (unspent
+  budget carries forward, a frame may borrow one average frame),
+  replacing the ±3/−4 walk; streams land at the nominal rate.
+
 ### Added
 
 - **Encoder ladder** (`tests/encoder_ladder.rs`): every encodable
