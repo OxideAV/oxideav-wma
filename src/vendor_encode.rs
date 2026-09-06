@@ -66,10 +66,8 @@
 use crate::bitio::{BitReader, BitWriter};
 use crate::header::Version;
 use crate::stream_config::StreamConfig;
-use crate::vendor_frame::{
-    escape_level_width, measured_noise_policy, NoiseGrid, NoiseSpec, ReuseRule,
-};
-use crate::wire_vlc::{coef_vlc, runlevel_index, scale_vlc};
+use crate::vendor_frame::{escape_level_width, measured_noise_policy, NoiseSpec, ReuseRule};
+use crate::wire_vlc::{coef_vlc, gain_vlc, runlevel_index, scale_vlc};
 
 /// A channel's envelope, encoder side. The §3.1 LSP form is absent
 /// by design (module docs).
@@ -85,15 +83,26 @@ pub enum EncEnvelope {
 }
 
 /// One channel's share of a block to emit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncChannelData {
     /// F2 — whether the channel codes anything this block.
     pub coded: bool,
     /// The envelope (required iff coded).
     pub envelope: Option<EncEnvelope>,
-    /// Quantised coefficients on the coded axis: exactly
-    /// `coef_end − coef_start` entries for a coded channel (entry `i`
-    /// is spectral bin `coef_start + i`), empty otherwise.
+    /// §2.1 F3 — one flag per band of the stream's noise walk for
+    /// this block size (`true` = noise-substituted), or empty for an
+    /// all-clear walk. Only meaningful on streams whose policy
+    /// enables the sub-stream; must be empty or exactly the walk's
+    /// length.
+    pub noise_flags: Vec<bool>,
+    /// §2.1 F4 — one gain per flagged band, in band order: the first
+    /// is sent absolutely (7 bits, `gain + 19` ∈ 0..=127), the rest
+    /// as VLC deltas from the previous (`−18..=18`).
+    pub noise_gains: Vec<i32>,
+    /// Quantised coefficients on the coded axis: `coef_end −
+    /// coef_start` entries for a coded channel (entry `i` is spectral
+    /// bin `coef_start + i`), **less the flagged bands' bins** (the
+    /// sub-stream skips them), empty for an uncoded channel.
     pub coefficients: Vec<i32>,
 }
 
@@ -115,6 +124,29 @@ pub struct EncBlockData {
 /// mutates — a failed frame leaves the writer untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitError {
+    /// A channel's `noise_flags` is neither empty nor the noise
+    /// walk's length for the block size (or is non-empty on a stream
+    /// whose policy carries no §2.1 sub-stream).
+    BadNoiseFlags {
+        /// Flags supplied.
+        got: usize,
+        /// Walk length (0 when the sub-stream is inactive).
+        expected: usize,
+    },
+    /// `noise_gains` does not hold one gain per flagged band.
+    BadNoiseGainCount {
+        /// Gains supplied.
+        got: usize,
+        /// Flagged bands.
+        expected: usize,
+    },
+    /// A §2.1 gain outside the wire's range: the first flagged band's
+    /// gain must fit the 7-bit absolute (`−19..=108`), every later one
+    /// must be within ±18 of its predecessor.
+    NoiseGainOutOfRange {
+        /// The offending gain.
+        gain: i32,
+    },
     /// The stream's `flags2` bit 0 is clear: the §3.1 LSP envelope
     /// conversion tables are a staged gap, so no envelope can be
     /// chosen (module docs).
@@ -205,6 +237,17 @@ pub enum EmitError {
 impl core::fmt::Display for EmitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            EmitError::BadNoiseFlags { got, expected } => write!(
+                f,
+                "oxideav-wma: {got} noise flags supplied, walk length {expected}"
+            ),
+            EmitError::BadNoiseGainCount { got, expected } => write!(
+                f,
+                "oxideav-wma: {got} noise gains supplied for {expected} flagged bands"
+            ),
+            EmitError::NoiseGainOutOfRange { gain } => {
+                write!(f, "oxideav-wma: noise gain {gain} outside the wire range")
+            }
             EmitError::LspPathUnsupported => f.write_str(
                 "oxideav-wma: flags2 bit 0 clear selects the LSP envelope path, \
                  whose conversion tables are a staged gap (not encodable)",
@@ -464,37 +507,70 @@ impl FrameEmitter {
         }
         out.write_bits(u64::from(rem), 7);
 
-        // F3 — noise-substitution band flags (hypothesis-gated, all
-        // channels' flags before all channels' gains; this encoder
-        // flags nothing, so no F4 gains follow). The walk mirrors
-        // the parser's exactly.
+        // F3/F4 — noise-substitution band flags and gains (policy
+        // gated; all channels' flags before all channels' gains). The
+        // walk mirrors the parser's exactly; a flagged band's bins
+        // leave the coefficient axis.
+        let mut noise_widths: Vec<u16> = vec![0; channels];
         if let Some(spec) = self.noise {
-            let walk_edges: Vec<u16> = match spec.grid {
-                NoiseGrid::ExponentBands => {
-                    crate::band_partition::exponent_band_edges(self.cfg.sample_rate, block_size)
+            let walk = crate::vendor_frame::noise_walk_bands_for(&self.cfg, block_size, &spec);
+            let walk_len = walk.len();
+            for (chi, ch) in block.channels.iter().enumerate() {
+                if !ch.coded {
+                    continue;
                 }
-                NoiseGrid::OctaveSubbands => {
-                    crate::vendor_frame::octave_noise_edges_for(self.cfg.sample_rate, block_size)
+                if !ch.noise_flags.is_empty() && ch.noise_flags.len() != walk_len {
+                    return Err(EmitError::BadNoiseFlags {
+                        got: ch.noise_flags.len(),
+                        expected: walk_len,
+                    });
                 }
-            };
-            let walk_count = walk_edges.len() - 1;
-            let coef_end = self.cfg.coef_end(block_size);
+                for (i, &(lo, hi)) in walk.iter().enumerate() {
+                    let flagged = ch.noise_flags.get(i).copied().unwrap_or(false);
+                    out.write_bit(flagged);
+                    if flagged {
+                        noise_widths[chi] += hi.saturating_sub(lo);
+                    }
+                }
+            }
             for ch in &block.channels {
                 if !ch.coded {
                     continue;
                 }
-                let mut band = crate::vendor_frame::noise_walk_start(
-                    &spec.start,
-                    &walk_edges,
-                    walk_count,
-                    block_size,
-                    self.cfg.sample_rate,
-                );
-                while band < walk_count && walk_edges[band] < coef_end {
-                    out.write_bit(false);
-                    band += 1;
+                let flagged = ch.noise_flags.iter().filter(|&&f| f).count();
+                if ch.noise_gains.len() != flagged {
+                    return Err(EmitError::BadNoiseGainCount {
+                        got: ch.noise_gains.len(),
+                        expected: flagged,
+                    });
+                }
+                let mut prev: Option<i32> = None;
+                for &gain in &ch.noise_gains {
+                    match prev {
+                        None => {
+                            let field = gain + 19;
+                            if !(0..=127).contains(&field) {
+                                return Err(EmitError::NoiseGainOutOfRange { gain });
+                            }
+                            out.write_bits(field as u64, 7);
+                        }
+                        Some(p) => {
+                            let delta = gain - p;
+                            if !(-18..=18).contains(&delta) {
+                                return Err(EmitError::NoiseGainOutOfRange { gain });
+                            }
+                            let ok = gain_vlc().encode_symbol((delta + 18) as usize, out);
+                            debug_assert!(ok, "symbol {} in the 37-entry table", delta + 18);
+                        }
+                    }
+                    prev = Some(gain);
                 }
             }
+        } else if let Some(ch) = block.channels.iter().find(|c| !c.noise_flags.is_empty()) {
+            return Err(EmitError::BadNoiseFlags {
+                got: ch.noise_flags.len(),
+                expected: 0,
+            });
         }
 
         // B2 — the vendor-measured per-block reuse bit
@@ -581,10 +657,11 @@ impl FrameEmitter {
                 }
                 continue;
             }
-            if ch.coefficients.len() != usize::from(n_coef) {
+            let expected = n_coef - noise_widths[chi];
+            if ch.coefficients.len() != usize::from(expected) {
                 return Err(EmitError::WrongCoefficientCount {
                     got: ch.coefficients.len(),
-                    expected: n_coef,
+                    expected,
                 });
             }
             let alt = block.joint_stereo && chi == 1;
@@ -981,6 +1058,8 @@ mod tests {
         EncChannelData {
             coded: true,
             envelope: Some(envelope),
+            noise_flags: Vec::new(),
+            noise_gains: Vec::new(),
             coefficients,
         }
     }
@@ -1206,6 +1285,8 @@ mod tests {
         let uncoded = EncChannelData {
             coded: false,
             envelope: None,
+            noise_flags: Vec::new(),
+            noise_gains: Vec::new(),
             coefficients: Vec::new(),
         };
         let tiny = vec![EncBlockData {
@@ -1292,6 +1373,8 @@ mod tests {
         let mk = |coeffs: Vec<i32>| EncChannelData {
             coded: true,
             envelope: Some(flat_envelope(&cfg, bs)),
+            noise_flags: Vec::new(),
+            noise_gains: Vec::new(),
             coefficients: coeffs,
         };
         let block = EncBlockData {
@@ -1421,5 +1504,156 @@ mod tests {
             w.write_frame(&frame, Some(0)).unwrap();
             assert_eq!(w.position() - before, trial, "frame {f}");
         }
+    }
+    #[test]
+    fn noise_flags_and_gains_round_trip_through_the_parser() {
+        // Mono 22.05 kHz at 2003 B/s: the measured policy walks the
+        // 1024-block's bands [716, 884) and [884, 932).
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        // The first walked band starts at the cutoff bin rounded up,
+        // inside the containing band (7700 Hz -> 715.2 -> 716, the
+        // band edge here; 357.6 -> 358 on 512-blocks).
+        let walk = crate::vendor_frame::noise_walk_bands(&cfg, 1024);
+        assert_eq!(walk, vec![(716, 884), (884, 932)]);
+        assert_eq!(
+            crate::vendor_frame::noise_walk_bands(&cfg, 512),
+            vec![(358, 440), (440, 466)]
+        );
+        let bands = crate::band_partition::exponent_band_count(22_050, 1024);
+        let mut coefficients = vec![0i32; 932 - (884 - 716)];
+        coefficients[10] = 3;
+        coefficients[700] = -2;
+        let block = EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 70,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Exponents(vec![40; bands])),
+                noise_flags: vec![true, false],
+                noise_gains: vec![25],
+                coefficients: coefficients.clone(),
+            }],
+        };
+        let mut emitter = FrameEmitter::new(&cfg).unwrap();
+        let mut out = BitWriter::new();
+        emitter.emit_frame(&mut out, 0, &[block], Some(0)).unwrap();
+        let bit_len = out.bit_len();
+        let bytes = out.into_bytes();
+        let mut parser = crate::vendor_frame::FrameParser::new(&cfg, &[0]);
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        let frame = parser.parse_frame(&mut r).unwrap();
+        assert_eq!(r.position(), bit_len);
+        let ch = &frame.blocks[0].channels[0];
+        assert_eq!(ch.noise_flags, vec![true, false]);
+        assert_eq!(ch.noise_gains, vec![25]);
+        assert_eq!(ch.coefficients, coefficients);
+
+        // Both bands flagged, chained gains.
+        let block = EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 70,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Exponents(vec![40; bands])),
+                noise_flags: vec![true, true],
+                noise_gains: vec![-19, -1],
+                coefficients: vec![0; 716],
+            }],
+        };
+        let mut out = BitWriter::new();
+        FrameEmitter::new(&cfg)
+            .unwrap()
+            .emit_frame(&mut out, 0, &[block], Some(0))
+            .unwrap();
+        let bit_len = out.bit_len();
+        let bytes = out.into_bytes();
+        let mut r = BitReader::with_bit_len(&bytes, bit_len);
+        let frame = crate::vendor_frame::FrameParser::new(&cfg, &[0])
+            .parse_frame(&mut r)
+            .unwrap();
+        assert_eq!(frame.blocks[0].channels[0].noise_gains, vec![-19, -1]);
+        assert_eq!(frame.blocks[0].channels[0].coefficients.len(), 716);
+    }
+
+    #[test]
+    fn noise_sub_stream_misuse_is_a_typed_error() {
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        let bands = crate::band_partition::exponent_band_count(22_050, 1024);
+        let mk = |flags: Vec<bool>, gains: Vec<i32>, n: usize| EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 70,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Exponents(vec![40; bands])),
+                noise_flags: flags,
+                noise_gains: gains,
+                coefficients: vec![0; n],
+            }],
+        };
+        let emit = |b: EncBlockData| {
+            let mut out = BitWriter::new();
+            FrameEmitter::new(&cfg)
+                .unwrap()
+                .emit_frame(&mut out, 0, &[b], Some(0))
+        };
+        assert_eq!(
+            emit(mk(vec![true], vec![10], 764)),
+            Err(EmitError::BadNoiseFlags {
+                got: 1,
+                expected: 2
+            })
+        );
+        assert_eq!(
+            emit(mk(vec![true, true], vec![10], 716)),
+            Err(EmitError::BadNoiseGainCount {
+                got: 1,
+                expected: 2
+            })
+        );
+        assert_eq!(
+            emit(mk(vec![true, false], vec![120], 764)),
+            Err(EmitError::NoiseGainOutOfRange { gain: 120 })
+        );
+        assert_eq!(
+            emit(mk(vec![true, true], vec![10, 40], 716)),
+            Err(EmitError::NoiseGainOutOfRange { gain: 40 })
+        );
+        // Wrong coefficient count for the flagged axis ([716, 884)
+        // leaves: 932 - 168).
+        assert_eq!(
+            emit(mk(vec![true, false], vec![10], 932)),
+            Err(EmitError::WrongCoefficientCount {
+                got: 932,
+                expected: 764
+            })
+        );
+        // No sub-stream on a 44.1 kHz high-rate stream: flags refused.
+        let off = StreamConfig::derive(Version::V2, 44_100, 1, 8005, 744, 0x000f).unwrap();
+        let bands = crate::band_partition::exponent_band_count(44_100, 2048);
+        let mut out = BitWriter::new();
+        let b = EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 70,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Exponents(vec![40; bands])),
+                noise_flags: vec![true],
+                noise_gains: vec![10],
+                coefficients: vec![0; 1864],
+            }],
+        };
+        assert_eq!(
+            FrameEmitter::new(&off)
+                .unwrap()
+                .emit_frame(&mut out, 0, &[b], Some(0)),
+            Err(EmitError::BadNoiseFlags {
+                got: 1,
+                expected: 0
+            })
+        );
     }
 }

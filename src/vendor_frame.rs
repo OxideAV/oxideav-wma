@@ -620,35 +620,17 @@ impl FrameParser {
         let mut noise_gains: Vec<Vec<i32>> = vec![Vec::new(); channels];
         let mut noise_widths: Vec<u16> = vec![0; channels];
         if let Some(spec) = self.noise {
-            let octave_edges: Vec<u16>;
-            let (walk_edges, walk_count): (&[u16], usize) = match spec.grid {
-                NoiseGrid::ExponentBands => (&edges, band_count),
-                NoiseGrid::OctaveSubbands => {
-                    octave_edges = octave_noise_edges(self.cfg.sample_rate, block_size);
-                    let n = octave_edges.len() - 1;
-                    (&octave_edges, n)
-                }
-            };
+            let walk = noise_walk_bands_for(&self.cfg, block_size, &spec);
             for ch in 0..channels {
                 if !coded[ch] {
                     continue;
                 }
-                let mut band = noise_walk_start(
-                    &spec.start,
-                    walk_edges,
-                    walk_count,
-                    block_size,
-                    self.cfg.sample_rate,
-                );
-                while band < walk_count && walk_edges[band] < coef_end {
+                for &(lo, hi) in &walk {
                     let flagged = reader.read_bit()?;
                     if flagged {
-                        let lo = walk_edges[band].max(coef_start);
-                        let hi = walk_edges[band + 1].min(coef_end);
                         noise_widths[ch] += hi.saturating_sub(lo);
                     }
                     noise_flags[ch].push(flagged);
-                    band += 1;
                 }
             }
             for ch in 0..channels {
@@ -896,8 +878,11 @@ pub fn measured_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule
 
 /// The per-size start-edge overrides the 22.05 kHz 7700 Hz cutoff
 /// carries (see [`NoiseStart::CutoffHzWithOverrides`]): the
-/// 256-coefficient block starts one band below the cutoff rule's
-/// answer, the r454 vendor-stream-validated reading.
+/// 256-coefficient block (a staged hard-table partition) starts at
+/// the band edge one band below the cutoff rule's answer and walks
+/// three bands, the r454 vendor-stream-validated reading — the
+/// vendor mono 22.05 kHz stream closes 103/122 §1 boundaries with
+/// it and 66/122 under the cutoff-bin rule.
 pub const MEASURED_NOISE_START_OVERRIDES_22050: [(u16, u16); 1] = [(256, 148)];
 
 /// The measured §2.1 enable threshold on the §0 rate float at 44.1
@@ -905,9 +890,91 @@ pub const MEASURED_NOISE_START_OVERRIDES_22050: [(u16, u16); 1] = [(256, 148)];
 /// [`measured_noise_policy`]).
 pub const NOISE_ENABLE_HIGH_RATE_THRESHOLD: f32 = 0.6;
 
-/// Crate-internal accessor for the emitter mirror.
-pub(crate) fn octave_noise_edges_for(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {
-    octave_noise_edges(sample_rate, block_coefficients)
+/// The §2.1 noise walk of a block under the stream's measured policy:
+/// the walked bands as `(lo, hi)` bin ranges clipped to the coded
+/// range, in walk order — one F3 flag each ([`measured_noise_policy`],
+/// [`NoiseStart`]); empty when the configuration carries no
+/// sub-stream. This is the band list an encoder chooses substitution
+/// over and the emitter expects `noise_flags` to be indexed by.
+pub fn noise_walk_bands(cfg: &StreamConfig, block_size: u16) -> Vec<(u16, u16)> {
+    let Some((spec, _)) = measured_noise_policy(cfg) else {
+        return Vec::new();
+    };
+    noise_walk_bands_for(cfg, block_size, &spec)
+}
+
+/// [`noise_walk_bands`] under an explicit [`NoiseSpec`].
+///
+/// For the cutoff-frequency starts the **first** walked band begins
+/// at the cutoff bin rounded **up** (`ceil(f · 2M / sample_rate)`),
+/// held inside the partition band that contains the
+/// rounded-to-four bin — one or two bins above the band edge where
+/// the cutoff falls inside a band (358 instead of 356 for 512-sample
+/// blocks at 22.05 kHz; 716 = the edge for 1024). Measured on the
+/// vendor mono 22.05 kHz stream, the only vendor stream carrying the
+/// sub-stream: 103/122 §1 boundaries close under this reading, 97
+/// with the plain band edge, 94 rounding to nearest, 90 one bin
+/// lower (`tests/vendor_streams.rs`). The width of a flagged band is
+/// what leaves the coefficient axis, so these bins decide whether a
+/// flagged block parses. The black-box reference decoder reads a
+/// flagged axis **one coefficient shorter** than this at every block
+/// size probed (22.05 / 32 / 44.1 / 48 / 16 kHz — it rejects the
+/// last index), a divergence from the vendor stream that the encoder
+/// sidesteps by never coding that index (`vendor_analysis`).
+pub fn noise_walk_bands_for(
+    cfg: &StreamConfig,
+    block_size: u16,
+    spec: &NoiseSpec,
+) -> Vec<(u16, u16)> {
+    let walk_edges: Vec<u16> = match spec.grid {
+        NoiseGrid::ExponentBands => {
+            crate::band_partition::exponent_band_edges(cfg.sample_rate, block_size)
+        }
+        NoiseGrid::OctaveSubbands => octave_noise_edges(cfg.sample_rate, block_size),
+    };
+    let walk_count = walk_edges.len() - 1;
+    let coef_start = cfg.coef_start(block_size);
+    let coef_end = cfg.coef_end(block_size);
+    let start = noise_walk_start(
+        &spec.start,
+        &walk_edges,
+        walk_count,
+        block_size,
+        cfg.sample_rate,
+    );
+    let first_lo: Option<u16> = match spec.start {
+        NoiseStart::CutoffHz(f) => Some(cutoff_bin(f, block_size, cfg.sample_rate)),
+        NoiseStart::CutoffHzWithOverrides(f, overrides)
+            if !overrides.iter().any(|&(bs, _)| bs == block_size) =>
+        {
+            Some(cutoff_bin(f, block_size, cfg.sample_rate))
+        }
+        _ => None,
+    };
+    (start..walk_count)
+        .take_while(|&b| walk_edges[b] < coef_end)
+        .map(|b| {
+            let mut lo = walk_edges[b].max(coef_start);
+            if b == start {
+                if let Some(c) = first_lo {
+                    // Inside the start band: the cutoff bin rounded
+                    // up, never below the band's own edge.
+                    lo = c.clamp(lo, walk_edges[b + 1]);
+                }
+            }
+            let hi = walk_edges[b + 1].min(coef_end).max(lo);
+            (lo, hi)
+        })
+        .collect()
+}
+
+/// The cutoff bin of a cutoff frequency for a block size: the
+/// rounded `f · 2M / sample_rate` (the vendor mono 22.05 kHz stream
+/// closes 103/122 §1 boundaries with rounding, 99 with truncation,
+/// 97 with the band edge).
+fn cutoff_bin(f: u32, block_size: u16, sample_rate: u32) -> u16 {
+    let bin = f64::from(f) * 2.0 * f64::from(block_size) / f64::from(sample_rate.max(1));
+    bin.ceil() as u16
 }
 
 pub(crate) fn octave_noise_edges(sample_rate: u32, block_coefficients: u16) -> Vec<u16> {

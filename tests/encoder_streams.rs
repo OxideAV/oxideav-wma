@@ -28,7 +28,7 @@
 mod common;
 
 use common::{
-    decode_own, fit, material, reference_available, reference_decode, snr_at_lead, wav_wrap,
+    decode_own, fit, hiss, material, reference_available, reference_decode, snr_at_lead, wav_wrap,
 };
 use oxideav_wma::header::Version;
 use oxideav_wma::stream_config::StreamConfig;
@@ -44,6 +44,11 @@ struct Family {
     own_floor: f64,
     /// Black-box reference SNR floor, dB.
     reference_floor: f64,
+    /// Level of a white hiss mixed into the material (0 = none) — the
+    /// §2.1 noise-substitution exercise: at 16 kbps the hiss above
+    /// the cutoff quantises to nothing and travels as F3/F4 noise
+    /// bands, which the reference must accept.
+    hiss: f64,
 }
 
 fn families() -> Vec<Family> {
@@ -62,6 +67,7 @@ fn families() -> Vec<Family> {
             extradata: *b"\x00\x04\x00\x00\x01\x00\xba\x00\x00\x00",
             own_floor: 5.0,
             reference_floor: 12.0,
+            hiss: 0.0,
         },
         Family {
             // The staged cand_stereo22k geometry: stereo VBL + reservoir.
@@ -70,6 +76,7 @@ fn families() -> Vec<Family> {
             extradata: mk_extra(0x0017),
             own_floor: 8.0,
             reference_floor: 12.0,
+            hiss: 0.0,
         },
         Family {
             // The staged cand_mono22k geometry: mono VBL + reservoir.
@@ -78,6 +85,17 @@ fn families() -> Vec<Family> {
             extradata: mk_extra(0x000f),
             own_floor: 6.0,
             reference_floor: 11.0,
+            hiss: 0.0,
+        },
+        Family {
+            // The mono 22.05 kHz geometry again, with a hiss: noise
+            // substitution on the encode side.
+            name: "mono22k_16kbps_hiss",
+            cfg: StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap(),
+            extradata: mk_extra(0x000f),
+            own_floor: 6.0,
+            reference_floor: 11.0,
+            hiss: 0.01,
         },
         Family {
             // The staged cand_wmp12 geometry: stereo 44.1 kHz 96 kbps.
@@ -86,6 +104,7 @@ fn families() -> Vec<Family> {
             extradata: mk_extra(0x000f),
             own_floor: 14.0,
             reference_floor: 12.0,
+            hiss: 0.0,
         },
     ]
 }
@@ -99,7 +118,12 @@ fn encode_family(fam: &Family, pcm: &[Vec<f64>]) -> Vec<Vec<u8>> {
 fn family_pcm(fam: &Family) -> Vec<Vec<f64>> {
     let sr = fam.cfg.sample_rate;
     let len = (sr as usize) * 3;
-    let left = material(sr, len, 1);
+    let mut left = material(sr, len, 1);
+    if fam.hiss > 0.0 {
+        for (v, h) in left.iter_mut().zip(hiss(len, 7)) {
+            *v += fam.hiss * h;
+        }
+    }
     if fam.cfg.channels == 2 {
         let right: Vec<f64> = material(sr, len, 2)
             .iter()

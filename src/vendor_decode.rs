@@ -132,6 +132,45 @@ pub struct BlockSynth {
     /// stores the reuse state per block-size index (`ctx+0x24c`), so
     /// the cache is keyed the same way.
     env_cache: Vec<Vec<Option<Vec<i32>>>>,
+    /// The §2.1 noise generator's state (module docs).
+    noise_state: u64,
+    /// Whether zero-quantised bins of coded channels are noise-filled
+    /// at the reference's measured floor ([`ZERO_FILL_RMS_STEPS`]).
+    zero_fill_noise: bool,
+}
+
+/// The black-box-measured **zero-coefficient noise floor** of the
+/// reference decoder (r457): with every coefficient zero and no §2.1
+/// flags, every bin of a coded channel's coded range still comes out
+/// as white noise at a per-coefficient RMS of `0.4 · step`, where
+/// `step = w_band · 10^((g − 64)/20) · |ABS_SCALE|` is the value of a
+/// coefficient quantised to 1 (0.0006 / 0.006 / 0.06 at g = 60 / 80 /
+/// 100, following the band exponents at the ladder ratio). A §2.1
+/// flagged band replaces it with its F4-gain level
+/// ([`noise_band_rms`]). None of the staged material describes this
+/// floor, so [`BlockSynth`] leaves it **off** by default and offers it
+/// through [`BlockSynth::with_zero_fill_noise`]; its level relative to
+/// the smallest coded coefficient (−8 dB) makes it invisible in the
+/// SNR figures the crate reports (the ladder's own-chain and
+/// reference SNRs agree within 0.2 dB either way).
+pub const ZERO_FILL_RMS_STEPS: f64 = 0.4;
+
+/// The §2.1 noise-substitution level law, black-box measured (r457)
+/// by emitting crafted frames through this crate's own emitter and
+/// measuring the reference decoder's output spectrum in the flagged
+/// bands: white noise at a per-coefficient RMS of
+/// `10^((G − 64)/20) · w_band · |ABS_SCALE|` — the F4 gain `G` plays
+/// exactly the total gain's role ([`total_gain_multiplier`]) on a
+/// unit-RMS generator (1 dB per gain step: 0.0001 → 0.0003 → 0.001 →
+/// 0.003 → 0.03 across G = 10 / 20 / 30 / 40 / 60), the band weight
+/// follows the band's exponent at the ladder's 1.25 dB/step, and the
+/// level is independent of the block's total gain and of the coded
+/// coefficients. Each flagged band carries its own gain (the F4
+/// chain). The vendor generator's sequence is unstaged; this crate
+/// uses its own uniform generator, so substituted bands match the
+/// reference in level and spectral shape, not sample for sample.
+pub fn noise_band_rms(gain: i32, band_weight: f64) -> f64 {
+    10f64.powf(f64::from(gain - 64) / 20.0) * band_weight * ABS_SCALE.abs()
 }
 
 /// Number of per-channel envelope-cache slots (block-size indices
@@ -149,7 +188,30 @@ impl BlockSynth {
             pos: 0,
             prev_size: None,
             env_cache: vec![vec![None; ENV_CACHE_SLOTS]; channels],
+            noise_state: 0x9E37_79B9_7F4A_7C15,
+            zero_fill_noise: false,
         }
+    }
+
+    /// Fill zero-quantised bins of coded channels with noise at the
+    /// reference's measured floor ([`ZERO_FILL_RMS_STEPS`]).
+    pub fn with_zero_fill_noise(mut self, on: bool) -> Self {
+        self.zero_fill_noise = on;
+        self
+    }
+
+    /// One unit-variance pseudo-random sample (uniform on ±√3;
+    /// xorshift64* — a generator of this crate's own, see
+    /// [`noise_band_rms`]).
+    fn noise_sample(&mut self) -> f64 {
+        let mut x = self.noise_state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.noise_state = x;
+        let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
+        let u = r as f64 / (1u64 << 53) as f64; // [0, 1)
+        (2.0 * u - 1.0) * 3f64.sqrt()
     }
 
     /// Reset the overlap state (stream discontinuity). The emission
@@ -293,17 +355,20 @@ impl BlockSynth {
             // §2.1: a noise-substituted band contributes no coded
             // coefficients — the coefficient sub-stream skips its
             // bins. Rebuild that mapping when the block carries
-            // noise flags (the parser's default measured policy).
-            // The substituted bands themselves stay zero: the vendor
-            // noise generator is unstaged (the F4 gains are parsed
-            // and carried, but synthesising vendor-shaped noise from
-            // them is an open ask), and zero-fill is the
-            // conservative reconstruction.
+            // noise flags (the parser's default measured policy), and
+            // fill the substituted bands with noise at the measured
+            // level law ([`noise_band_rms`]), one F4 gain per band.
             let excluded: Vec<(u16, u16)> = if chan.noise_flags.iter().any(|&f| f) {
                 noise_excluded_ranges(&self.cfg, block, &chan.noise_flags)
             } else {
                 Vec::new()
             };
+            for (&(lo, hi), &gain) in excluded.iter().zip(chan.noise_gains.iter()) {
+                for k in usize::from(lo)..usize::from(hi).min(m) {
+                    let rms = noise_band_rms(gain, weights[k]);
+                    spec[ch][k] = self.noise_sample() * rms;
+                }
+            }
             let coef_end = usize::from(self.cfg.coef_end(block.block_size));
             let mut k = coef_start;
             for &q in chan.coefficients.iter() {
@@ -318,6 +383,9 @@ impl BlockSynth {
                 }
                 if q != 0 {
                     spec[ch][k] = f64::from(q) * weights[k] * gain;
+                } else if self.zero_fill_noise {
+                    spec[ch][k] =
+                        self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs();
                 }
                 k += 1;
             }
@@ -350,37 +418,12 @@ fn noise_excluded_ranges(
     let Some((spec, _)) = crate::vendor_frame::measured_noise_policy(cfg) else {
         return Vec::new();
     };
-    let walk_edges = match spec.grid {
-        crate::vendor_frame::NoiseGrid::ExponentBands => {
-            crate::band_partition::exponent_band_edges(cfg.sample_rate, block.block_size)
-        }
-        crate::vendor_frame::NoiseGrid::OctaveSubbands => {
-            crate::vendor_frame::octave_noise_edges_for(cfg.sample_rate, block.block_size)
-        }
-    };
-    let walk_count = walk_edges.len() - 1;
-    let start = crate::vendor_frame::noise_walk_start(
-        &spec.start,
-        &walk_edges,
-        walk_count,
-        block.block_size,
-        cfg.sample_rate,
-    );
-    let coef_start = cfg.coef_start(block.block_size);
-    let coef_end = cfg.coef_end(block.block_size);
-    flags
-        .iter()
-        .enumerate()
-        .filter(|&(_, &f)| f)
-        .filter_map(|(i, _)| {
-            let band = start + i;
-            if band >= walk_count {
-                return None;
-            }
-            let lo = walk_edges[band].max(coef_start);
-            let hi = walk_edges[band + 1].min(coef_end);
-            (lo < hi).then_some((lo, hi))
-        })
+    crate::vendor_frame::noise_walk_bands_for(cfg, block.block_size, &spec)
+        .into_iter()
+        .zip(flags.iter())
+        .filter(|(_, &f)| f)
+        .map(|(range, _)| range)
+        .filter(|&(lo, hi)| lo < hi)
         .collect()
 }
 
@@ -757,5 +800,85 @@ mod tests {
         for (i, &s) in envelope_sum.iter().enumerate().take(5120).skip(1024) {
             assert!((s - 1.0).abs() < 1e-12, "abs={i}: envelope {s}");
         }
+    }
+    /// A flagged band at gain G carries the energy of `q = 1`
+    /// coefficients decoded at total gain G (the measured level law,
+    /// [`noise_band_rms`]): the time-domain energy of a stream of
+    /// noise-substituted blocks matches that of the coded twin within
+    /// the generator's statistical spread.
+    #[test]
+    fn flagged_band_energy_matches_a_unit_coded_band_at_the_same_gain() {
+        use crate::vendor_frame::{ChannelBlock, ParsedBlock};
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        let bands = crate::band_partition::exponent_band_count(22_050, 1024);
+        let g = 30i32;
+        let energy = |flagged: bool| -> f64 {
+            let mut synth = BlockSynth::new(&cfg);
+            let mut acc = 0.0;
+            for _ in 0..64 {
+                let (flags, gains, coefficients, total_gain) = if flagged {
+                    (vec![true, true], vec![g, g], vec![0i32; 716], 100)
+                } else {
+                    // The twin: q = 1 on every bin of the two walk bands
+                    // ([716, 932)), zero elsewhere, decoded at total gain g.
+                    let mut c = vec![0i32; 932];
+                    for v in &mut c[716..932] {
+                        *v = 1;
+                    }
+                    (Vec::new(), Vec::new(), c, g as u32)
+                };
+                let block = ParsedBlock {
+                    block_size: 1024,
+                    size_index: 0,
+                    prev_size: Some(1024),
+                    next_size: Some(1024),
+                    joint_stereo: false,
+                    total_gain,
+                    n_coef: 932,
+                    channels: vec![ChannelBlock {
+                        coded: true,
+                        envelope: Some(Envelope::Exponents(vec![40; bands])),
+                        noise_flags: flags,
+                        noise_gains: gains,
+                        coefficients,
+                    }],
+                };
+                let out = synth.block(&block);
+                acc += out[0].iter().map(|v| v * v).sum::<f64>();
+            }
+            acc
+        };
+        let (noise, coded) = (energy(true), energy(false));
+        assert!(noise > 0.0 && coded > 0.0);
+        let ratio = noise / coded;
+        assert!(
+            (0.8..1.25).contains(&ratio),
+            "flagged/coded energy ratio {ratio:.3}"
+        );
+        // Ten gain steps up = +10 dB.
+        let mut synth = BlockSynth::new(&cfg);
+        let mut acc = 0.0;
+        for _ in 0..64 {
+            let block = ParsedBlock {
+                block_size: 1024,
+                size_index: 0,
+                prev_size: Some(1024),
+                next_size: Some(1024),
+                joint_stereo: false,
+                total_gain: 100,
+                n_coef: 932,
+                channels: vec![ChannelBlock {
+                    coded: true,
+                    envelope: Some(Envelope::Exponents(vec![40; bands])),
+                    noise_flags: vec![true, true],
+                    noise_gains: vec![g + 10, g + 10],
+                    coefficients: vec![0; 716],
+                }],
+            };
+            let out = synth.block(&block);
+            acc += out[0].iter().map(|v| v * v).sum::<f64>();
+        }
+        let db = 10.0 * (acc / noise).log10();
+        assert!((9.0..11.0).contains(&db), "+10 gain steps = {db:.2} dB");
     }
 }

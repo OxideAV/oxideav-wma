@@ -153,6 +153,18 @@ pub struct EncoderSettings {
     pub noise: NoisePolicy,
     /// Envelope / bit-allocation rule.
     pub allocation: Allocation,
+    /// §2.1 noise substitution on the encode side: on streams whose
+    /// policy carries the sub-stream, a walk band is flagged and sent
+    /// as its F4 gain (the measured level law,
+    /// [`crate::vendor_decode::noise_band_rms`], inverted on the
+    /// band's RMS) whenever coding it at the elected step would
+    /// recover less than three quarters of its energy — a spectral
+    /// hole, or a few isolated ±1s standing in for noise — so the
+    /// decoder fills it with noise at the right level; the flagged
+    /// bins leave the coefficient axis, which is bits saved. Bands
+    /// whose coefficients carry their energy (tonal content) are
+    /// coded.
+    pub noise_substitution: bool,
     /// Quantiser dead zone: the rounding threshold offset in steps,
     /// `0.0` = round-to-nearest, `0.5` = truncate toward zero.
     /// Values around 0.15–0.25 are the usual rate–distortion sweet
@@ -182,6 +194,7 @@ impl Default for EncoderSettings {
         Self {
             noise: NoisePolicy::Measured,
             allocation: Allocation::default(),
+            noise_substitution: true,
             dead_zone: DEFAULT_DEAD_ZONE,
             stereo: StereoMode::Auto,
             blocks: BlockPolicy::Auto,
@@ -259,6 +272,9 @@ pub struct VendorEncoder {
     prev_block_size: Option<u16>,
     /// Per-frame average bit budget from the container bitrate.
     target_frame_bits: u64,
+    /// The §2.1 sub-stream the emitter carries (`None` = inactive),
+    /// for the noise-band election.
+    noise_spec: Option<NoiseSpec>,
 }
 
 impl VendorEncoder {
@@ -303,12 +319,18 @@ impl VendorEncoder {
             }
             BlockPolicy::Auto => {}
         }
-        let writer = match settings.noise {
-            NoisePolicy::Measured => VendorBitWriter::new(cfg)?,
-            NoisePolicy::Off => VendorBitWriter::new(cfg)?.without_noise(),
-            NoisePolicy::Spec(spec, reuse) => VendorBitWriter::new(cfg)?
-                .with_noise(spec)
-                .with_reuse(reuse),
+        let (writer, noise_spec) = match settings.noise {
+            NoisePolicy::Measured => (
+                VendorBitWriter::new(cfg)?,
+                crate::vendor_frame::measured_noise_policy(cfg).map(|(spec, _)| spec),
+            ),
+            NoisePolicy::Off => (VendorBitWriter::new(cfg)?.without_noise(), None),
+            NoisePolicy::Spec(spec, reuse) => (
+                VendorBitWriter::new(cfg)?
+                    .with_noise(spec)
+                    .with_reuse(reuse),
+                Some(spec),
+            ),
         };
         let target_frame_bits =
             (u64::from(cfg.avg_bytes_per_sec) * 8 * u64::from(cfg.frame_length))
@@ -323,6 +345,7 @@ impl VendorEncoder {
             encoded_frames: 0,
             prev_block_size: None,
             target_frame_bits,
+            noise_spec,
         })
     }
 
@@ -674,6 +697,7 @@ impl VendorEncoder {
             .flatten()
             .map(|c| c.peak)
             .fold(0.0f64, f64::max);
+        let walk = self.noise_walk(block_size, &edges, coef_start, coef_end);
         PreparedBlock {
             size_index,
             joint_stereo: joint,
@@ -681,9 +705,46 @@ impl VendorEncoder {
             min_gain: min_gain_for_peak(peak),
             edges,
             coef_start,
+            walk,
         }
     }
+
+    /// The §2.1 walk of a block — the bands the encoder may
+    /// substitute, `(lo, hi)` on the coded axis — when the stream
+    /// carries the sub-stream and the setting is on.
+    fn noise_walk(
+        &self,
+        block_size: u16,
+        _edges: &[u16],
+        coef_start: usize,
+        _coef_end: usize,
+    ) -> Option<Vec<(usize, usize)>> {
+        if !self.settings.noise_substitution {
+            return None;
+        }
+        let spec = self.noise_spec?;
+        Some(
+            crate::vendor_frame::noise_walk_bands_for(&self.cfg, block_size, &spec)
+                .into_iter()
+                .map(|(lo, hi)| {
+                    (
+                        usize::from(lo).max(coef_start) - coef_start,
+                        usize::from(hi).max(coef_start) - coef_start,
+                    )
+                })
+                .collect(),
+        )
+    }
 }
+
+/// How a noise-substituted band counts in the election cost, as a
+/// fraction of its signal energy (encoder tuning): the decoder fills
+/// it with noise at the right level, which is neither a hole (1.0)
+/// nor a faithful reconstruction (0.0). The same figure is the
+/// substitution threshold: a walk band whose coded reconstruction
+/// leaves more than this fraction of its energy as error is
+/// substituted.
+const SUBSTITUTION_ERROR_WEIGHT: f64 = 0.25;
 
 /// The election cost of a realised frame (see [`frame_cost`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -745,6 +806,34 @@ fn frame_cost(prepared: &[PreparedBlock], blocks: &[EncBlockData]) -> FrameCost 
         let divisor = total_gain_multiplier(block.total_gain.max(1)) * ABS_SCALE;
         for (chan, enc) in prep.chans.iter().zip(block.channels.iter()) {
             let Some(chan) = chan else { continue };
+            // The coded axis with the substituted bins restored as
+            // `None` (the emitted coefficient vector skips them).
+            let coded_axis: Option<Vec<Option<i32>>> = enc.coded.then(|| {
+                let n = chan.normalised.len();
+                let mut axis = vec![Some(0i32); n];
+                let mut src = enc.coefficients.iter();
+                let mut k = 0usize;
+                if let Some(walk) = prep.walk.as_ref() {
+                    for (&(lo, hi), &flag) in walk.iter().zip(enc.noise_flags.iter()) {
+                        if !flag {
+                            continue;
+                        }
+                        while k < lo {
+                            axis[k] = src.next().copied();
+                            k += 1;
+                        }
+                        while k < hi {
+                            axis[k] = None;
+                            k += 1;
+                        }
+                    }
+                }
+                while k < n {
+                    axis[k] = src.next().copied();
+                    k += 1;
+                }
+                axis
+            });
             let bands = prep.edges.len() - 1;
             for b in 0..bands {
                 let lo = usize::from(prep.edges[b]).max(prep.coef_start) - prep.coef_start;
@@ -756,12 +845,20 @@ fn frame_cost(prepared: &[PreparedBlock], blocks: &[EncBlockData]) -> FrameCost 
                 }
                 let mut noise = 0.0;
                 for k in lo..hi {
-                    let q = if enc.coded {
-                        f64::from(enc.coefficients[k])
-                    } else {
-                        0.0
+                    let q = match coded_axis.as_ref() {
+                        Some(axis) => axis[k].map(f64::from),
+                        None => Some(0.0),
                     };
-                    let err = (chan.normalised[k] - q * divisor) * chan.weights[k];
+                    let err = match q {
+                        // A substituted bin: the decoder fills it with
+                        // noise at the band's level — counted at
+                        // SUBSTITUTION_ERROR_WEIGHT of the signal
+                        // energy rather than as a hole.
+                        None => {
+                            chan.normalised[k] * chan.weights[k] * SUBSTITUTION_ERROR_WEIGHT.sqrt()
+                        }
+                        Some(q) => (chan.normalised[k] - q * divisor) * chan.weights[k],
+                    };
                     noise += err * err;
                 }
                 let threshold = chan.band_threshold[b] * offset * (hi - lo) as f64;
@@ -804,6 +901,9 @@ struct PreparedBlock {
     edges: Vec<u16>,
     /// First coded bin (§0.3).
     coef_start: usize,
+    /// The §2.1 walk on the coded axis (`(lo, hi)` per walked band),
+    /// when the encoder may substitute.
+    walk: Option<Vec<(usize, usize)>>,
 }
 
 /// A channel with signal: its envelope and envelope-normalised
@@ -971,9 +1071,23 @@ fn prepare_channel(
     })
 }
 
+/// The F4 gain reproducing a band's RMS under the measured level law
+/// (`rms = 10^((G − 64)/20) · w · |ABS_SCALE|`, inverted on the
+/// envelope-normalised RMS), clamped to the wire range.
+fn noise_gain_for_rms(normalised_rms: f64) -> i32 {
+    if normalised_rms <= 0.0 {
+        return -19;
+    }
+    (64.0 + 20.0 * (normalised_rms / ABS_SCALE.abs()).log10())
+        .round()
+        .clamp(-19.0, 108.0) as i32
+}
+
 /// Realise a prepared block at a gain offset: round the normalised
 /// spectra with the block's B1 gain, clamping |q| to the escape
-/// ceiling of the gain's level-width tier.
+/// ceiling of the gain's level-width tier; with a §2.1 walk, walk
+/// bands that quantised to nothing but carry signal are flagged and
+/// sent as their gain (their bins leave the coefficient axis).
 fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockData {
     let base = prep
         .chans
@@ -992,11 +1106,13 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
             None => EncChannelData {
                 coded: false,
                 envelope: None,
+                noise_flags: Vec::new(),
+                noise_gains: Vec::new(),
                 coefficients: Vec::new(),
             },
             Some(p) => {
                 let mut any = false;
-                let coefficients: Vec<i32> = p
+                let mut coefficients: Vec<i32> = p
                     .normalised
                     .iter()
                     .map(|v| {
@@ -1007,16 +1123,95 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
                         q
                     })
                     .collect();
+                // §2.1 election by cost: a walk band is substituted
+                // when coding it recovers less than
+                // `1 − SUBSTITUTION_ERROR_WEIGHT` of its energy — the
+                // coded reconstruction (a hole, or a few isolated ±1s
+                // standing in for noise) is then worse than the noise
+                // fill the decoder can put there, and cheaper too.
+                let mut noise_flags = Vec::new();
+                let mut noise_gains: Vec<i32> = Vec::new();
+                if let Some(walk) = prep.walk.as_ref() {
+                    // Flags are elected top-down and kept as a suffix
+                    // of the walk: once a band is coded, every band
+                    // below it is coded too, so no coded coefficient
+                    // ever follows a flagged band (the reference
+                    // decoder places coefficients after a flagged
+                    // band two bins off — a quirk the suffix form
+                    // never exercises).
+                    let mut flags_rev = Vec::with_capacity(walk.len());
+                    let mut suffix = true;
+                    for &(lo, hi) in walk.iter().rev() {
+                        let energy: f64 = p.normalised[lo..hi].iter().map(|v| v * v).sum();
+                        let coded_error: f64 = p.normalised[lo..hi]
+                            .iter()
+                            .zip(coefficients[lo..hi].iter())
+                            .map(|(x, &q)| {
+                                let e = x - f64::from(q) * divisor;
+                                e * e
+                            })
+                            .sum();
+                        let flag = suffix
+                            && lo < hi
+                            && energy > 0.0
+                            && coded_error > SUBSTITUTION_ERROR_WEIGHT * energy;
+                        suffix &= flag;
+                        flags_rev.push(flag);
+                    }
+                    noise_flags = flags_rev.into_iter().rev().collect();
+                    for (&(lo, hi), &flag) in walk.iter().zip(noise_flags.iter()) {
+                        if !flag {
+                            continue;
+                        }
+                        let energy: f64 = p.normalised[lo..hi].iter().map(|v| v * v).sum();
+                        let rms = (energy / (hi - lo) as f64).sqrt();
+                        let mut gain = noise_gain_for_rms(rms);
+                        if let Some(&prev) = noise_gains.last() {
+                            gain = gain.clamp(prev - 18, prev + 18);
+                        }
+                        noise_gains.push(gain);
+                    }
+                    if noise_gains.is_empty() {
+                        noise_flags.clear();
+                    } else {
+                        // Drop the flagged bins from the coefficient
+                        // axis (walk bands are ascending and disjoint).
+                        let mut kept = Vec::with_capacity(coefficients.len());
+                        let mut cursor = 0usize;
+                        for (&(lo, hi), &flag) in walk.iter().zip(noise_flags.iter()) {
+                            if !flag {
+                                continue;
+                            }
+                            kept.extend_from_slice(&coefficients[cursor..lo]);
+                            cursor = hi;
+                        }
+                        kept.extend_from_slice(&coefficients[cursor..]);
+                        coefficients = kept;
+                        // The reference decoder reads a flagged axis
+                        // one coefficient short of the vendor reading
+                        // (`vendor_frame::noise_walk_bands_for`): never
+                        // code its last index — the bin just below
+                        // the first noise band.
+                        if let Some(last) = coefficients.last_mut() {
+                            *last = 0;
+                        }
+                        any = true;
+                    }
+                }
                 if any {
                     EncChannelData {
                         coded: true,
                         envelope: Some(EncEnvelope::Exponents(p.exponents.clone())),
+                        noise_flags,
+                        noise_gains,
                         coefficients,
                     }
                 } else {
                     EncChannelData {
                         coded: false,
                         envelope: None,
+                        noise_flags: Vec::new(),
+                        noise_gains: Vec::new(),
                         coefficients: Vec::new(),
                     }
                 }
@@ -1041,6 +1236,8 @@ fn silent_block(size_index: u8, channels: usize) -> EncBlockData {
             .map(|_| EncChannelData {
                 coded: false,
                 envelope: None,
+                noise_flags: Vec::new(),
+                noise_gains: Vec::new(),
                 coefficients: Vec::new(),
             })
             .collect(),
@@ -1394,5 +1591,72 @@ mod tests {
         let decoded = decode_packets(&cfg, &packets);
         let snr = snr_db(&cfg, &left, &decoded[0]);
         assert!(snr > 3.0, "tiny-packet profile SNR {snr:.2} dB");
+    }
+    /// Material with a low-level hiss above the §2.1 cutoff at
+    /// 16 kbps: the hiss bands quantise to nothing and are elected as
+    /// noise bands; the stream parses with flags set and decodes.
+    #[test]
+    fn holes_above_the_cutoff_are_noise_substituted() {
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        let n = 22_050usize * 2;
+        let mut state = 0x1234_5678_9abc_def1u64;
+        let signal: Vec<f64> = (0..n)
+            .map(|t| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let white = (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+                0.2 * (2.0 * std::f64::consts::PI * 440.0 * t as f64 / 22_050.0).sin()
+                    + 0.01 * white
+            })
+            .collect();
+        let count_flags = |ns: bool| -> (usize, usize, Vec<Vec<u8>>) {
+            let settings = EncoderSettings {
+                noise_substitution: ns,
+                ..EncoderSettings::default()
+            };
+            let mut enc = VendorEncoder::with_settings(&cfg, settings).unwrap();
+            enc.push(std::slice::from_ref(&signal)).unwrap();
+            let packets = enc.finish().unwrap();
+            let mut asm = PacketAssembler::new(&cfg);
+            for p in &packets {
+                asm.push_packet(p).unwrap();
+            }
+            let stream = asm.finish();
+            let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
+            let mut parser = FrameParser::new(&cfg, &body_starts);
+            let (mut flagged, mut walked) = (0usize, 0usize);
+            let mut cursor = stream.packets[0].frames_start_bit();
+            for rec in stream.packets.iter() {
+                if cursor != rec.frames_start_bit() {
+                    cursor = rec.frames_start_bit();
+                    parser.raise_latch();
+                }
+                let mut reader = stream.reader_at(cursor);
+                for _ in 0..rec.header.frame_count {
+                    let frame = parser.parse_frame(&mut reader).unwrap();
+                    for b in &frame.blocks {
+                        for c in &b.channels {
+                            walked += c.noise_flags.len();
+                            flagged += c.noise_flags.iter().filter(|&&f| f).count();
+                        }
+                    }
+                }
+                cursor = reader.position() as u64;
+            }
+            (flagged, walked, packets)
+        };
+        let (flagged, walked, packets) = count_flags(true);
+        assert!(walked > 0, "the policy walks bands on this stream");
+        assert!(
+            flagged * 2 > walked,
+            "hiss bands should be substituted: {flagged}/{walked}"
+        );
+        let (none, _, _) = count_flags(false);
+        assert_eq!(none, 0);
+        // And the stream decodes to the tone.
+        let decoded = decode_packets(&cfg, &packets);
+        let snr = snr_db(&cfg, &signal, &decoded[0]);
+        assert!(snr > 15.0, "SNR {snr:.2} dB");
     }
 }

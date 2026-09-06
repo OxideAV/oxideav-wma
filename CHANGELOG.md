@@ -47,6 +47,54 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restricted to the stereo streams it could see. Vendor closure
   unchanged (1738/1763).
 
+### Added
+
+- **§2.1 noise substitution, end to end (r457)** — the emitter writes
+  F3 flags and F4 gains (`EncChannelData::noise_flags` /
+  `noise_gains`; the flagged bins leave the coefficient axis; typed
+  errors for a wrong walk length, gain count or gain range), the
+  decoder fills flagged bands with noise, and the encoder elects
+  substitution per walk band by cost
+  (`EncoderSettings::noise_substitution`, default on): a band whose
+  coded reconstruction would leave more than a quarter of its energy as
+  error — a hole, or a few isolated ±1s standing in for noise — is sent
+  as its gain instead, which is bits saved. The **level law** is
+  black-box measured (`vendor_decode::noise_band_rms`): the reference
+  fills a flagged band with white noise at a per-coefficient RMS of
+  `10^((G − 64)/20) · w_band · |ABS_SCALE|` — the F4 gain plays the
+  total gain's role on a unit-RMS generator (1 dB per gain step,
+  0.0001 → 0.0003 → 0.001 → 0.003 → 0.03 across G = 10/20/30/40/60),
+  following the band exponent at the ladder ratio, independent of the
+  block's total gain and of the coded coefficients, one gain per band —
+  verified at 22.05 kHz and at 44.1 kHz (2048 and 512 blocks). The
+  reference accepts the flagged streams on every noise-enabled cell
+  (`tests/encoder_streams.rs` `mono22k_16kbps_hiss`), and the vendor
+  mono 22.05 kHz stream keeps its floors (its flagged bands now carry
+  noise instead of zeros; corr² 0.951 → 0.946 is the uncorrelated
+  fill).
+- **The noise walk's first band starts at the cutoff bin rounded
+  up** — `vendor_frame::noise_walk_bands` / `noise_walk_bands_for` are
+  the one definition of the §2.1 walk (parser, emitter, decoder and
+  encoder all read it): for the cutoff-frequency starts the first
+  walked band begins at `ceil(f · 2M / sample_rate)` inside the band
+  containing the rounded-to-four bin (358 instead of the 356 edge on
+  512-blocks at 22.05 kHz; 716 = the edge on 1024-blocks). The vendor
+  mono 22.05 kHz stream — the only vendor stream carrying the
+  sub-stream — closes **103/122** §1 boundaries under it (97 band
+  edge, 94 nearest, 90 one bin lower; the 256-block hard-table start
+  stays at 148 — 66/122 without it). The black-box reference reads a
+  flagged axis one coefficient shorter than that at every block size
+  probed (22.05 / 32 / 44.1 / 48 / 16 kHz: it rejects the last index),
+  a reference-vs-vendor divergence the encoder sidesteps: flags are
+  elected as a top-band suffix and the last index of a flagged axis is
+  never coded.
+- `BlockSynth::with_zero_fill_noise` (off by default) —
+  `vendor_decode::ZERO_FILL_RMS_STEPS`: black-box measured, the reference
+  fills **every** zero-quantised bin of a coded channel with white noise
+  at `0.4 · step` (0.0006 / 0.006 / 0.06 at g = 60 / 80 / 100, following
+  the band exponents), flags or not; nothing staged describes this
+  floor, so it is an option, not the default.
+
 ### Changed
 
 - **Encoder allocation: per-frame election by a masking-aware cost

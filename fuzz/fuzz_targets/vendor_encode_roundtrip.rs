@@ -29,7 +29,9 @@ use oxideav_wma::header::Version;
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
 use oxideav_wma::vendor_decode::BlockSynth;
-use oxideav_wma::vendor_encode::{EmitError, EncBlockData, EncChannelData, EncEnvelope, VendorBitWriter};
+use oxideav_wma::vendor_encode::{
+    EmitError, EncBlockData, EncChannelData, EncEnvelope, VendorBitWriter,
+};
 use oxideav_wma::vendor_frame::{escape_level_width, Envelope, FrameParser};
 use oxideav_wma::VendorEncoder;
 use std::sync::OnceLock;
@@ -84,6 +86,8 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
                 return EncChannelData {
                     coded: false,
                     envelope: None,
+                    noise_flags: Vec::new(),
+                    noise_gains: Vec::new(),
                     coefficients: Vec::new(),
                 };
             }
@@ -96,6 +100,33 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
                 exponents.push(e);
                 prev = e;
             }
+            // §2.1 flags over the stream's walk (policy-gated), the
+            // flagged bins leaving the coefficient axis; gains chained
+            // within the wire's range.
+            let walk = oxideav_wma::vendor_frame::noise_walk_bands(cfg, block_size);
+            let mut noise_flags: Vec<bool> = Vec::new();
+            let mut noise_gains: Vec<i32> = Vec::new();
+            let mut removed = 0usize;
+            if !walk.is_empty() && feed.next() & 1 == 1 {
+                for &(lo, hi) in &walk {
+                    let flag = feed.next() & 1 == 1;
+                    noise_flags.push(flag);
+                    if flag {
+                        removed += usize::from(hi - lo);
+                        let gain = match noise_gains.last() {
+                            None => i32::from(feed.next() % 128) - 19,
+                            Some(&prev) => {
+                                (prev + i32::from(feed.next() % 37) - 18).clamp(-19, 108)
+                            }
+                        };
+                        noise_gains.push(gain);
+                    }
+                }
+                if noise_gains.is_empty() {
+                    noise_flags.clear();
+                }
+            }
+            let n_coef = n_coef - removed;
             // Sparse coefficients: increasing positions, clamped levels.
             let mut coefficients = vec![0i32; n_coef];
             let mut pos = 0usize;
@@ -115,6 +146,8 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
             EncChannelData {
                 coded: true,
                 envelope: Some(EncEnvelope::Exponents(exponents)),
+                noise_flags,
+                noise_gains,
                 coefficients,
             }
         })
@@ -229,6 +262,14 @@ fn wire_leg(cfg: &StreamConfig, feed: &mut ByteFeed<'_>) {
                     (s, d) => panic!("envelope mismatch: {s:?} vs {d:?}"),
                 }
                 assert_eq!(pc.coefficients, sc.coefficients);
+                // An empty `noise_flags` is the all-clear shorthand on
+                // the emitter side; the parser reports the walk.
+                if sc.noise_flags.is_empty() {
+                    assert!(pc.noise_flags.iter().all(|&f| !f));
+                } else {
+                    assert_eq!(pc.noise_flags, sc.noise_flags);
+                }
+                assert_eq!(pc.noise_gains, sc.noise_gains);
             }
         }
     }

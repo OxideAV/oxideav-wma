@@ -312,7 +312,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
         let floor = match l.spec.file {
             "cand_mono8k_8kbps_v8.wma" => 394,      // 394/394 (100 %)
             "cand_stereo22k_32kbps_av.wma" => 1098, // 1098/1098 (100 %)
-            "cand_mono22k_16kbps.wma" => 90,        // 97/122 (r454 noise policy)
+            "cand_mono22k_16kbps.wma" => 100,       // 103/122 (r457 cutoff-bin walk start)
             "cand_wmp12_96kbps.wma" => 133,         // 133/133 (100 %)
             "cand_vbr_q75_stereo.wma" => 13,        // 13/13 (100 %)
             "cand_apollo8.wma" => 3,                // 3/3 (100 %)

@@ -190,6 +190,19 @@ pub fn fit(original: &[f64], decoded: &[f64]) -> (i64, f64, f64, f64) {
     (lag, corr2, gain, 10.0 * (sig / err.max(1e-30)).log10())
 }
 
+/// Deterministic white noise in ±1 (xorshift).
+pub fn hiss(len: usize, seed: u64) -> Vec<f64> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        })
+        .collect()
+}
+
 /// Whether the black-box reference binary is available.
 pub fn reference_available() -> bool {
     Command::new("ffmpeg").arg("-version").output().is_ok()
