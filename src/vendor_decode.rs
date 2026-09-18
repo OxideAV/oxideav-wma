@@ -157,7 +157,7 @@ pub struct BlockSynth {
     lcg_state: u32,
     lcg_prev: i32,
     /// Whether the stream's §2.1 sub-stream is active
-    /// ([`crate::vendor_frame::staged_noise_policy`]): draws and the
+    /// ([`crate::vendor_frame::noise_policy`]): draws and the
     /// dither happen only then.
     noise_enabled: bool,
     /// Whether zero-quantised bins of coded channels are noise-filled
@@ -225,7 +225,7 @@ impl BlockSynth {
             noise_state: 0x9E37_79B9_7F4A_7C15,
             lcg_state: 0,
             lcg_prev: 0,
-            noise_enabled: crate::vendor_frame::staged_noise_policy(cfg).is_some(),
+            noise_enabled: crate::vendor_frame::noise_policy(cfg).is_some(),
             zero_fill_noise: false,
         }
     }

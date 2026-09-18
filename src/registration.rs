@@ -350,9 +350,8 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
 /// `flags2` comes from the input parameters' extradata when one is
 /// supplied (v1: bytes 2–3, v2: bytes 4–5), else defaults to
 /// `0x000f` (VLC envelopes + bit reservoir + variable block length —
-/// the staged vendor CBR configuration). Bit 0 must be set: the
-/// §3.1 LSP envelope path's conversion tables are a staged gap, so
-/// no LSP stream can be encoded.
+/// the staged vendor CBR configuration). Bit 0 clear selects the
+/// §3.1 LSP envelope path, encodable since r459.
 pub struct WmaEncoder {
     codec_id: CodecId,
     params: CodecParameters,
@@ -546,8 +545,7 @@ impl Encoder for WmaEncoder {
 ///
 /// [`Error::Unsupported`] when the parameters name neither `wma1` nor
 /// `wma2` (by id or wave tag); [`Error::InvalidData`] when a required
-/// audio parameter is missing or the extradata selects the
-/// unencodable §3.1 LSP envelope path.
+/// audio parameter is missing.
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     Ok(Box::new(WmaEncoder::from_params(params)?))
 }
@@ -828,9 +826,9 @@ mod tests {
         assert!(make_encoder(&p).is_err()); // bit rate
         p.bit_rate = Some(64_000);
         assert!(make_encoder(&p).is_ok());
-        // LSP-path extradata (flags2 bit 0 clear) is refused.
+        // LSP-path extradata (flags2 bit 0 clear) is encodable (r459).
         p.extradata = vec![0, 0, 0, 0, 0x26, 0x00];
-        assert!(make_encoder(&p).is_err());
+        assert!(make_encoder(&p).is_ok());
         // Unknown id without a tag is unsupported.
         p.extradata.clear();
         p.codec_id = CodecId::new("something-else");

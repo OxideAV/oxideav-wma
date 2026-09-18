@@ -827,6 +827,8 @@ pub mod frame_encode;
 #[doc(hidden)]
 pub mod gain_ladder;
 pub mod header;
+/// §3.1 line-spectral envelope analysis (encoder side).
+pub mod lsp_analysis;
 /// §3.1 line-spectral envelope conversion (bit-exact to the vendor decoder).
 pub mod lsp_envelope;
 /// §3.1 envelope tables, transcribed from the staged extraction.

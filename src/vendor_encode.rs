@@ -58,10 +58,12 @@
 //!   since a frame that straddles a boundary puts (almost) its whole
 //!   length into the next packet's carry.
 //!
-//! The §3.1 LSP envelope path is **not emittable**: its index →
-//! envelope conversion tables are a staged gap, so an encoder cannot
-//! choose indices for a target envelope. Streams with `flags2` bit 0
-//! clear are refused at construction ([`EmitError::LspPathUnsupported`]).
+//! The §3.1 LSP envelope path (`flags2` bit 0 clear) emits the ten
+//! fixed-width indices ([`EncEnvelope::Lsp`]) in place of B3/B4;
+//! choosing them for a target envelope is [`crate::lsp_analysis`]'s
+//! job. (Until r459 the path was refused at construction —
+//! [`EmitError::LspPathUnsupported`] — while its conversion tables were
+//! a staged gap.)
 
 use crate::bitio::{BitReader, BitWriter};
 use crate::header::Version;
@@ -69,13 +71,17 @@ use crate::stream_config::StreamConfig;
 use crate::vendor_frame::{escape_level_width, measured_noise_policy, NoiseSpec, ReuseRule};
 use crate::wire_vlc::{coef_vlc, gain_vlc, runlevel_index, scale_vlc};
 
-/// A channel's envelope, encoder side. The §3.1 LSP form is absent
-/// by design (module docs).
+/// A channel's envelope, encoder side: the form must match the
+/// stream's `flags2` bit 0 (VLC exponents when set, LSP indices when
+/// clear — [`EmitError::EnvelopePathMismatch`] otherwise).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncEnvelope {
     /// §3 fresh VLC-delta exponents, one per band of the block's
     /// partition.
     Exponents(Vec<i32>),
+    /// §3.1 fresh line-spectral indices, ten fields of the staged
+    /// widths (3,4,4,4,4,4,4,4,3,3 bits).
+    Lsp([u8; 10]),
     /// §2 B2 = 0 — reuse the envelope cached for this block-size
     /// index. Only valid on blocks that carry the B2 bit, and only
     /// when **every** coded channel reuses (B2 is per block).
@@ -147,10 +153,21 @@ pub enum EmitError {
         /// The offending gain.
         gain: i32,
     },
-    /// The stream's `flags2` bit 0 is clear: the §3.1 LSP envelope
-    /// conversion tables are a staged gap, so no envelope can be
-    /// chosen (module docs).
+    /// Historical (r454–r457): the §3.1 LSP envelope path was refused
+    /// while its conversion tables were a staged gap. No longer
+    /// returned since r459.
     LspPathUnsupported,
+    /// A channel's envelope form does not match the stream's `flags2`
+    /// bit 0 (exponents on an LSP-path stream, or LSP indices on a
+    /// VLC-path stream).
+    EnvelopePathMismatch,
+    /// A §3.1 index outside its field's width.
+    LspIndexOutOfRange {
+        /// Which of the ten indices.
+        position: usize,
+        /// Its value.
+        index: u8,
+    },
     /// A size index outside the configured block-size count.
     BadBlockSizeIndex {
         /// The offending index.
@@ -248,6 +265,13 @@ impl core::fmt::Display for EmitError {
             EmitError::NoiseGainOutOfRange { gain } => {
                 write!(f, "oxideav-wma: noise gain {gain} outside the wire range")
             }
+            EmitError::EnvelopePathMismatch => f.write_str(
+                "oxideav-wma: envelope form does not match the stream's flags2 bit 0",
+            ),
+            EmitError::LspIndexOutOfRange { position, index } => write!(
+                f,
+                "oxideav-wma: LSP index {index} at position {position} outside its field"
+            ),
             EmitError::LspPathUnsupported => f.write_str(
                 "oxideav-wma: flags2 bit 0 clear selects the LSP envelope path, \
                  whose conversion tables are a staged gap (not encodable)",
@@ -342,12 +366,9 @@ impl FrameEmitter {
     ///
     /// # Errors
     ///
-    /// [`EmitError::LspPathUnsupported`] when `flags2` bit 0 is clear
-    /// (module docs).
+    /// None at present (the `Result` is kept for configuration checks
+    /// that may return; the §3.1 refusal of r454–r457 is gone).
     pub fn new(cfg: &StreamConfig) -> Result<Self, EmitError> {
-        if !cfg.exp_vlc {
-            return Err(EmitError::LspPathUnsupported);
-        }
         let (noise, reuse) = match measured_noise_policy(cfg) {
             Some((spec, rule)) => (Some(spec), rule),
             None => (None, ReuseRule::default()),
@@ -605,7 +626,32 @@ impl FrameEmitter {
                 _ => return Err(EmitError::EnvelopeMismatch),
             }
             let exponents = match ch.envelope.as_ref() {
-                Some(EncEnvelope::Exponents(e)) => e,
+                Some(EncEnvelope::Exponents(e)) => {
+                    if !self.cfg.exp_vlc {
+                        return Err(EmitError::EnvelopePathMismatch);
+                    }
+                    e
+                }
+                Some(EncEnvelope::Lsp(indices)) => {
+                    // §3.1: ten fixed-width fields in place of B3/B4.
+                    if self.cfg.exp_vlc {
+                        return Err(EmitError::EnvelopePathMismatch);
+                    }
+                    if reuse {
+                        return Err(EmitError::BadReuse);
+                    }
+                    for (position, (&index, &width)) in indices
+                        .iter()
+                        .zip(crate::vendor_frame::LSP_INDEX_WIDTHS.iter())
+                        .enumerate()
+                    {
+                        if index >= (1u8 << width) {
+                            return Err(EmitError::LspIndexOutOfRange { position, index });
+                        }
+                        out.write_bits(u64::from(index), width);
+                    }
+                    continue;
+                }
                 Some(EncEnvelope::Reuse) => continue, // covered by B2 = 0
                 None => unreachable!("checked above"),
             };
@@ -1398,12 +1444,28 @@ mod tests {
         let mut w = VendorBitWriter::new(&cfg).unwrap();
         let good = simple_block(&cfg, 0, 5);
 
-        // LSP config refused at construction.
+        // LSP config accepted at construction (since r459); an
+        // exponent envelope on it is a path mismatch.
         let lsp = StreamConfig::derive(Version::V2, 8000, 1, 1000, 640, 0x0026).unwrap();
+        let mut lw = VendorBitWriter::new(&lsp).unwrap();
+        let bands = crate::band_partition::exponent_band_count(8000, 512);
+        let wrong_path = EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 40,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Exponents(vec![36; bands])),
+                noise_flags: Vec::new(),
+                noise_gains: Vec::new(),
+                coefficients: vec![0; 466],
+            }],
+        };
         assert_eq!(
-            VendorBitWriter::new(&lsp).unwrap_err(),
-            EmitError::LspPathUnsupported
+            lw.write_frame(&[wrong_path], None).unwrap_err(),
+            EmitError::EnvelopePathMismatch
         );
+        assert_eq!(lw.frame_count(), 0);
 
         // Bad size index.
         let mut b = good.clone();
@@ -1505,6 +1567,58 @@ mod tests {
             assert_eq!(w.position() - before, trial, "frame {f}");
         }
     }
+    #[test]
+    fn lsp_indices_round_trip_through_the_parser() {
+        // The vendor mono 8 kHz geometry (flags2 = 0x0026: reservoir,
+        // VBL, grid scaling; one 512-block per frame).
+        let cfg = StreamConfig::derive(Version::V2, 8000, 1, 1000, 640, 0x0026).unwrap();
+        assert!(!cfg.exp_vlc);
+        let idx = [5u8, 9, 14, 3, 0, 15, 7, 12, 6, 1];
+        let mut coefficients = vec![0i32; 466];
+        coefficients[3] = 4;
+        coefficients[200] = -1;
+        let block = EncBlockData {
+            size_index: 0,
+            joint_stereo: false,
+            total_gain: 50,
+            channels: vec![EncChannelData {
+                coded: true,
+                envelope: Some(EncEnvelope::Lsp(idx)),
+                noise_flags: Vec::new(),
+                noise_gains: Vec::new(),
+                coefficients: coefficients.clone(),
+            }],
+        };
+        let mut w = VendorBitWriter::new(&cfg).unwrap();
+        w.write_frame(std::slice::from_ref(&block), Some(0))
+            .unwrap();
+        w.write_frame(std::slice::from_ref(&block), None).unwrap();
+        let packets = w.finish().unwrap();
+        let mut asm = crate::packet::PacketAssembler::new(&cfg);
+        for p in &packets {
+            asm.push_packet(p).unwrap();
+        }
+        let stream = asm.finish();
+        let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
+        let mut parser = crate::vendor_frame::FrameParser::new(&cfg, &body_starts);
+        let mut r = stream.reader_at(stream.packets[0].frames_start_bit());
+        let frame = parser.parse_frame(&mut r).unwrap();
+        let ch = &frame.blocks[0].channels[0];
+        assert_eq!(ch.envelope, Some(Envelope::LspIndices(idx)));
+        assert_eq!(ch.coefficients, coefficients);
+        // Out-of-range index is typed.
+        let mut bad = block;
+        bad.channels[0].envelope = Some(EncEnvelope::Lsp([0, 0, 0, 0, 0, 0, 0, 0, 8, 0]));
+        let mut w = VendorBitWriter::new(&cfg).unwrap();
+        assert_eq!(
+            w.write_frame(&[bad], None).unwrap_err(),
+            EmitError::LspIndexOutOfRange {
+                position: 8,
+                index: 8
+            }
+        );
+    }
+
     #[test]
     fn noise_flags_and_gains_round_trip_through_the_parser() {
         // Mono 22.05 kHz at 2003 B/s: the staged policy (0.7 · half

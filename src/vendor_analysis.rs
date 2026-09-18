@@ -278,12 +278,13 @@ pub struct VendorEncoder {
 }
 
 impl VendorEncoder {
-    /// An encoder for one stream configuration with default settings.
+    /// An encoder for one stream configuration with default settings
+    /// (both envelope paths — §3 VLC exponents and, since r459, the
+    /// §3.1 line-spectral indices — are encodable).
     ///
     /// # Errors
     ///
-    /// [`EmitError::LspPathUnsupported`] for `flags2` bit 0 clear
-    /// (the §3.1 conversion tables are a staged gap).
+    /// As [`Self::with_settings`] with the default settings.
     pub fn new(cfg: &StreamConfig) -> Result<Self, EncodeError> {
         Self::with_settings(cfg, EncoderSettings::default())
     }
@@ -910,7 +911,9 @@ struct PreparedBlock {
 /// coded-axis spectrum.
 #[derive(Debug, Clone)]
 struct PreparedChannel {
-    exponents: Vec<i32>,
+    /// The envelope to emit: §3 exponents, or the §3.1 indices whose
+    /// decoder-exact envelope `weights` carries.
+    envelope: EncEnvelope,
     /// `spec[k] / w_band[k]` over the coded axis.
     normalised: Vec<f64>,
     /// Heuristic B1 gain putting the peak |q| at the target.
@@ -1041,12 +1044,38 @@ fn prepare_channel(
     }
 
     // Envelope-normalised spectrum over the coded axis, using the
-    // decoder's own weight function.
-    let weights = band_weights(
-        cfg,
-        Some(&Envelope::Exponents(exponents.clone())),
-        usize::from(block_size),
-    );
+    // decoder's own weight function: the §3 band weights of the
+    // exponents, or — on a §3.1 stream — the decoder-exact envelope
+    // of the ten indices fitted to the same per-band target
+    // (`W[i] / max W`, the role the band weight plays there).
+    let (envelope, weights) = if cfg.exp_vlc {
+        let weights = band_weights(
+            cfg,
+            Some(&Envelope::Exponents(exponents.clone())),
+            usize::from(block_size),
+        );
+        (EncEnvelope::Exponents(exponents), weights)
+    } else {
+        let n = usize::from(block_size);
+        let mut per_bin = vec![0.0f64; n];
+        for b in 0..bands {
+            let lo = usize::from(edges[b]);
+            let hi = usize::from(edges[b + 1]).min(n);
+            for slot in &mut per_bin[lo..hi] {
+                *slot = target[b];
+            }
+        }
+        let grid = usize::from(cfg.lsp_grid_len(block_size));
+        let (indices, env) =
+            crate::lsp_analysis::fit_lsp_envelope(&per_bin, coef_start, coef_end, grid);
+        let inv_max = 1.0 / f64::from(env.max);
+        let weights: Vec<f64> = env
+            .weights
+            .iter()
+            .map(|&w| f64::from(w) * inv_max)
+            .collect();
+        (EncEnvelope::Lsp(indices), weights)
+    };
     let normalised: Vec<f64> = (coef_start..coef_end)
         .map(|k| spec[k] / weights[k])
         .collect();
@@ -1062,7 +1091,7 @@ fn prepare_channel(
         64
     };
     Some(PreparedChannel {
-        exponents,
+        envelope,
         normalised,
         base_gain,
         peak,
@@ -1099,7 +1128,7 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
     let gain = ((base as i32 + offset).clamp(1, 250) as u32).max(prep.min_gain);
     let ceiling = (1i64 << escape_level_width(gain)) - 1;
     let divisor = total_gain_multiplier(gain) * ABS_SCALE;
-    let channels = prep
+    let channels: Vec<EncChannelData> = prep
         .chans
         .iter()
         .map(|prepared| match prepared {
@@ -1193,7 +1222,7 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
                 if any {
                     EncChannelData {
                         coded: true,
-                        envelope: Some(EncEnvelope::Exponents(p.exponents.clone())),
+                        envelope: Some(p.envelope.clone()),
                         noise_flags,
                         noise_gains,
                         coefficients,
@@ -1210,10 +1239,21 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
             }
         })
         .collect();
+    // A block whose coded channels quantised to nothing (a bit-starved
+    // realisation, or flagged bands only) carries the smallest total
+    // gain: on noise-enabled streams every coded bin is dithered at
+    // `0.02 · F(total_gain)` (the staged §2.1 law, which the decoder
+    // reproduces), so a coarse gain on an all-zero block would be
+    // decoded as loud noise rather than silence. Flagged bands are
+    // unaffected — their level is their own F4 gain.
+    let any_nonzero = channels
+        .iter()
+        .any(|c| c.coefficients.iter().any(|&q| q != 0));
+    let total_gain = if any_nonzero { gain } else { 1 };
     EncBlockData {
         size_index: prep.size_index,
         joint_stereo: prep.joint_stereo,
-        total_gain: gain,
+        total_gain,
         channels,
     }
 }
@@ -1559,12 +1599,9 @@ mod tests {
             ),
             Err(EncodeError::BadPolicyIndex { index: 7 })
         ));
-        // LSP-path configuration refused.
+        // LSP-path configuration accepted (r459).
         let lsp = StreamConfig::derive(Version::V2, 8000, 1, 1000, 640, 0x0026).unwrap();
-        assert!(matches!(
-            VendorEncoder::new(&lsp),
-            Err(EncodeError::Emit(EmitError::LspPathUnsupported))
-        ));
+        assert!(VendorEncoder::new(&lsp).is_ok());
     }
 
     #[test]

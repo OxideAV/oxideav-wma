@@ -98,6 +98,27 @@ fn families() -> Vec<Family> {
             hiss: 0.01,
         },
         Family {
+            // The staged cand_mono8k geometry: the §3.1 LSP envelope
+            // path (flags2 bit 0 clear, bit 5 grid scaling), mono
+            // 8 kHz 8 kbps.
+            name: "mono8k_8kbps_lsp",
+            cfg: StreamConfig::derive(Version::V2, 8_000, 1, 1000, 640, 0x0026).unwrap(),
+            extradata: mk_extra(0x0026),
+            own_floor: 6.0,
+            reference_floor: 6.0,
+            hiss: 0.0,
+        },
+        Family {
+            // The ACM catalogue's 8 kHz headerless LSP geometry
+            // (format 0): one 512-sample frame per 64-byte packet.
+            name: "mono8k_8kbps_lsp_headerless",
+            cfg: StreamConfig::derive(Version::V2, 8_000, 1, 1000, 64, 0x0000).unwrap(),
+            extradata: *b"\x00\x02\x00\x00\x00\x00\x40\x00\x00\x00",
+            own_floor: 6.0,
+            reference_floor: 6.0,
+            hiss: 0.0,
+        },
+        Family {
             // The staged cand_wmp12 geometry: stereo 44.1 kHz 96 kbps.
             name: "stereo44k_96kbps_vbl",
             cfg: StreamConfig::derive(Version::V2, 44_100, 2, 12_003, 4459, 0x000f).unwrap(),

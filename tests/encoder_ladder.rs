@@ -1,12 +1,13 @@
 //! Encoder bitrate/quality **ladder** — every WMA v2 (`0x0161`)
 //! configuration of the staged ACM format catalogue
-//! (`docs/audio/wma/tables/wma-acm-standard-formats.csv`) whose
-//! `flags2` selects the VLC envelope path (bit 0 set — the LSP-path
-//! cells are unencodable, their §3.1 conversion tables being a
-//! staged gap), plus the six committed vendor-stream geometries,
-//! each encoded from the same synthetic material under the default
-//! (transient-splitting) block policy and, on VBL cells, under a
-//! fixed full-length schedule for the block-switching delta.
+//! (`docs/audio/wma/tables/wma-acm-standard-formats.csv`): the cells
+//! whose `flags2` selects the VLC envelope path (bit 0 set) and,
+//! since r459, the low-rate cells on the §3.1 LSP envelope path (bit
+//! 0 clear; 8–32 kHz, 5–22 kbps), plus the six committed
+//! vendor-stream geometries, each encoded from the same synthetic
+//! material under the default (transient-splitting) block policy
+//! and, on VBL cells, under a fixed full-length schedule for the
+//! block-switching delta.
 //!
 //! Every cell is decoded two ways — this crate's own vendor chain
 //! and the black-box reference decoder (skipped when unavailable) —
@@ -63,10 +64,42 @@ const CELLS: &[Cell] = &[
     (2, 44_100, 8003, 2973, 0x000f),
 ];
 
+/// The §3.1 LSP-envelope cells of the catalogue (format indices
+/// 0–2, 4–15, 18–20, 23, 31; index 3 — 128 bit/s, `block_align` 1 —
+/// is skipped) followed by the vendor mono 8 kHz geometry.
+const LSP_CELLS: &[Cell] = &[
+    (1, 8_000, 1000, 64, 0x0000),
+    (1, 8_000, 750, 48, 0x0000),
+    (1, 8_000, 625, 40, 0x0000),
+    (2, 8_000, 1500, 96, 0x0000),
+    (1, 11_025, 1249, 58, 0x0000),
+    (1, 11_025, 1012, 47, 0x0000),
+    (1, 16_000, 2000, 512, 0x000e),
+    (1, 16_000, 2000, 64, 0x0000),
+    (1, 16_000, 1500, 384, 0x0006),
+    (1, 16_000, 1250, 320, 0x0006),
+    (2, 16_000, 2502, 427, 0x0016),
+    (2, 16_000, 2004, 342, 0x000e),
+    (1, 22_050, 2503, 744, 0x0016),
+    (1, 22_050, 2519, 117, 0x0000),
+    (1, 22_050, 2002, 595, 0x000e),
+    (2, 22_050, 2751, 511, 0x000e),
+    (2, 22_050, 2503, 744, 0x000e),
+    (2, 22_050, 2519, 117, 0x0000),
+    (1, 32_000, 2502, 854, 0x0016),
+    (2, 32_000, 2751, 939, 0x0016),
+    // Vendor-stream geometry (cand_mono8k_8kbps_v8).
+    (1, 8_000, 1000, 640, 0x0026),
+];
+
 /// Own-chain SNR floor every cell must clear (dB). The synthetic
 /// material carries a click train, so this is a transient-heavy
 /// figure; steady tones measure 10–20 dB higher.
 const OWN_FLOOR_DB: f64 = 16.0;
+
+/// Own-chain floor for the LSP cells (dB): a tenth of the bits per
+/// sample of the VLC cells and a ten-parameter envelope.
+const LSP_OWN_FLOOR_DB: f64 = 10.0;
 
 fn cell_pcm(sample_rate: u32, channels: u8) -> Vec<Vec<f64>> {
     let len = sample_rate as usize * 2;
@@ -162,9 +195,14 @@ fn every_catalogue_cell_encodes_and_is_accepted() {
         eprintln!("reference decoder unavailable: own-chain leg only");
     }
     let mut failures = Vec::new();
-    for cell in CELLS {
+    for cell in CELLS.iter().chain(LSP_CELLS.iter()) {
         let cfg =
             StreamConfig::derive(Version::V2, cell.1, cell.0, cell.2, cell.3, cell.4).unwrap();
+        let own_floor = if cfg.exp_vlc {
+            OWN_FLOOR_DB
+        } else {
+            LSP_OWN_FLOOR_DB
+        };
         let row = run_cell(cell, BlockPolicy::Auto, with_reference);
         let fixed = if cfg.vbl_enabled {
             Some(run_cell(cell, BlockPolicy::Fixed(0), with_reference))
@@ -181,8 +219,9 @@ fn every_catalogue_cell_encodes_and_is_accepted() {
             None => String::new(),
         };
         eprintln!(
-            "{} cls{} nbs{:<2} | own SNR {:.1} dB (fixed-block {}) rate {:.0}% | {}",
+            "{} {} cls{} nbs{:<2} | own SNR {:.1} dB (fixed-block {}) rate {:.0}% | {}",
             cell_name(cell),
+            if cfg.exp_vlc { "vlc" } else { "lsp" },
             cfg.vlc_class,
             cfg.n_block_sizes,
             row.own_snr,
@@ -193,9 +232,9 @@ fn every_catalogue_cell_encodes_and_is_accepted() {
             row.rate_pct,
             reference_text
         );
-        if row.own_snr < OWN_FLOOR_DB {
+        if row.own_snr < own_floor {
             failures.push(format!(
-                "{}: own SNR {:.2} dB below {OWN_FLOOR_DB}",
+                "{}: own SNR {:.2} dB below {own_floor}",
                 cell_name(cell),
                 row.own_snr
             ));

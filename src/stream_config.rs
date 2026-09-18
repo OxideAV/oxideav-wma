@@ -174,9 +174,20 @@ impl StreamConfig {
         let bps = bit_rate as f32 / (f32::from(channels) * sample_rate as f32);
         let rate_float = if channels > 1 { bps * 1.6 } else { bps };
 
-        // byte_offset_bits = floor(log2(frame_length · bps / 8)) + 2.
-        let frame_bytes = frame_length as f32 * bps / 8.0;
-        let byte_offset_bits = (frame_bytes.log2().floor() as i32 + 2).max(0) as u8;
+        // byte_offset_bits = floor(log2(frame_length · bps / 8)) + 2,
+        // with the per-channel frame byte count rounded **up** from
+        // the integer bit count (`(bits + 7) / 8`, the §0.1 rounding).
+        // The two readings differ only when the exact byte count sits
+        // just below a power of two; there the black-box reference
+        // takes the rounded-up reading (r459: the ACM catalogue's
+        // stereo 22.05 kHz 2751 B/s cell, 63.88 bytes per frame and
+        // channel, decodes at the reference with 8, not 7). Reported
+        // as a docs ask; the vendor stream headers all parse under
+        // both readings.
+        let frame_bits_per_channel =
+            u64::from(frame_length) * bit_rate / (u64::from(sample_rate) * u64::from(channels));
+        let frame_bytes = frame_bits_per_channel.div_ceil(8).max(1);
+        let byte_offset_bits = (63 - frame_bytes.leading_zeros()) as u8 + 2;
 
         // flags2 bits (§0) and the VBL gate.
         let exp_vlc = flags2 & 0b001 != 0;
