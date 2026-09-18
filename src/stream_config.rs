@@ -305,6 +305,23 @@ impl StreamConfig {
         block_size - ((9 * u32::from(block_size)) / 100) as u16
     }
 
+    /// `flags2` bit 5 — §3.1 envelope grid scaling: when set the LSP
+    /// envelope is evaluated on the current block's length; when clear
+    /// on `frame_length`, and only the low `block_size` bins are used.
+    pub fn lsp_grid_scaling(&self) -> bool {
+        self.flags2 & 0b10_0000 != 0
+    }
+
+    /// The §3.1 evaluation grid length `L` for a block of `block_size`
+    /// coefficients ([`StreamConfig::lsp_grid_scaling`]).
+    pub fn lsp_grid_len(&self, block_size: u16) -> u16 {
+        if self.lsp_grid_scaling() {
+            block_size
+        } else {
+            self.frame_length
+        }
+    }
+
     /// The §2 block-size decode: `block_size = frame_length >> index`.
     /// Valid indices span `0..=log2(n_block_sizes)` — the smallest
     /// block is `frame_length / n_block_sizes` (the §0 clamp at
