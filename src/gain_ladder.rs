@@ -11,7 +11,8 @@
 //! fixed-point linear dequantization multiplier" — i.e. the ladder is
 //! the vendor realization of the §4 per-band weight `Q[d]` lookup the
 //! patent trace describes abstractly (exponent/critical-band coded
-//! envelope; the same pass confirms no LSP path exists).
+//! envelope — the `flags2` bit-0-set path; the §3.1 LSP path lives in
+//! [`crate::lsp_envelope`]).
 //!
 //! ## What this module provides
 //!

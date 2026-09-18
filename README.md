@@ -217,7 +217,7 @@ synthesis → PCM, round-tripping within the §4 quantizer bound. What
 separates this from decoding *vendor* WMA files is the short list of
 still-unstaged semantic bindings below.
 
-### Vendor-bitstream decode (r439, extended r446/r450/r454/r457)
+### Vendor-bitstream decode (r439, extended r446/r450/r454/r457/r459)
 
 The freshly staged rounds 3–6 of `docs/audio/wma/` (exact vendor VLC
 codewords for all eight trees, the §0–§5 frame-bit layout with the
@@ -242,30 +242,40 @@ vendor-encoded WMA v2 streams**:
 * Measured on the six committed vendor streams
   (`tests/vendor_streams.rs`, fixtures referenced from the docs
   staging area and never copied here): the §1 packet layer holds on
-  **all 1769 packets**; the frame layer closes **1744 / 1763** §1
-  carry boundaries — five families completely (mono 8 kHz
-  **394/394**, stereo 22.05 kHz A/V **1098/1098**, the whole
-  44.1 kHz high-rate family **3/3**, **13/13**, **133/133**), and
-  the mono 22.05 kHz noise-substitution stream **103/122** (97 in
-  r454; the r457 walk-start reading below).
+  **all 1769 packets**; the frame layer closes **all 1763 / 1763** §1
+  carry boundaries — mono 8 kHz **394/394**, stereo 22.05 kHz A/V
+  **1098/1098**, the 44.1 kHz high-rate family **3/3**, **13/13**,
+  **133/133**, and (since r459) the mono 22.05 kHz
+  noise-substitution stream **122/122** (64 in r446, 103 in r457: the
+  "F1 anomaly" was the noise walk's first band, one bin and one band
+  width off the staged rule).
 * The PCM leg — variable-size lapped reconstruction with
-  neighbour-matched sine slopes, the calibrated dequantisation
-  composition (staged `10^((e − e_max)/16)` ladder ratio anchored
-  at the block's maximum exponent, total gain at 1 dB per B1 step,
-  the computed band partition rounding to the **nearest** multiple
-  of four) and, since r457, the **absolute scale recalibrated per
-  channel** (the r450 fit had absorbed the reference's stereo→mono
-  downmix weights and ran 3 dB loud; the fitted gain is now
-  0.99–1.00 on every envelope-coded family, mono included) —
-  reaches **per-second median SNR 45.3 / 50.3 / 60.4 dB** with
-  **corr² 0.998–1.000** against a per-channel black-box reference
-  decode on the three fully-closing envelope-coded families (stereo
-  22.05 kHz, 44.1 kHz 96 kbps, 44.1 kHz VBR), **13.3 dB / corr²
-  0.944** on the mono 22.05 kHz noise-substitution family (its
-  flagged bands now carry noise at the measured level rather than
-  zeros — an uncorrelated fill by construction), and 4.7 dB on the
-  mono 8 kHz LSP-envelope stream (its conversion tables are the
-  remaining staged gap on that family).
+  neighbour-matched sine slopes, the **staged dequantisers as
+  validated on vendor bits** (r459: the `wma-envelope-weight-lut`
+  band weight `10^((e − e_max)/16)` clamped to `[−72, 50]`, the
+  `wma-total-gain-lut` total gain `10^(g/20)`, the decoder's own
+  `f32` store points; the r457 per-channel `ABS_SCALE` calibration
+  carried over as `ABS_SCALE / F(64)`), the computed band partition
+  rounding to the **nearest** multiple of four, and the **§3.1 LSP
+  envelope** ([`lsp_envelope`], below) — reaches **per-second median
+  SNR 138 / 138 dB** (the reference's own `f32` floor) on the two
+  44.1 kHz families, **92.7 dB** on the mono 8 kHz LSP stream
+  (4.7 dB in r457), **45.4 dB** on the stereo 22.05 kHz stream, all
+  at **corr² 0.998–1.000, fitted gain 0.99–1.00**, and **15.1 dB /
+  corr² 0.945** on the mono 22.05 kHz noise-substitution family
+  (its flagged bands carry the vendor generator's noise — an
+  uncorrelated fill by construction against the reference's own).
+* **§3.1 LSP envelope, bit-exact** ([`lsp_envelope`], [`lsp_tables`],
+  r459): the staged round-09 model of the vendor decoder's
+  line-spectral → envelope conversion (codebook → symmetric P/Q
+  products → `A` → the three-stage radix-4 `|A(ω)|²` evaluator →
+  fourth-root LUT lookup → running maximum), transliterated with its
+  binary64-register / binary32-store discipline; `tests/lsp_model.rs`
+  runs the staged script as a black box and pins **all 3 931
+  conversions of `cand_mono8k_8kbps_v8` (2 012 672 bins) bit-exact**
+  — the model the staging validated bit-for-bit in the sandboxed
+  vendor decoder. The LSP-path dequantiser (`g = f32(f32(1/max W) ·
+  F(total))`, bin `f32((q · W[i]) · g)`) follows the validated form.
 * Five §1/§2/§5 details calibrated *differently* from the staged
   reading, with the §1 carry boundary as ground truth (reported to
   the docs staging as erratum/extension asks): the F1 field is a
@@ -280,67 +290,65 @@ vendor-encoded WMA v2 streams**:
   **channel-scoped** (second coded channel only); and the §2.1 walk
   start below.
 
-* **The §2.1 noise-substitution policy is measured across the
-  sample-rate axis** (r454 at 22.05 kHz, r457 everywhere else, via
-  the crate's own encoder mirror judged by the black-box reference,
-  every block size 128–2048 through explicit mixed block schedules;
-  `vendor_frame::measured_noise_policy`): enabled always at
-  11.025 / 16 kHz, below the staged 1.16 class-2 threshold at 22.05
-  **and 32 kHz**, at rate floats ≤ 0.6 at 44.1 / 48 kHz, never at
-  8 kHz; the walk starts at a critical-band-seed **cutoff
-  frequency** (3700 Hz at 11.025/16 kHz, 6400/7700 Hz at 22.05 kHz
-  switching at the 0.72 class-1 threshold, 9500 Hz at 32/48 kHz,
-  7700 Hz at 44.1 kHz) whose bin, rounded up inside the containing
-  band, is the first walked band's lower edge (358 not 356 on
-  512-blocks at 22.05 kHz — the vendor mono stream closes 103/122
-  under this reading, 97 with the band edge; the 256-block
-  hard-table start stays at the r454 148). Every short block carries
-  the B2 bit. This is what isolated the README's old "16/32 kHz
-  divergence": every 32 kHz class-2 configuration — nine ACM
-  catalogue cells — decoded to garbage at the reference and now
-  decodes at 21–26 dB.
-* **The §2.1 noise generator's level law is measured**
-  (`vendor_decode::noise_band_rms`): a flagged band is white noise at
-  a per-coefficient RMS of `10^((G − 64)/20) · w_band · |ABS_SCALE|`
-  — the F4 gain plays the total gain's role on a unit-RMS generator
-  (1 dB per step), following the band exponent at the ladder ratio,
-  independent of the block's total gain and of the coded
-  coefficients, one gain per band. The decoder fills flagged bands
-  accordingly (its own generator: level and shape match the
-  reference, not the sample sequence). Two further reference
-  behaviours are measured and recorded rather than adopted: the
+* **The §2.1 noise substitution is the staged rule** (r459;
+  `vendor_frame::staged_noise_cutoff` / `noise_cutoff` /
+  `noise_policy`): the enable rule and cutoff table of the staging
+  (a fraction of half the sample rate per version / sample-rate /
+  rate row), the cutoff bin `c = min(trunc(N · fraction + 0.5), N)`,
+  the walk from the band **containing** `c`, and only `[c, edge)` of
+  a flagged first band leaving the coefficient axis — validated
+  bit-for-bit in the staging on the vendor mono 22.05 kHz stream,
+  which closes 122/122 under it. The r454/r457 black-box brackets
+  (`measured_noise_policy`, kept as the alias) sit inside the staged
+  rows wherever they overlap; two rows are carried as the black-box
+  reference demonstrably reads them (each an erratum hypothesis
+  against the static read, reported): 22050–44099 Hz at
+  `rate < 0.72` is `0.6 · half` (staged 0.5), and the 16000–22049 Hz
+  row's branch sense is reversed (`0.3 · half` if `bps ≤ 0.5`, else
+  `0.5 · half`). Every short block carries the B2 bit.
+* **The §2.1 noise generator is the staged vendor generator** (r459):
+  `s ← s · 0x19660d + 0x3c6ef35f`, `r = (s ≫ 2) + (s ≫ 4)`, first
+  difference, `2⁻²⁹`, one draw per bin; every coded bin carries the
+  `0.02 · noise` dither (`0.04` on the §3.1 path), a flagged band is
+  `n · w · ratio_k · F(gain_k)`, the tail above `coef_end` is
+  `0.02 · noise · w_last · g₀` — the store forms validated on 71 439
+  vendor bins in the staging. The r457 black-box level law
+  (`vendor_decode::noise_band_rms`, a per-coefficient RMS of
+  `10^((G − 64)/20) · w_band · |ABS_SCALE|`) is the single-flagged-band
+  case and is what the encoder inverts to choose F4 gains. One further
+  reference behaviour stays recorded rather than adopted: the
   reference fills **every zero-quantised bin** of a coded channel
-  with noise at `0.4 · step` (`BlockSynth::with_zero_fill_noise`,
-  off by default — unstaged), and it reads a flagged coefficient
-  axis one coefficient shorter than the vendor stream's reading
-  (the encoder never codes that index).
+  with noise at `0.4 · step` (`BlockSynth::with_zero_fill_noise`, off
+  by default — the vendor dither is 20× smaller).
 
 ### What is still open
 
-* the **§2.1 closed forms**: the enable rule and the cutoff seeds
-  are measured brackets (the exact 44.1/48 kHz threshold sits in
-  (0.600, 0.617]; the 22.05 kHz cutoff switch in (0.689, 0.727]),
-  the 22.05 kHz 256-block start is a vendor-validated exception to
-  the cutoff rule, and the remaining 19 mono-22.05 kHz carry
-  boundaries; the vendor noise generator's sequence (level and
-  shape are matched);
+* the **two §2.1 rows the black-box reference contradicts** (the
+  22050–44099 Hz low-rate branch and the 16000–22049 Hz branch
+  sense) — carried as the reference reads them, unverifiable against
+  the vendor without a stream on those branches; the `< 8000 Hz` row
+  and the version-1 rows are carried as staged and unexercised;
+* the **`byte_offset_bits` rounding at a power-of-two boundary**
+  (the reference rounds the frame byte count up; the vendor's own
+  reading there is unverified) and the total-gain form below 18
+  (an unstaged constant; the continuous law is carried);
 * **128-sample blocks at 22.05 / 44.1 kHz in this crate's own
   streams**: the reference decodes vendor 128-blocks (and this
   crate parses them, 1056 in the 96 kbps stream) but rejects most
   block schedules in which this encoder emits them (position
   dependent; 32 / 48 kHz accept everything) — cause not isolated;
   the encoder's own scheduler never emits 128-sample blocks;
-* the **vendor-literal dequantisation composition and
-  transition-window shape** (the measured-best realisation is
-  carried; the r454 weight-law probe shows agreement within 0.4 dB
-  down to 24 ladder steps below the block maximum);
-* the **§3.1 line-spectral envelope conversion tables** (wire format
-  staged and parsed; the index → envelope mapping is not — the mono
-  8 kHz stream decodes with a flat envelope meanwhile);
+* the **transition-window shape** and the absolute output scale
+  after the inverse transform (the measured-best realisation is
+  carried; the dequantisers themselves are now the staged, validated
+  forms);
+* the §3.1 path on **short blocks, cross-size reuse and stereo** (no
+  committed vendor stream exercises them; the resampler and the
+  noise-enabled §3.1 forms are carried as read, DERIVED);
 * **WMA v1** specifics (no v1 vendor stream exists in the staged
   set) and the v1 per-channel byte-alignment rule.
 
-### Vendor-wire encoder (r454, campaign r457)
+### Vendor-wire encoder (r454, campaign r457, §3.1 path r459)
 
 The encoder mirror is complete end-to-end at the vendor wire level:
 
@@ -384,9 +392,18 @@ The encoder mirror is complete end-to-end at the vendor wire level:
   0.99–1.01, SNR 26–41 dB** tracking the own chain (the r454 leg's
   12–14 dB reference figures were a downmix/tail measurement
   artefact). Acceptance is the bar; bit-parity with a vendor encoder
-  is not claimed. The §3.1 LSP envelope path is not encodable and is
-  refused at construction; v1 is emittable but unvalidated (no
-  vendor v1 stream is staged).
+  is not claimed. v1 is emittable but unvalidated (no vendor v1
+  stream is staged).
+* **§3.1 LSP envelope encoding** ([`lsp_analysis`], r459): the ten
+  indices are fitted to the elected per-band target (all-pole model
+  of `T⁴` on the decoder grid, Levinson–Durbin, LSP roots by scan +
+  bisection onto the codebook rows, nearest-entry quantisation, then
+  coordinate descent on the decoder-exact envelope), so the
+  quantiser normalises by exactly what the decoder multiplies by.
+  The ladder gains the **21 LSP-path catalogue cells** (8–32 kHz,
+  5–22 kbps, mono and stereo, headerless and reservoir/VBL): own
+  chain 17.8–27.3 dB, the reference decodes every cell at corr²
+  0.987–0.999 tracking the own chain (18.1–33.2 dB).
 
 ### Framework registration (r450, encoder r454)
 

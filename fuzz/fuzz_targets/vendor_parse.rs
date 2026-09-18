@@ -41,7 +41,11 @@ fuzz_target!(|data: &[u8]| {
     let payload = &data[1..];
     let cfg = &configs()[usize::from(sel & 0x3)];
     let noise_first_band = usize::from((sel >> 2) & 0x7);
+    // Bit 5: an explicit walk start (a fixed band, or the staged
+    // cutoff rule at an arbitrary fraction); clear = the stream's own
+    // policy (`vendor_frame::noise_policy`).
     let with_noise = sel & 0x20 != 0;
+    let staged_fraction = payload.first().map(|&b| f64::from(b) / 255.0);
     let grid = if sel & 0x40 != 0 {
         NoiseGrid::OctaveSubbands
     } else {
@@ -66,10 +70,11 @@ fuzz_target!(|data: &[u8]| {
     let body_starts: Vec<u64> = stream.packets.iter().map(|p| p.body_start_bit).collect();
     let mut parser = FrameParser::new(cfg, &body_starts).with_reuse(reuse);
     if with_noise {
-        parser = parser.with_noise(NoiseSpec {
-            start: NoiseStart::Band(noise_first_band),
-            grid,
-        });
+        let start = match staged_fraction {
+            Some(f) if noise_first_band >= 4 => NoiseStart::StagedCutoff { half_fraction: f },
+            _ => NoiseStart::Band(noise_first_band),
+        };
+        parser = parser.with_noise(NoiseSpec { start, grid });
     }
     let mut reader = stream.reader_at(u64::from(stream.packets[0].header.carry_bits));
     let mut synth = BlockSynth::new(cfg);

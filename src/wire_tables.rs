@@ -101,10 +101,12 @@
 //!   coincides bit-for-bit is not yet verified — a documented
 //!   residual of the extraction.
 //!
-//! Also confirmed by the extraction pass: **no LSP codebook exists**
-//! on this decode path (static scan and load-time probe both
-//! negative); the spectral envelope is exponent/critical-band coded,
-//! which is exactly the machinery the tables above seed.
+//! The extraction pass's "no LSP codebook exists" negative was
+//! **overturned** by the round-08 staging: the §3.1 codebook is a
+//! const `.rdata` array (carried in [`crate::lsp_tables`]) and the
+//! two root tables are built at stream open; the exponent /
+//! critical-band machinery the tables above seed is the `flags2`
+//! bit-0-set path.
 
 /// Critical-band upper edges in Hz — the exponent/quantization-band
 /// partition seed (25 entries, strictly increasing, `100..=24500` Hz,

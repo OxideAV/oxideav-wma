@@ -6,7 +6,93 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **§3.1 LSP envelope conversion, bit-exact (r459)** —
+  `lsp_envelope` transliterates the staged round-09 model of the vendor
+  decoder's line-spectral → envelope conversion (codebook → symmetric
+  P/Q products → `A` → the three-stage radix-4 `|A(ω)|²` evaluator →
+  fourth-root LUT lookup → running maximum) with its binary64-register /
+  binary32-store discipline; `lsp_tables` carries the codebook and both
+  twiddle tables as binary32 bit patterns and the two open-time root
+  LUTs are rebuilt from the staged generation arithmetic.
+  `tests/lsp_model.rs` runs the staged script as a black box: 98
+  random conversions at every grid length and **all 3 931 conversions
+  of `cand_mono8k_8kbps_v8` (2 012 672 bins + maxima) are bit-exact**
+  against the model the staging validated bit-for-bit in the sandboxed
+  vendor decoder. `StreamConfig::lsp_grid_len` carries the `flags2`
+  bit-5 grid rule.
+- **§3.1 LSP path decoded** — LSP-path blocks dequantise through the
+  exact envelope (`g = f32(f32(1/max W) · F(total))`, bin
+  `f32((q · W[i]) · g)`), with the per-size cache holding converted
+  envelopes and a nearest-neighbour resample on cross-size reuse. The
+  mono 8 kHz vendor stream goes from 4.7 dB / corr² 0.66 / gain 0.28
+  (r457 flat envelope) to **92.7 dB / 1.000 / 0.999** against the
+  reference.
+- **§3.1 LSP envelope encoding (`lsp_analysis`)** — the ten indices are
+  fitted to the elected per-band target (all-pole model of `T⁴` on the
+  decoder grid, Levinson–Durbin, LSP roots by scan + bisection onto the
+  codebook rows, nearest-entry quantisation, coordinate descent on the
+  decoder-exact envelope); `EncEnvelope::Lsp` is emitted in place of
+  B3/B4 and `FrameEmitter` / `VendorEncoder` / `make_encoder` accept
+  `flags2` bit-0-clear streams. The encoder ladder gains the **21
+  LSP-path catalogue cells** (8–32 kHz, 5–22 kbps): own chain
+  17.8–27.3 dB, the reference decodes every cell at corr² 0.987–0.999
+  tracking the own chain (18.1–33.2 dB).
+- **The staged §2.1 generator** — `s ← s · 0x19660d + 0x3c6ef35f`,
+  `r = (s ≫ 2) + (s ≫ 4)`, first difference, `2⁻²⁹`, one draw per bin;
+  the validated store forms for cutoff / unflagged (`0.02 · noise`
+  dither on every coded bin), flagged (`n · w · ratio_k · F(gain_k)`)
+  and tail bins, and the §3.1 variants (0.04 dither, `1/max W`) as
+  read. The r457 measured level law is the single-band case.
+- Fuzz: `vendor_encode_roundtrip` sanitises `EncEnvelope::Lsp` on two
+  LSP-path configurations (8 kHz mono, 16 kHz stereo + noise + VBL);
+  `vendor_parse` also drives the staged cutoff walk at arbitrary
+  fractions. 79 k / 1.01 M executions clean in the round.
+
+### Changed
+
+- **Dequantisation as validated (r459)** — the band weight is the
+  staged `wma-envelope-weight-lut` split lookup (`10^(e/16)`, `e`
+  clamped to `[−72, 50]`, the `e = −72` one-past quirk carried) and the
+  total gain the staged `wma-total-gain-lut` product; the r450 integer
+  ladder ratio and closed-form gain are gone, `ABS_SCALE` carries over
+  as `ABS_SCALE / F(64)` (`pcm_scale`). The 44.1 kHz vendor families
+  move from 50.3 / 60.4 dB to **138 dB** (the reference's own f32
+  floor); the r454 "Δe > 24" weight-law question is answered by the
+  staged table (the law runs to −71 unchanged).
+- **The staged §2.1 enable rule and cutoff** replace the r454/r457
+  black-box brackets (`vendor_frame::staged_noise_cutoff` /
+  `noise_cutoff` / `noise_policy`; `measured_noise_policy` delegates):
+  cutoff bin `c = min(trunc(N · fraction + 0.5), N)`, walk from the
+  band containing `c`, only `[c, edge)` of a flagged first band leaves
+  the coefficient axis. Two rows are carried as the black-box reference
+  demonstrably reads them (each an erratum hypothesis, reported):
+  22050–44099 Hz at `rate < 0.72` is `0.6 · half` (staged 0.5), and
+  the 16000–22049 Hz row's branch sense is reversed (`0.3 · half` if
+  `bps ≤ 0.5`, else `0.5 · half`).
+
 ### Fixed
+
+- **Mono 22.05 kHz closes 122/122 (r459)** — the r446 "F1 anomaly"
+  (64/122) and the r457 residue (103/122) were the noise walk's first
+  band starting one bin (1024-blocks: 716 vs 717) and one band width
+  (256-blocks: the 148 edge vs 179) off the staged rule. All six vendor
+  streams now close **1763/1763** §1 boundaries; the family's reference
+  SNR 13.3 → 15.1 dB. The r457 "reference reads a flagged axis one
+  coefficient shorter" workaround (the encoder blanking the bin below
+  the first noise band) was the same off-by-one and is gone.
+- `StreamConfig::byte_offset_bits` rounds the per-channel frame byte
+  count up before the log2 — the two readings differ only just below
+  a power of two, where the reference takes the rounded-up one (the
+  stereo 22.05 kHz 2751 B/s catalogue cell, 63.88 bytes, decodes at
+  the reference only with 8).
+- The encoder emits total gain 1 on a block whose channels quantised
+  to nothing: under the staged `0.02 · F(total)` dither a bit-starved
+  block at a coarse gain would decode as loud noise (a 16 kHz stereo
+  LSP cell's own-chain −75 dB).
+
+### Fixed (r457)
 
 - **Absolute output scale recalibrated (r457)** — `vendor_decode::ABS_SCALE`
   was fitted in r450 against the black-box reference's stereo→mono
@@ -47,7 +133,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restricted to the stereo streams it could see. Vendor closure
   unchanged (1738/1763).
 
-### Added
+### Added (r457)
 
 - **§2.1 noise substitution, end to end (r457)** — the emitter writes
   F3 flags and F4 gains (`EncChannelData::noise_flags` /
@@ -95,7 +181,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the band exponents), flags or not; nothing staged describes this
   floor, so it is an option, not the default.
 
-### Changed
+### Changed (r457)
 
 - **Encoder allocation: per-frame election by a masking-aware cost
   (r457)** — `EncoderSettings::allocation` (`Allocation::Adaptive`,
@@ -128,7 +214,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget carries forward, a frame may borrow one average frame),
   replacing the ±3/−4 walk; streams land at the nominal rate.
 
-### Added
+### Added (r457, encoder ladder)
 
 - **Encoder ladder** (`tests/encoder_ladder.rs`): every encodable
   WMA v2 cell of the staged ACM catalogue (21 cells: 22.05–48 kHz,

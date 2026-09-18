@@ -48,6 +48,11 @@ fn configs() -> &'static Vec<StreamConfig> {
             StreamConfig::derive(Version::V2, 22_050, 2, 4_005, 186, 0x0001).unwrap(),
             // 44.1 kHz mono reservoir, small packets.
             StreamConfig::derive(Version::V2, 44_100, 1, 8_003, 800, 0x0003).unwrap(),
+            // §3.1 LSP envelope path (the vendor mono 8 kHz geometry,
+            // small packets) and the ACM catalogue's 16 kHz stereo
+            // LSP + noise + VBL cell.
+            StreamConfig::derive(Version::V2, 8_000, 1, 1_000, 160, 0x0026).unwrap(),
+            StreamConfig::derive(Version::V2, 16_000, 2, 2_004, 342, 0x000e).unwrap(),
         ]
     })
 }
@@ -91,15 +96,28 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
                     coefficients: Vec::new(),
                 };
             }
-            // Chain-clamped envelope inside [0, 60].
-            let mut exponents = Vec::with_capacity(bands);
-            let mut prev = 36i32;
-            for _ in 0..bands {
-                let delta = i32::from(feed.next() % 41) - 20;
-                let e = (prev + delta).clamp(0, 60);
-                exponents.push(e);
-                prev = e;
-            }
+            // Chain-clamped envelope inside [0, 60], or — on the §3.1
+            // path — ten indices inside their field widths.
+            let envelope = if cfg.exp_vlc {
+                let mut exponents = Vec::with_capacity(bands);
+                let mut prev = 36i32;
+                for _ in 0..bands {
+                    let delta = i32::from(feed.next() % 41) - 20;
+                    let e = (prev + delta).clamp(0, 60);
+                    exponents.push(e);
+                    prev = e;
+                }
+                EncEnvelope::Exponents(exponents)
+            } else {
+                let mut idx = [0u8; 10];
+                for (slot, &w) in idx
+                    .iter_mut()
+                    .zip(oxideav_wma::vendor_frame::LSP_INDEX_WIDTHS.iter())
+                {
+                    *slot = feed.next() & ((1u8 << w) - 1);
+                }
+                EncEnvelope::Lsp(idx)
+            };
             // §2.1 flags over the stream's walk (policy-gated), the
             // flagged bins leaving the coefficient axis; gains chained
             // within the wire's range.
@@ -145,7 +163,7 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
             }
             EncChannelData {
                 coded: true,
-                envelope: Some(EncEnvelope::Exponents(exponents)),
+                envelope: Some(envelope),
                 noise_flags,
                 noise_gains,
                 coefficients,
@@ -187,8 +205,11 @@ fn wire_leg(cfg: &StreamConfig, feed: &mut ByteFeed<'_>) {
         match writer.write_frame(frame, next_first) {
             Ok(()) => committed.push(frame.clone()),
             // Tiny packets can refuse a dense frame; anything else is
-            // a sanitiser bug worth crashing on.
-            Err(EmitError::FrameTooLong { .. }) => {}
+            // a sanitiser bug worth crashing on. A refusal ends the
+            // sequence: the F1 pipeline already promised this frame's
+            // first block size, and the emitter's contract is that
+            // the next frame written honours the promise.
+            Err(EmitError::FrameTooLong { .. }) => break,
             Err(e) => panic!("sanitized frame refused: {e}"),
         }
     }
@@ -259,6 +280,7 @@ fn wire_leg(cfg: &StreamConfig, feed: &mut ByteFeed<'_>) {
                 }
                 match (sc.envelope.as_ref().unwrap(), pc.envelope.as_ref().unwrap()) {
                     (EncEnvelope::Exponents(e), Envelope::Exponents(d)) => assert_eq!(d, e),
+                    (EncEnvelope::Lsp(e), Envelope::LspIndices(d)) => assert_eq!(d, e),
                     (s, d) => panic!("envelope mismatch: {s:?} vs {d:?}"),
                 }
                 assert_eq!(pc.coefficients, sc.coefficients);
@@ -331,8 +353,8 @@ fuzz_target!(|data: &[u8]| {
         data: &data[1..],
         pos: 0,
     };
-    let cfg = &configs()[usize::from(sel & 0x3)];
-    if sel & 0x4 == 0 {
+    let cfg = &configs()[usize::from(sel & 0x7) % configs().len()];
+    if sel & 0x8 == 0 {
         wire_leg(cfg, &mut feed);
     } else {
         pcm_leg(cfg, &mut feed);

@@ -216,9 +216,10 @@
 //! 113-step dequantization gain ladder) is transcribed into
 //! [`wire_tables`], each table pinned by invariant tests (Kraft
 //! equality for the complete modes, the documented escape deficit
-//! for mode 2, monotonicity, the ladder's closed form). The same
-//! extraction confirms **no LSP codebook exists** on this decode
-//! path. Still `[GAP]`: the symbol → `(R, L)` mapping, the mode-2
+//! for mode 2, monotonicity, the ladder's closed form). (That
+//! extraction's "no LSP codebook" negative was overturned by the
+//! round-08 staging: the §3.1 codebook is a const array, carried in
+//! [`lsp_tables`].) Still `[GAP]` at the time: the symbol → `(R, L)` mapping, the mode-2
 //! escape enumeration, the scale/gain VLCs, sign-bit placement, and
 //! the frame/superframe bit layout — so the full
 //! bitstream-byte → PCM path remains intentionally absent.
