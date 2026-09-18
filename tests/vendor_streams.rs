@@ -302,17 +302,20 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
             "{}: {}/{} boundaries closed, {} frame-parse errors; (size, fresh, reused) {:?}",
             l.spec.file, aligned, boundaries, parse_errors, size_histogram
         );
-        // Per-family floors at the measured r446 closure rates (the
+        // Per-family floors at the measured closure rates (the
         // vendor-calibrated F1 pipeline / channel-scoped ALT /
-        // two-channel short-block B2 / zero-carry-padding parser).
-        // A regression below any floor means a parser change broke a
-        // previously-closing family. Five of the six families close
-        // completely; the mono 22.05 kHz stream carries the open F1
-        // anomaly (see the round report).
+        // per-short-block B2 / zero-carry-padding parser, and since
+        // r459 the staged §2.1 cutoff-bin walk). A regression below
+        // any floor means a parser change broke a previously-closing
+        // family. All six families close completely: the mono
+        // 22.05 kHz stream's "F1 anomaly" (64/122 in r446, 103/122 in
+        // r457) was the noise walk's first band starting one bin
+        // (1024-blocks) and one band width (256-blocks) off the staged
+        // rule.
         let floor = match l.spec.file {
             "cand_mono8k_8kbps_v8.wma" => 394,      // 394/394 (100 %)
             "cand_stereo22k_32kbps_av.wma" => 1098, // 1098/1098 (100 %)
-            "cand_mono22k_16kbps.wma" => 100,       // 103/122 (r457 cutoff-bin walk start)
+            "cand_mono22k_16kbps.wma" => 122,       // 122/122 (100 %, r459 staged walk)
             "cand_wmp12_96kbps.wma" => 133,         // 133/133 (100 %)
             "cand_vbr_q75_stereo.wma" => 13,        // 13/13 (100 %)
             "cand_apollo8.wma" => 3,                // 3/3 (100 %)
@@ -328,7 +331,7 @@ fn frame_parse_closes_on_packet_carry_boundaries() {
     }
     eprintln!("total: {all_aligned}/{all_packets} boundaries closed");
     assert!(
-        all_aligned >= 1730,
+        all_aligned >= 1763,
         "global closure regressed: {all_aligned}/{all_packets}"
     );
 }
@@ -683,13 +686,14 @@ fn vendor_pcm_decodes_and_correlates() {
                 );
             }
             "cand_mono22k_16kbps.wma" => {
-                // r454: the measured noise-substitution policy
-                // (vendor_frame::measured_noise_policy) opened this
-                // family — the old "F1 anomaly" was the missing
-                // F3/B2 parse. 97/122 closures, corr² 0.95,
-                // ≈ 14 dB median.
+                // r454: the measured noise-substitution policy opened
+                // this family (97/122, ≈ 14 dB); r459: the staged
+                // cutoff-bin walk closes it (122/122, 15.1 dB, corr²
+                // 0.945 — the substituted bands are noise of the
+                // vendor generator's sequence, uncorrelated with the
+                // reference's own fill by construction).
                 assert!(corr2 > 0.9, "corr² regressed: {corr2}");
-                assert!(median > 10.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 13.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"

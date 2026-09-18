@@ -78,6 +78,9 @@
 use crate::bitio::{BitReader, BitstreamEnd};
 use crate::header::Version;
 use crate::stream_config::StreamConfig;
+use crate::wire_tables::{
+    CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD, CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
+};
 use crate::wire_vlc::{coef_vlc, gain_vlc, runlevel_map, scale_vlc, ExactVlc, VlcDecodeError};
 
 /// §3.1 fixed index widths of the line-spectral envelope path.
@@ -279,6 +282,21 @@ pub enum NoiseStart {
     /// stream closes 97/122 §1 boundaries from edge 148 and 61/122
     /// from the rule's 180).
     CutoffHzWithOverrides(u32, &'static [(u16, u16)]),
+    /// The **staged §2.1 rule** (`frame-bit-layout.md` §2.1, read in
+    /// round 08 and validated bit-for-bit on the vendor mono
+    /// 22.05 kHz stream in round 10): the cutoff frequency is a
+    /// fraction of half the sample rate, the cutoff **bin** of a
+    /// block of `N` coefficients is `c = min(trunc(N · fraction +
+    /// 0.5), N)`, the walk starts at the band of the block's
+    /// exponent-band partition that **contains** `c`, and the noise
+    /// region is `[c, coef_end)` — the first walked band's bins below
+    /// `c` stay coefficient-coded even when the band is flagged
+    /// (`1024 → 717`, `512 → 358`, `256 → 179` at 22.05 kHz, 0.7 ·
+    /// half). The default since r459 ([`staged_noise_policy`]).
+    StagedCutoff {
+        /// `f_c / (sample_rate / 2)`.
+        half_fraction: f64,
+    },
 }
 
 /// The §2.1 noise-substitution parse hypothesis. The open-time
@@ -772,6 +790,12 @@ pub(crate) fn noise_walk_start(
             .unwrap_or(walk_count)
     };
     match *start {
+        NoiseStart::StagedCutoff { half_fraction } => {
+            let c = staged_cutoff_bin(half_fraction, block_size);
+            (0..walk_count)
+                .find(|&b| walk_edges[b] <= c && c < walk_edges[b + 1])
+                .unwrap_or(walk_count)
+        }
         NoiseStart::CutoffHz(f) => cutoff(f),
         NoiseStart::CutoffHzWithOverrides(f, overrides) => overrides
             .iter()
@@ -812,83 +836,115 @@ pub(crate) fn noise_walk_start(
 /// 148 and 61/122 from 180, so 148 stands).
 pub const MEASURED_NOISE_START_EDGES_22050: [(u16, u16); 3] = [(1024, 716), (512, 356), (256, 148)];
 
-/// The black-box-measured §2.1 noise-substitution policy: whether a
-/// configuration parses with the F3/F4 sub-stream active, the cutoff
-/// frequency its walk starts at, and the B2 rule that accompanies it.
+/// The staged §2.1 **enable rule and cutoff frequency**
+/// (`frame-bit-layout.md` §2.1, `.text 0x5770`; `half = sample_rate
+/// / 2`, `bps` and `rate` the §0 floats): `Some(fraction of half)`
+/// when the sub-stream is active for the configuration, `None` when
+/// it is not.
 ///
-/// Measured (r454, extended across the sample-rate axis in r457) by
-/// emitting crafted frames through this crate's own emitter mirror
-/// and checking which hypothesis the black-box reference decoder
-/// accepts (per-channel corr² and SNR tracking the own-chain decode;
-/// wrong hypotheses decode to garbage or hard-error). Mono
-/// configurations at every block size 128–2048 through explicit
-/// mixed block schedules, stereo spot-checked; `rate` is the §0
-/// rate float (`bps · 1.6` for two channels):
+/// | version | sample rate | enabled | cutoff |
+/// | --- | --- | --- | --- |
+/// | 2 | ≥ 44100 | `rate < 0.61` | `0.4 · half` |
+/// | 2 | 22050 … 44099 | `rate < 1.16` | `0.5 · half` if `rate < 0.72`, else `0.7 · half` |
+/// | 2 | 16000 … 22049 | always | `0.5 · half` if `bps ≤ 0.5`, else `0.3 · half` |
+/// | 2 | 11025 … 15999 | always | `0.7 · half` |
+/// | 2 | 8000 … 11024 | `bps ≤ 0.75` | `0.5 · half` if `bps ≤ 0.625`, else `0.65 · half` |
+/// | 2 | < 8000 | always | `0.75 · half` if `bps < 0.8`, else `0.6 · half` |
+/// | 1 | 22050 / 44100 / 16000 / 11025 / 8000 exactly | as the v2 row | as the v2 row |
+/// | 1 | any other rate | always | `0.75 · half` if `bps < 0.8`, else `0.6 · half` |
 ///
-/// | sample rate | enabled when | cutoff |
-/// | ----------- | ------------ | ------ |
-/// | 8000 | never (rate 1.0–1.5 measured off) | — |
-/// | 11025 | always (rate 0.73–1.31 measured on) | 3700 Hz |
-/// | 16000 | always (rate 0.80–1.20 measured on) | 3700 Hz |
-/// | 22050 | `rate < 1.16` (r454; 1.143 on, 1.161 off) | 6400 Hz below `rate 0.72` (0.689 → 6400, 0.727 → 7700), 7700 Hz above |
-/// | 32000 | `rate < 1.16` (1.150 on, 1.163 off; classes 1 and 2) | 9500 Hz |
-/// | 44100 | `rate ≤ 0.6` (0.599 on, 0.617 off) | 7700 Hz |
-/// | 48000 | `rate ≤ 0.6` (0.600 on, 0.617 off) | 9500 Hz |
-///
-/// The 22.05 / 32 kHz enable threshold is the staged class-2
-/// selector constant and the 22.05 kHz cutoff switch sits at the
-/// class-1 constant (`wma-class-selector-thresholds`); the cutoffs
-/// are critical-band seeds (`critical-band-freqs`). The start band
-/// is the band **containing** the cutoff bin rounded to a multiple
-/// of four ([`NoiseStart::CutoffHz`]) — verified at every size:
-/// 32 kHz 1216/608/304/152/76, 44.1 kHz 716/356/180, 48 kHz
-/// 812/404/180, 22.05 kHz 716/356 (+ 596 at the low cutoff), 16 kHz
-/// 236, 11.025 kHz 344. The closed form behind the table is an open
-/// docs ask; the table is what the reference accepts.
-///
-/// On enabled streams every short block carries the B2 bit
-/// ([`ReuseRule::ShortBlockPerBlock`] — since r457 the default for
-/// every stream).
-pub fn measured_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule)> {
-    use crate::wire_tables::{
-        CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD, CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
-    };
+/// The r454/r457 black-box brackets ([`measured_noise_policy`]'s
+/// former table) sit inside these rows wherever they overlap: the
+/// 44.1/48 kHz enable in `(0.600, 0.617]` is `0.61`, the 22.05/32 kHz
+/// enable is the `1.16` class-2 constant, the 22.05 kHz cutoff switch
+/// in `(0.689, 0.727]` is `0.72`, and every measured start *band*
+/// (the band containing the cutoff bin) at 22.05 / 32 / 44.1 / 48 /
+/// 11.025 kHz is the band this rule selects (7717 Hz vs the measured
+/// 7700 Hz seed at 22.05 kHz: bins 717 / 358 / 179 vs 716 / 358 /
+/// 148-override). The 16 kHz row is the one place the two disagree
+/// (`0.3 · half` = 2400 Hz here; the black-box reference accepted a
+/// 3700 Hz start band, which `0.5 · half` would select) — carried as
+/// staged, reported as a docs ask.
+pub fn staged_noise_cutoff(cfg: &StreamConfig) -> Option<f64> {
     let rate = cfg.rate_float;
-    let start = match cfg.sample_rate {
-        11_025 | 16_000 => NoiseStart::CutoffHz(3700),
-        22_050 if rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD => {
-            if rate < CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD {
-                NoiseStart::CutoffHz(6400)
-            } else {
-                NoiseStart::CutoffHzWithOverrides(7700, &MEASURED_NOISE_START_OVERRIDES_22050)
-            }
+    let bps = cfg.bps;
+    let sr = cfg.sample_rate;
+    let v2_row = |sr: u32| -> Option<f64> {
+        if sr >= 44_100 {
+            (rate < 0.61).then_some(0.4)
+        } else if sr >= 22_050 {
+            (rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD).then_some(
+                if rate < CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD {
+                    0.5
+                } else {
+                    0.7
+                },
+            )
+        } else if sr >= 16_000 {
+            Some(if bps <= 0.5 { 0.5 } else { 0.3 })
+        } else if sr >= 11_025 {
+            Some(0.7)
+        } else if sr >= 8_000 {
+            (bps <= 0.75).then_some(if bps <= 0.625 { 0.5 } else { 0.65 })
+        } else {
+            Some(if bps < 0.8 { 0.75 } else { 0.6 })
         }
-        32_000 if rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD => NoiseStart::CutoffHz(9500),
-        44_100 if rate <= NOISE_ENABLE_HIGH_RATE_THRESHOLD => NoiseStart::CutoffHz(7700),
-        48_000 if rate <= NOISE_ENABLE_HIGH_RATE_THRESHOLD => NoiseStart::CutoffHz(9500),
-        _ => return None,
     };
+    match cfg.version {
+        Version::V2 => v2_row(sr),
+        Version::V1 => match sr {
+            22_050 | 44_100 | 16_000 | 11_025 | 8_000 => v2_row(sr),
+            _ => Some(if bps < 0.8 { 0.75 } else { 0.6 }),
+        },
+    }
+}
+
+/// The §2.1 policy a configuration parses under — the staged enable
+/// rule and cutoff ([`staged_noise_cutoff`]) as a
+/// [`NoiseStart::StagedCutoff`] walk over the exponent-band
+/// partition, with the per-short-block B2 rule
+/// ([`ReuseRule::ShortBlockPerBlock`]).
+pub fn staged_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule)> {
+    let half_fraction = staged_noise_cutoff(cfg)?;
     Some((
         NoiseSpec {
-            start,
+            start: NoiseStart::StagedCutoff { half_fraction },
             grid: NoiseGrid::ExponentBands,
         },
         ReuseRule::ShortBlockPerBlock,
     ))
 }
 
-/// The per-size start-edge overrides the 22.05 kHz 7700 Hz cutoff
-/// carries (see [`NoiseStart::CutoffHzWithOverrides`]): the
-/// 256-coefficient block (a staged hard-table partition) starts at
-/// the band edge one band below the cutoff rule's answer and walks
-/// three bands, the r454 vendor-stream-validated reading — the
-/// vendor mono 22.05 kHz stream closes 103/122 §1 boundaries with
-/// it and 66/122 under the cutoff-bin rule.
+/// The §2.1 noise-substitution policy the parser, emitter, decoder
+/// and encoder share — since r459 the staged rule
+/// ([`staged_noise_policy`]).
+///
+/// History: r454 (22.05 kHz) and r457 (11.025–48 kHz) measured this
+/// policy black-box, by emitting crafted frames through the crate's
+/// own emitter and checking which hypothesis the reference decoder
+/// accepted; the brackets that came out (enabled always at
+/// 11.025/16 kHz, below the 1.16 class-2 threshold at 22.05 and
+/// 32 kHz, at rate floats ≤ 0.6 at 44.1/48 kHz, never at 8 kHz at the
+/// rates probed; start bands at 3700 / 6400 / 7700 / 9500 Hz
+/// critical-band seeds) are the staged rows seen through the
+/// configurations available — see [`staged_noise_cutoff`] for the
+/// reconciliation, including the one open divergence at 16 kHz.
+pub fn measured_noise_policy(cfg: &StreamConfig) -> Option<(NoiseSpec, ReuseRule)> {
+    staged_noise_policy(cfg)
+}
+
+/// The r454/r457 per-size start-edge override the 22.05 kHz 7700 Hz
+/// cutoff carried (see [`NoiseStart::CutoffHzWithOverrides`]): the
+/// 256-coefficient block started at edge 148, one band below the
+/// rounded-to-four rule's answer. The staged rule explains it: its
+/// cutoff bin 179 lies in the hard-table band `[148, 180)`, so the
+/// walk starts at that band — with only `[179, 180)` leaving the
+/// coefficient axis when it is flagged. Kept as the round record.
 pub const MEASURED_NOISE_START_OVERRIDES_22050: [(u16, u16); 1] = [(256, 148)];
 
-/// The measured §2.1 enable threshold on the §0 rate float at 44.1
-/// and 48 kHz (on at 0.599 / 0.600, off at 0.617 — see
-/// [`measured_noise_policy`]).
+/// The r457 black-box bracket of the §2.1 enable threshold on the §0
+/// rate float at 44.1 and 48 kHz (on at 0.599 / 0.600, off at 0.617);
+/// the staged rule's `0.61` sits inside it ([`staged_noise_cutoff`]).
 pub const NOISE_ENABLE_HIGH_RATE_THRESHOLD: f32 = 0.6;
 
 /// The §2.1 noise walk of a block under the stream's measured policy:
@@ -906,22 +962,20 @@ pub fn noise_walk_bands(cfg: &StreamConfig, block_size: u16) -> Vec<(u16, u16)> 
 
 /// [`noise_walk_bands`] under an explicit [`NoiseSpec`].
 ///
-/// For the cutoff-frequency starts the **first** walked band begins
-/// at the cutoff bin rounded **up** (`ceil(f · 2M / sample_rate)`),
-/// held inside the partition band that contains the
-/// rounded-to-four bin — one or two bins above the band edge where
-/// the cutoff falls inside a band (358 instead of 356 for 512-sample
-/// blocks at 22.05 kHz; 716 = the edge for 1024). Measured on the
-/// vendor mono 22.05 kHz stream, the only vendor stream carrying the
-/// sub-stream: 103/122 §1 boundaries close under this reading, 97
-/// with the plain band edge, 94 rounding to nearest, 90 one bin
-/// lower (`tests/vendor_streams.rs`). The width of a flagged band is
-/// what leaves the coefficient axis, so these bins decide whether a
-/// flagged block parses. The black-box reference decoder reads a
-/// flagged axis **one coefficient shorter** than this at every block
-/// size probed (22.05 / 32 / 44.1 / 48 / 16 kHz — it rejects the
-/// last index), a divergence from the vendor stream that the encoder
-/// sidesteps by never coding that index (`vendor_analysis`).
+/// Under the staged rule ([`NoiseStart::StagedCutoff`], the default)
+/// the **first** walked band begins at the cutoff bin `c` inside the
+/// band that contains it, so a flagged first band removes
+/// `[c, edge)` from the coefficient axis, not the whole band; every
+/// later band is walked whole (clipped to `coef_end`). This is the
+/// §2.1 `n_coef` formula, validated bit-for-bit on the vendor mono
+/// 22.05 kHz stream in the staging; the vendor stream closes all
+/// 122/122 §1 boundaries under it (`tests/vendor_streams.rs`) where
+/// the r457 measured reading (cutoff bin rounded up from a 7700 Hz
+/// seed, 716 for 1024-blocks, and the 148 edge override for
+/// 256-blocks) closed 103. The r457 note that the black-box reference
+/// "reads a flagged axis one coefficient shorter" was this
+/// one-bin difference seen from the other side (717, not 716), and
+/// the encoder no longer blanks that bin.
 pub fn noise_walk_bands_for(
     cfg: &StreamConfig,
     block_size: u16,
@@ -944,6 +998,9 @@ pub fn noise_walk_bands_for(
         cfg.sample_rate,
     );
     let first_lo: Option<u16> = match spec.start {
+        NoiseStart::StagedCutoff { half_fraction } => {
+            Some(staged_cutoff_bin(half_fraction, block_size))
+        }
         NoiseStart::CutoffHz(f) => Some(cutoff_bin(f, block_size, cfg.sample_rate)),
         NoiseStart::CutoffHzWithOverrides(f, overrides)
             if !overrides.iter().any(|&(bs, _)| bs == block_size) =>
@@ -973,6 +1030,14 @@ pub fn noise_walk_bands_for(
 /// rounded `f · 2M / sample_rate` (the vendor mono 22.05 kHz stream
 /// closes 103/122 §1 boundaries with rounding, 99 with truncation,
 /// 97 with the band edge).
+/// The staged §2.1 cutoff bin: `min(trunc(N · fraction + 0.5), N)`
+/// (`.text 0x46f8`–`0x4727`, with `2 · N · f_c / sample_rate = N ·
+/// fraction`).
+pub fn staged_cutoff_bin(half_fraction: f64, block_size: u16) -> u16 {
+    let n = f64::from(block_size);
+    ((n * half_fraction + 0.5).trunc()).min(n) as u16
+}
+
 fn cutoff_bin(f: u32, block_size: u16, sample_rate: u32) -> u16 {
     let bin = f64::from(f) * 2.0 * f64::from(block_size) / f64::from(sample_rate.max(1));
     bin.ceil() as u16

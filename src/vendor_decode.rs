@@ -149,8 +149,17 @@ pub struct BlockSynth {
     /// §3.1 reuse falls back to (resampled) when the per-size slot is
     /// empty.
     last_env: Vec<Option<CachedEnvelope>>,
-    /// The §2.1 noise generator's state (module docs).
+    /// The reference-measured zero-fill generator's state
+    /// ([`ZERO_FILL_RMS_STEPS`]; the crate's own xorshift).
     noise_state: u64,
+    /// The staged §2.1 generator (`s ← s · 0x19660d + 0x3c6ef35f`,
+    /// from the zero seed) and its previous `r` (module docs).
+    lcg_state: u32,
+    lcg_prev: i32,
+    /// Whether the stream's §2.1 sub-stream is active
+    /// ([`crate::vendor_frame::staged_noise_policy`]): draws and the
+    /// dither happen only then.
+    noise_enabled: bool,
     /// Whether zero-quantised bins of coded channels are noise-filled
     /// at the reference's measured floor ([`ZERO_FILL_RMS_STEPS`]).
     zero_fill_noise: bool,
@@ -172,6 +181,10 @@ pub struct BlockSynth {
 /// reference SNRs agree within 0.2 dB either way).
 pub const ZERO_FILL_RMS_STEPS: f64 = 0.4;
 
+/// The §2.1 generator's output scale: the decoder multiplies each
+/// draw by `2⁻²⁹`.
+pub const NOISE_UNIT: f64 = 1.0 / (1u64 << 29) as f64;
+
 /// The §2.1 noise-substitution level law, black-box measured (r457)
 /// by emitting crafted frames through this crate's own emitter and
 /// measuring the reference decoder's output spectrum in the flagged
@@ -183,9 +196,12 @@ pub const ZERO_FILL_RMS_STEPS: f64 = 0.4;
 /// follows the band's exponent at the ladder's 1.25 dB/step, and the
 /// level is independent of the block's total gain and of the coded
 /// coefficients. Each flagged band carries its own gain (the F4
-/// chain). The vendor generator's sequence is unstaged; this crate
-/// uses its own uniform generator, so substituted bands match the
-/// reference in level and spectral shape, not sample for sample.
+/// chain). Since r459 the decoder carries the staged vendor
+/// generator and the validated flagged-band form `n · 2⁻²⁹ · w ·
+/// ratio_k · F(G)` (module docs), of which this law is the
+/// single-flagged-band RMS (the generator's first-difference output
+/// has unit RMS to within 2 %); the encoder inverts it to choose F4
+/// gains.
 pub fn noise_band_rms(gain: i32, band_weight: f64) -> f64 {
     10f64.powf(f64::from(gain - 64) / 20.0) * band_weight * ABS_SCALE.abs()
 }
@@ -207,6 +223,9 @@ impl BlockSynth {
             env_cache: vec![vec![None; ENV_CACHE_SLOTS]; channels],
             last_env: vec![None; channels],
             noise_state: 0x9E37_79B9_7F4A_7C15,
+            lcg_state: 0,
+            lcg_prev: 0,
+            noise_enabled: crate::vendor_frame::staged_noise_policy(cfg).is_some(),
             zero_fill_noise: false,
         }
     }
@@ -218,9 +237,27 @@ impl BlockSynth {
         self
     }
 
+    /// One draw of the staged §2.1 generator: `s ← s · 0x19660d +
+    /// 0x3c6ef35f` (32-bit wrap), `r = (s ≫ 2) + (s ≫ 4)` (arithmetic
+    /// shifts), output `r − r_prev` — the integer the decoder scales
+    /// by `2⁻²⁹` ([`NOISE_UNIT`]). Validated bit-for-bit on 76 544
+    /// vendor draws in the staging.
+    fn noise_draw(&mut self) -> i32 {
+        self.lcg_state = self
+            .lcg_state
+            .wrapping_mul(0x0019_660d)
+            .wrapping_add(0x3c6e_f35f);
+        let s = self.lcg_state as i32;
+        let r = (s >> 2) + (s >> 4);
+        let out = r.wrapping_sub(self.lcg_prev);
+        self.lcg_prev = r;
+        out
+    }
+
     /// One unit-variance pseudo-random sample (uniform on ±√3;
-    /// xorshift64* — a generator of this crate's own, see
-    /// [`noise_band_rms`]).
+    /// xorshift64* — a generator of this crate's own, used only for
+    /// the reference-measured zero-fill option, see
+    /// [`ZERO_FILL_RMS_STEPS`]).
     fn noise_sample(&mut self) -> f64 {
         let mut x = self.noise_state;
         x ^= x >> 12;
@@ -413,37 +450,130 @@ impl BlockSynth {
             } else {
                 Vec::new()
             };
-            for (&(lo, hi), &gain) in excluded.iter().zip(chan.noise_gains.iter()) {
-                for k in usize::from(lo)..usize::from(hi).min(m) {
-                    let rms = noise_band_rms(gain, weights[k]);
-                    spec[ch][k] = self.noise_sample() * rms;
-                }
-            }
-            let coef_end = usize::from(self.cfg.coef_end(block.block_size));
-            let mut k = coef_start;
-            for &q in chan.coefficients.iter() {
-                while excluded
+            let coef_end = usize::from(self.cfg.coef_end(block.block_size)).min(m);
+            let noise_on = self.noise_enabled;
+            let lsp = lsp_raw.is_some();
+            // Per-bin base weight `w[i]` and gain `g` of the vendor
+            // composition: the band weight and `g₀ = f32(F(total))`
+            // on the VLC path; the raw envelope `W[i]` and
+            // `g = f32(f32(1/max W) · F(total))` on the §3.1 path.
+            let w: Vec<f64> = match lsp_raw {
+                Some(raw) => raw.iter().map(|&x| f64::from(x)).collect(),
+                None => weights.clone(),
+            };
+            let g = match lsp_gain {
+                Some(g) => g,
+                None => f64::from(f_total as f32),
+            };
+            let scale = pcm_scale();
+            // §2.1 flagged-band scales: `S_k = ratio_k · F(gain_k)`
+            // (VLC path; the §3.1 path folds `1/max W` in), with
+            // `ratio_k = sqrt(mean(env²) over band k / mean(env²)
+            // over the last flagged band)` on the per-bin envelope.
+            let band_scales: Vec<f64> = {
+                let mean_sq = |&(lo, hi): &(u16, u16)| -> f64 {
+                    let (lo, hi) = (usize::from(lo), usize::from(hi).min(m));
+                    if hi <= lo {
+                        return 0.0;
+                    }
+                    weights[lo..hi].iter().map(|v| v * v).sum::<f64>() / (hi - lo) as f64
+                };
+                let last = excluded.last().map(mean_sq).unwrap_or(0.0);
+                excluded
                     .iter()
-                    .any(|&(lo, hi)| (usize::from(lo)..usize::from(hi)).contains(&k))
-                {
-                    k += 1;
+                    .zip(chan.noise_gains.iter())
+                    .map(|(range, &gain)| {
+                        let ratio = if last > 0.0 {
+                            (mean_sq(range) / last).sqrt()
+                        } else {
+                            1.0
+                        };
+                        let f_gain = vendor_total_gain(gain.max(0) as u32);
+                        let inv_max = match envelope.as_ref() {
+                            Some(CachedEnvelope::Lsp { max, .. }) => 1.0 / f64::from(*max),
+                            _ => 1.0,
+                        };
+                        f64::from((ratio * f_gain) as f32) * inv_max
+                    })
+                    .collect()
+            };
+            let band_of = |k: usize| -> Option<usize> {
+                excluded
+                    .iter()
+                    .position(|&(lo, hi)| (usize::from(lo)..usize::from(hi)).contains(&k))
+            };
+            // The dither scale: `0.02 · 2⁻²⁹` on the VLC path, `0.04 ·
+            // 2⁻²⁹` on the §3.1 path (the decoder's f32 constants).
+            let ns = if lsp {
+                f64::from(0.04f32) * NOISE_UNIT
+            } else {
+                f64::from(0.02f32) * NOISE_UNIT
+            };
+            let mut coefs = chan.coefficients.iter().copied();
+            // The dequantised value of bin k before the PCM scale.
+            let vendor_bin = |k: usize, q: i32, n: f64, flagged: Option<usize>| -> f64 {
+                if !noise_on {
+                    // Noise disabled: `q · w · g` on the coded range,
+                    // zero elsewhere (validated: `f32((q · W[i]) · g)`).
+                    if q == 0 {
+                        return 0.0;
+                    }
+                    let v = f64::from((f64::from(q) * w[k]) as f32);
+                    return f64::from((v * g) as f32);
                 }
-                if k >= coef_end || k >= m {
-                    break;
+                if let Some(b) = flagged {
+                    // Flagged band: `f32((n · 2⁻²⁹) · f32(w · S_k))`.
+                    let s = band_scales.get(b).copied().unwrap_or(0.0);
+                    return f64::from(((n * NOISE_UNIT) * f64::from((w[k] * s) as f32)) as f32);
                 }
-                if q != 0 {
-                    spec[ch][k] = match (lsp_raw, lsp_gain) {
-                        (Some(w), Some(g)) => {
-                            let v = ((f64::from(q) * f64::from(w[k])) as f32) as f64;
-                            ((v * g) as f32) as f64 * pcm_scale()
-                        }
-                        _ => f64::from(q) * weights[k] * gain,
+                if k < coef_start || k >= coef_end {
+                    // Below the coded range (v1) / the tail above it:
+                    // `f32((n · 2⁻²⁹) · f32(0.02 · (w_edge · g)))` with
+                    // the weight of the nearest coded bin.
+                    let edge = if k < coef_start {
+                        coef_start
+                    } else {
+                        coef_end.saturating_sub(1)
                     };
-                } else if self.zero_fill_noise {
-                    spec[ch][k] =
-                        self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs();
+                    let dither = f64::from((ns / NOISE_UNIT * (w[edge] * g)) as f32);
+                    return f64::from(((n * NOISE_UNIT) * dither) as f32);
                 }
-                k += 1;
+                // Coded bin: `f32((ns · n + q) · f32(w · g))` — every
+                // coded bin, zero or not, carries the dither.
+                let wg = f64::from((w[k] * g) as f32);
+                f64::from(((ns * n + f64::from(q)) * wg) as f32)
+            };
+            if noise_on {
+                // One generator draw per bin, in bin order.
+                for k in 0..m {
+                    let n = f64::from(self.noise_draw());
+                    let flagged = band_of(k);
+                    let q = if flagged.is_none() && k >= coef_start && k < coef_end {
+                        coefs.next().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let v = vendor_bin(k, q, n, flagged);
+                    spec[ch][k] = if v == 0.0 && q == 0 && self.zero_fill_noise && flagged.is_none()
+                    {
+                        self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs()
+                    } else {
+                        v * scale
+                    };
+                }
+            } else {
+                for k in coef_start..coef_end {
+                    if band_of(k).is_some() {
+                        continue;
+                    }
+                    let Some(q) = coefs.next() else { break };
+                    if q != 0 {
+                        spec[ch][k] = vendor_bin(k, q, 0.0, None) * scale;
+                    } else if self.zero_fill_noise {
+                        spec[ch][k] =
+                            self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs();
+                    }
+                }
             }
         }
 
@@ -973,10 +1103,13 @@ mod tests {
         }
     }
     /// A flagged band at gain G carries the energy of `q = 1`
-    /// coefficients decoded at total gain G (the measured level law,
-    /// [`noise_band_rms`]): the time-domain energy of a stream of
-    /// noise-substituted blocks matches that of the coded twin within
-    /// the generator's statistical spread.
+    /// coefficients decoded at total gain G (the level law,
+    /// [`noise_band_rms`], the single-band case of the staged flagged
+    /// form): the time-domain energy of a stream of noise-substituted
+    /// blocks matches that of the coded twin within the generator's
+    /// statistical spread. Both blocks sit at the same total gain so
+    /// that the coded bins' `0.02 · noise` dither (which does scale
+    /// with the total gain) is the same negligible floor in both.
     #[test]
     fn flagged_band_energy_matches_a_unit_coded_band_at_the_same_gain() {
         use crate::vendor_frame::{ChannelBlock, ParsedBlock};
@@ -988,12 +1121,12 @@ mod tests {
             let mut acc = 0.0;
             for _ in 0..64 {
                 let (flags, gains, coefficients, total_gain) = if flagged {
-                    (vec![true, true], vec![g, g], vec![0i32; 716], 100)
+                    (vec![true, true], vec![g, g], vec![0i32; 717], g as u32)
                 } else {
                     // The twin: q = 1 on every bin of the two walk bands
-                    // ([716, 932)), zero elsewhere, decoded at total gain g.
+                    // ([717, 932)), zero elsewhere, decoded at total gain g.
                     let mut c = vec![0i32; 932];
-                    for v in &mut c[716..932] {
+                    for v in &mut c[717..932] {
                         *v = 1;
                     }
                     (Vec::new(), Vec::new(), c, g as u32)
@@ -1036,14 +1169,14 @@ mod tests {
                 prev_size: Some(1024),
                 next_size: Some(1024),
                 joint_stereo: false,
-                total_gain: 100,
+                total_gain: g as u32,
                 n_coef: 932,
                 channels: vec![ChannelBlock {
                     coded: true,
                     envelope: Some(Envelope::Exponents(vec![40; bands])),
                     noise_flags: vec![true, true],
                     noise_gains: vec![g + 10, g + 10],
-                    coefficients: vec![0; 716],
+                    coefficients: vec![0; 717],
                 }],
             };
             let out = synth.block(&block);

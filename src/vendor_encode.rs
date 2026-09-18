@@ -1507,20 +1507,21 @@ mod tests {
     }
     #[test]
     fn noise_flags_and_gains_round_trip_through_the_parser() {
-        // Mono 22.05 kHz at 2003 B/s: the measured policy walks the
-        // 1024-block's bands [716, 884) and [884, 932).
+        // Mono 22.05 kHz at 2003 B/s: the staged policy (0.7 · half
+        // = 7717.5 Hz) walks the 1024-block's bands [717, 884) and
+        // [884, 932).
         let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
-        // The first walked band starts at the cutoff bin rounded up,
-        // inside the containing band (7700 Hz -> 715.2 -> 716, the
-        // band edge here; 357.6 -> 358 on 512-blocks).
+        // The first walked band starts at the staged cutoff bin
+        // `trunc(N · 0.7 + 0.5)` inside the containing band (717 on
+        // 1024-blocks, 358 on 512-blocks).
         let walk = crate::vendor_frame::noise_walk_bands(&cfg, 1024);
-        assert_eq!(walk, vec![(716, 884), (884, 932)]);
+        assert_eq!(walk, vec![(717, 884), (884, 932)]);
         assert_eq!(
             crate::vendor_frame::noise_walk_bands(&cfg, 512),
             vec![(358, 440), (440, 466)]
         );
         let bands = crate::band_partition::exponent_band_count(22_050, 1024);
-        let mut coefficients = vec![0i32; 932 - (884 - 716)];
+        let mut coefficients = vec![0i32; 932 - (884 - 717)];
         coefficients[10] = 3;
         coefficients[700] = -2;
         let block = EncBlockData {
@@ -1559,7 +1560,7 @@ mod tests {
                 envelope: Some(EncEnvelope::Exponents(vec![40; bands])),
                 noise_flags: vec![true, true],
                 noise_gains: vec![-19, -1],
-                coefficients: vec![0; 716],
+                coefficients: vec![0; 717],
             }],
         };
         let mut out = BitWriter::new();
@@ -1574,7 +1575,7 @@ mod tests {
             .parse_frame(&mut r)
             .unwrap();
         assert_eq!(frame.blocks[0].channels[0].noise_gains, vec![-19, -1]);
-        assert_eq!(frame.blocks[0].channels[0].coefficients.len(), 716);
+        assert_eq!(frame.blocks[0].channels[0].coefficients.len(), 717);
     }
 
     #[test]
@@ -1600,34 +1601,34 @@ mod tests {
                 .emit_frame(&mut out, 0, &[b], Some(0))
         };
         assert_eq!(
-            emit(mk(vec![true], vec![10], 764)),
+            emit(mk(vec![true], vec![10], 765)),
             Err(EmitError::BadNoiseFlags {
                 got: 1,
                 expected: 2
             })
         );
         assert_eq!(
-            emit(mk(vec![true, true], vec![10], 716)),
+            emit(mk(vec![true, true], vec![10], 717)),
             Err(EmitError::BadNoiseGainCount {
                 got: 1,
                 expected: 2
             })
         );
         assert_eq!(
-            emit(mk(vec![true, false], vec![120], 764)),
+            emit(mk(vec![true, false], vec![120], 765)),
             Err(EmitError::NoiseGainOutOfRange { gain: 120 })
         );
         assert_eq!(
-            emit(mk(vec![true, true], vec![10, 40], 716)),
+            emit(mk(vec![true, true], vec![10, 40], 717)),
             Err(EmitError::NoiseGainOutOfRange { gain: 40 })
         );
-        // Wrong coefficient count for the flagged axis ([716, 884)
-        // leaves: 932 - 168).
+        // Wrong coefficient count for the flagged axis ([717, 884)
+        // leaves: 932 - 167).
         assert_eq!(
             emit(mk(vec![true, false], vec![10], 932)),
             Err(EmitError::WrongCoefficientCount {
                 got: 932,
-                expected: 764
+                expected: 765
             })
         );
         // No sub-stream on a 44.1 kHz high-rate stream: flags refused.

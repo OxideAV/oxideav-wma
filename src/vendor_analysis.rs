@@ -1187,14 +1187,6 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
                         }
                         kept.extend_from_slice(&coefficients[cursor..]);
                         coefficients = kept;
-                        // The reference decoder reads a flagged axis
-                        // one coefficient short of the vendor reading
-                        // (`vendor_frame::noise_walk_bands_for`): never
-                        // code its last index — the bin just below
-                        // the first noise band.
-                        if let Some(last) = coefficients.last_mut() {
-                            *last = 0;
-                        }
                         any = true;
                     }
                 }
