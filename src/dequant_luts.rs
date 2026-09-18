@@ -1,0 +1,75 @@
+//! Dequantisation look-up tables — transcribed verbatim (as IEEE
+//! binary32 bit patterns) from the staged extraction under
+//! `docs/audio/wma/tables/`:
+//!
+//! * [`ENVELOPE_WEIGHT_STORED_NEG`] / [`ENVELOPE_WEIGHT_STORED_POS`] —
+//!   `wma-envelope-weight-lut.csv` (`.rdata 0x22a34`, 72 × `f32` for
+//!   the exponent delta `e = 0 .. −71`, and `0x22b50`, 51 × `f32` for
+//!   `e = 0 .. 50`): the **mantissa part** of the band weight
+//!   `10^(e/16)`; the power-of-two part `2^(|e| >> 2)` is applied by
+//!   the consumer (division on the negative side, multiplication on
+//!   the positive side). The negative table is read one slot past
+//!   its end for the clamp value `e = −72`, where it lands on the
+//!   positive table's entry 1 (the documented quirk, carried).
+//! * [`TOTAL_GAIN_MANTISSA`] / [`TOTAL_GAIN_EXP_PART_LOG2`] —
+//!   `wma-total-gain-lut.csv` (`.rdata 0x22bd4`, 146 × `f32` mantissa
+//!   by gain index, and `0x22e1c`, 19 × `f32` holding `2^(4 + (g >> 3))`,
+//!   carried as the exponent): `F(g) = mantissa[g] · 2^(4 + (g >> 3))`
+//!   `= 10^(g/20)` for `18 ≤ g < 146`, the B1 total-gain and F4
+//!   noise-band-gain law. Entries `g < 18` exist in the table but the
+//!   decoder does not read them (module docs of [`crate::vendor_decode`]).
+
+/// `wma-envelope-weight-lut`, negative side: slot `k` holds the stored
+/// mantissa for `e = −k`, `k = 0..=71` (module docs).
+pub const ENVELOPE_WEIGHT_STORED_NEG: [u32; 72] = [
+    0x3f800000, 0x3f5dafd6, 0x3f3ff911, 0x3f263de0, 0x3f8ff59a, 0x3f7953cf, 0x3f57e89b, 0x3f3af81a,
+    0x3fa1e89b, 0x3f8c3504, 0x3f72d423, 0x3f5247ed, 0x3fb61887, 0x3f9db040, 0x3f888d77, 0x3f6c7fd5,
+    0x3fcccccd, 0x3fb15978, 0x3f99940e, 0x3f84fe4d, 0x3fe655c3, 0x3fc7763f, 0x3facba15, 0x3f959348,
+    0x400186e2, 0x3fe054d2, 0x3fc24350, 0x3fa8398b, 0x4011ad39, 0x3ffc4d33, 0x3fda7bf1, 0x3fbd3311,
+    0x4023d70a, 0x400de12d, 0x3ff5b9af, 0x3fd4ca14, 0x4038449c, 0x401f91cc, 0x400a2e77, 0x3fef520d,
+    0x404f3e37, 0x4033770f, 0x401b690c, 0x4006946f, 0x40691528, 0x4049d75c, 0x402ec98e, 0x40175c0e,
+    0x4083126f, 0x406301e2, 0x4044948c, 0x402a3b43, 0x40936a16, 0x407f4fad, 0x405d1726, 0x403f74d7,
+    0x40a5cb5f, 0x408f9272, 0x4078a814, 0x405753e5, 0x40ba7753, 0x40a17917, 0x408bd471, 0x40722ce3,
+    0x40d1b717, 0x40b59b1b, 0x409d43a4, 0x40882f69, 0x40ebdcf1, 0x40cc3fbd, 0x40b0df51, 0x40992a46,
+];
+
+/// `wma-envelope-weight-lut`, positive side: slot `e` holds the stored
+/// mantissa for `e = 0..=50` (module docs).
+pub const ENVELOPE_WEIGHT_STORED_POS: [u32; 51] = [
+    0x40992a46, 0x3f93cfe5, 0x3faab0d5, 0x3fc51c50, 0x3f639ea9, 0x3f836cf4, 0x3f97c496, 0x3faf4244,
+    0x3f4a62c2, 0x3f69b621, 0x3f86f161, 0x3f9bd461, 0x3f33f300, 0x3f4fcd58, 0x3f6ff755, 0x3f8a8de6,
+    0x3f200000, 0x3f38c3df, 0x3f555d0a, 0x3f766364, 0x3f0e432a, 0x3f244831, 0x3f3db5bc, 0x3f5b12d6,
+    0x3efcfb72, 0x3f1211d5, 0x3f28adb9, 0x3f42c979, 0x3ee0efc0, 0x3f01e057, 0x3f15fa95, 0x3f2d3160,
+    0x3ec80000, 0x3ee6f4d6, 0x3f055a26, 0x3f19fe1e, 0x3eb1d3f4, 0x3ecd5a3e, 0x3eed232b, 0x3f08ebc5,
+    0x3e9e1d27, 0x3eb6964a, 0x3ed2d927, 0x3ef37bd8, 0x3e8c95d8, 0x3ea2586d, 0x3ebb793b, 0x3ed87db7,
+    0x3e7a0000, 0x3e905906, 0x3ea6b0af,
+];
+
+/// `wma-total-gain-lut`, mantissa by gain index `g = 0..=145` (module docs).
+pub const TOTAL_GAIN_MANTISSA: [u32; 146] = [
+    0x3ee6f4d6, 0x3f055a26, 0x3f19fe1e, 0x3eb1d3f4, 0x3ecd5a3e, 0x3eed232b, 0x3f08ebc5, 0x3e9e1d27,
+    0x3eb6964a, 0x3ed2d927, 0x3ef37bd8, 0x3e8c95d8, 0x3ea2586d, 0x3ebb793b, 0x3ed87db7, 0x3e7a0000,
+    0x3e905906, 0x3ea6b0af, 0x3dfe2f5e, 0x3e0e99a3, 0x3e200000, 0x3e3385e0, 0x3e496d96, 0x3e62018a,
+    0x3dfd953a, 0x3e0e432a, 0x3e1f9ef9, 0x3e331902, 0x3e48f36f, 0x3e61787b, 0x3e7cfb72, 0x3e8dece4,
+    0x3e1f3e2c, 0x3e32ac66, 0x3e487992, 0x3e60efc0, 0x3e7c6208, 0x3e8d96d3, 0x3e9edd9b, 0x3eb2400c,
+    0x3e480000, 0x3e606758, 0x3e7bc8fb, 0x3e8d40f6, 0x3e9e7d44, 0x3eb1d3f4, 0x3ec786b7, 0x3edfdf43,
+    0x3e7b304b, 0x3e8ceb4d, 0x3e9e1d27, 0x3eb1681d, 0x3ec70db8, 0x3edf5780, 0x3efa97f7, 0x3f0c95d8,
+    0x3e9dbd45, 0x3eb0fc88, 0x3ec69502, 0x3eded00f, 0x3efa0000, 0x3f0c4097, 0x3f1d5d9d, 0x3f309134,
+    0x3ec61c95, 0x3ede48f1, 0x3ef96865, 0x3f0beb8a, 0x3f1cfe2f, 0x3f302620, 0x3f45a471, 0x3f5dc224,
+    0x3ef8d126, 0x3f0b96b0, 0x3f1c9efa, 0x3f2fbb4e, 0x3f452c96, 0x3f5d3baa, 0x3f783a42, 0x3f8b420a,
+    0x3f1c4000, 0x3f2f50bd, 0x3f44b504, 0x3f5cb580, 0x3f77a3ba, 0x3f8aed97, 0x3f9be13f, 0x3faee66c,
+    0x3f443dba, 0x3f5c2fa9, 0x3f770d8e, 0x3f8a9957, 0x3f9b82b8, 0x3fae7c5c, 0x3fc3c6b9, 0x3fdbaa22,
+    0x3f7677bc, 0x3f8a454a, 0x3f9b2469, 0x3fae128c, 0x3fc35000, 0x3fdb24ec, 0x3ff5e245, 0x4009f170,
+    0x3f9ac654, 0x3fada8fc, 0x3fc2d98f, 0x3fdaa007, 0x3ff54d29, 0x40099dc9, 0x401a6879, 0x402d3fac,
+    0x3fc26365, 0x3fda1b73, 0x3ff4b867, 0x40094a55, 0x401a0ad5, 0x402cd69d, 0x4041ed84, 0x4059972f,
+    0x3ff42400, 0x4008f714, 0x4019ad6b, 0x402c6dcc, 0x404177ea, 0x4059133b, 0x40738ff3, 0x4088a405,
+    0x4019503a, 0x402c053c, 0x40410297, 0x40588f98, 0x4072fc3f, 0x40885128, 0x4098f341, 0x40ab9ceb,
+    0x40408d8b, 0x40580c44, 0x407268e5, 0x4087fe7d, 0x40989680, 0x40ab34d9, 0x40c018c6, 0x40d7893f,
+    0x4071d5e4, 0x4087ac05,
+];
+
+/// `wma-total-gain-lut`, exponent part: entry `g >> 3` is `2^(4 + (g >> 3))`,
+/// carried as the binary logarithm (module docs).
+pub const TOTAL_GAIN_EXP_PART_LOG2: [u8; 19] = [
+    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+];

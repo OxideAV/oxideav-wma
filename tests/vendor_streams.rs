@@ -667,12 +667,19 @@ fn vendor_pcm_decodes_and_correlates() {
                 assert!(corr2 > 0.9, "apollo8 corr² regressed: {corr2}");
             }
             "cand_mono8k_8kbps_v8.wma" => {
-                // LSP envelope path (conversion tables unstaged):
-                // flat-envelope decode.
+                // r459: the §3.1 LSP envelope conversion (bit-exact to
+                // the staged model) and the validated LSP-path
+                // dequantiser — 4.7 dB / corr² 0.66 / gain 0.28 with
+                // the r457 flat envelope, 92.7 dB / 1.000 / 0.999 now.
+                assert!(corr2 > 0.99, "corr² regressed: {corr2}");
                 assert!(
-                    median > 4.0,
+                    median > 60.0,
                     "{}: median SNR regressed to {median:.2} dB",
                     l.spec.file
+                );
+                assert!(
+                    (0.9..1.1).contains(&gain),
+                    "fitted gain {gain} strayed from 1"
                 );
             }
             "cand_mono22k_16kbps.wma" => {
@@ -697,16 +704,20 @@ fn vendor_pcm_decodes_and_correlates() {
                 );
             }
             "cand_wmp12_96kbps.wma" => {
+                // r459: the staged envelope-weight / total-gain tables
+                // replace the integer-ladder ratio — 50.3 dB → 138 dB
+                // (the reference's own f32 floor).
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 44.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 100.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"
                 );
             }
             "cand_vbr_q75_stereo.wma" => {
+                // r459: 60.4 dB → 138 dB (see the 96 kbps stream).
                 assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 52.0, "median SNR regressed to {median:.2} dB");
+                assert!(median > 100.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"

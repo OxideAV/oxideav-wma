@@ -52,49 +52,62 @@
 //! median SNR on the three fully-closing 44.1/22.05 kHz families
 //! from ≈ 3 dB / ≈ 0 dB to ≈ 18–27 dB.
 //!
-//! ## Dequantisation composition (calibrated)
+//! ## Dequantisation composition (staged, validated on vendor bits)
 //!
-//! The staged docs pin the ladder's ratio but leave the composition
-//! rule open ("Still open" in the layout doc). The composition
-//! carried here was selected by sweeping candidate rules against the
-//! black-box reference decode of the six committed vendor streams
-//! (best-lag/best-gain fit, median per-second SNR as the score; the
-//! sweep and its optimum are quoted in `tests/vendor_streams.rs`):
+//! `docs/audio/wma/frame-bit-layout.md` §2.1 / §3 / §3.1 (rounds
+//! 08–10 of the staging) pin the vendor dequantisers, and round 10
+//! validated them bit-for-bit in the sandboxed vendor decoder (71 439
+//! VLC-path bins on the mono 22.05 kHz stream, 6 524 LSP-path bins on
+//! the mono 8 kHz stream):
 //!
-//! * **band weight** — `10^((e − e_max) / 16)`: the staged ladder's
-//!   own 1.25 dB/step ratio anchored at the block's maximum
-//!   exponent (the §3 note that the decoder records the envelope's
-//!   maximum, which "drives dequantization", is consistent with
-//!   exactly this anchoring; a fixed anchor scores far worse on
-//!   every stream);
-//! * **total gain** — `10^((g − 64) / 20)`, i.e. exactly **1 dB per
-//!   B1 step**: the sweep's optimum is sharply at the 1/20 exponent
-//!   (1/16 and 1/32 both lose ≥ 9 dB), and it is corroborated by the
-//!   staged escape-width table, whose level-field width drops ≈ 1
-//!   bit per ≈ 10 gain steps (≈ 6 dB per bit);
-//! * **absolute scale** — `ABS_SCALE`: a single black-box-calibrated
-//!   constant (the fitted gain against the ±1.0-float reference
-//!   converges to the same value on every fully-closing
-//!   envelope-coded stream once the two rules above are in place),
-//!   folded in so decoded PCM lands in the reference's ±1.0 float
-//!   convention with a fitted gain ≈ 1. Its sign also absorbs the
-//!   phase convention of the reconstruction relative to the
-//!   reference waveform. The true closed-form constant remains a
-//!   staged gap.
+//! * **band weight** (VLC path) — `w_b = 10^((e_b − e_max) / 16)` with
+//!   the delta clamped to `[−72, 50]`, realised as the staged
+//!   `wma-envelope-weight-lut` split lookup ([`envelope_weight`]:
+//!   stored mantissa ÷ `2^(|e| >> 2)` on the negative side, × on the
+//!   positive side; the `e = −72` clamp reads the documented one-past
+//!   slot). The r450–r457 realisation (the `dequant-gain-lut` integer
+//!   ladder's ratio) agreed with this within its 0.75 % integer
+//!   rounding; the staged table replaces it.
+//! * **total gain** — `F(g) = 10^(g/20)` (1 dB per B1 step) as the
+//!   staged `wma-total-gain-lut` product `mantissa[g] · 2^(4 + (g >> 3))`
+//!   for `18 ≤ g < 146` ([`vendor_total_gain`]); `g ≥ 146` uses the
+//!   runtime power the decoder computes. The r450 sweep had found the
+//!   1/20 exponent; the staged table confirms it and the decoder's
+//!   `g₀ = f32(F(total))` rounding point.
+//! * **LSP path** (§3.1) — per-bin weight `W[i]` from
+//!   [`crate::lsp_envelope`] (bit-exact), `g = f32(f32(1 / max W) ·
+//!   F(total))`, coded bin `f32((q · W[i]) · g)` — validated bit-for-bit
+//!   on the noise-disabled form (the only committed LSP-path stream has
+//!   noise off). A reused envelope for a block of another size is
+//!   resampled by nearest neighbour (`.text 0x5c20`); the recorded
+//!   maximum is kept (DERIVED — no committed stream exercises it).
+//! * **absolute scale** — `ABS_SCALE`: the one black-box-calibrated
+//!   constant, folding the inverse transform's normalisation and the
+//!   reference's ±1.0 float convention into a fitted gain ≈ 1 (its
+//!   sign absorbs the reconstruction's phase convention). It is
+//!   applied on top of the vendor composition as `ABS_SCALE / F(64)`
+//!   ([`pcm_scale`]) so the r457 calibration (which anchored the total
+//!   gain at 64) carries over unchanged. The absolute output scale
+//!   after the inverse transform is the one part of G9 the staging has
+//!   not read.
 //!
 //! ## Honest approximations (staged gaps)
 //!
-//! * The vendor's literal composition rule and transition-window
-//!   shape are still unstaged; both are carried here as the
-//!   measured-best realisation of the staged facts, not as staged
-//!   facts themselves.
-//! * **The §3.1 line-spectral envelope** conversion tables are not
-//!   staged; LSP-path blocks decode with a flat envelope.
+//! * The transition-window shape is unstaged and carried as the
+//!   measured-best realisation of the staged facts.
+//! * `F(g)` below 18: the staged reader note gives a coarse
+//!   power-of-two form with an unstaged constant (`.rdata 0x1a530`);
+//!   the continuous `10^(g/20)` is carried there (it is what the
+//!   black-box reference measures), reported as a docs ask.
 
+use crate::dequant_luts::{
+    ENVELOPE_WEIGHT_STORED_NEG, ENVELOPE_WEIGHT_STORED_POS, TOTAL_GAIN_EXP_PART_LOG2,
+    TOTAL_GAIN_MANTISSA,
+};
+use crate::lsp_envelope::{lsp_envelope, resample_envelope};
 use crate::mlt::Mlt;
 use crate::stream_config::StreamConfig;
 use crate::vendor_frame::{Envelope, ParsedBlock};
-use crate::wire_tables::DEQUANT_GAIN_LUT;
 
 /// Black-box-calibrated absolute output scale (module docs): places
 /// decoded PCM in the reference's ±1.0 float convention; the sign
@@ -127,11 +140,15 @@ pub struct BlockSynth {
     /// The last synthesised block's size (left windowing context).
     prev_size: Option<u16>,
     /// §3 per-block-size envelope cache, `[channel][size_index]` —
-    /// the exponents a B2 = 0 block reuses
+    /// the envelope a B2 = 0 block reuses
     /// ([`crate::vendor_frame::Envelope::Reused`]). The staged trace
     /// stores the reuse state per block-size index (`ctx+0x24c`), so
     /// the cache is keyed the same way.
-    env_cache: Vec<Vec<Option<Vec<i32>>>>,
+    env_cache: Vec<Vec<Option<CachedEnvelope>>>,
+    /// The most recent envelope per channel of any size — what a
+    /// §3.1 reuse falls back to (resampled) when the per-size slot is
+    /// empty.
+    last_env: Vec<Option<CachedEnvelope>>,
     /// The §2.1 noise generator's state (module docs).
     noise_state: u64,
     /// Whether zero-quantised bins of coded channels are noise-filled
@@ -188,6 +205,7 @@ impl BlockSynth {
             pos: 0,
             prev_size: None,
             env_cache: vec![vec![None; ENV_CACHE_SLOTS]; channels],
+            last_env: vec![None; channels],
             noise_state: 0x9E37_79B9_7F4A_7C15,
             zero_fill_noise: false,
         }
@@ -227,6 +245,7 @@ impl BlockSynth {
                 *slot = None;
             }
         }
+        self.last_env.fill(None);
     }
 
     /// Synthesise one parsed block into `block_size` PCM samples per
@@ -335,23 +354,54 @@ impl BlockSynth {
             if !chan.coded {
                 continue;
             }
-            // §3 per-block-size envelope cache: fresh exponents fill
-            // the slot for this size index; a Reused envelope reads
-            // it back (flat when nothing was cached yet — only
+            // §3 per-block-size envelope cache: a fresh envelope
+            // (exponents, or a §3.1 conversion) fills the slot for
+            // this size index; a Reused envelope reads it back — a
+            // §3.1 envelope of another size is resampled (`.text
+            // 0x5c20`); flat when nothing was cached yet (only
             // possible right after a reset).
             let slot = usize::from(block.size_index).min(ENV_CACHE_SLOTS - 1);
-            let envelope = match chan.envelope.as_ref() {
-                Some(Envelope::Exponents(e)) => {
-                    self.env_cache[ch][slot] = Some(e.clone());
-                    Some(Envelope::Exponents(e.clone()))
+            let envelope: Option<CachedEnvelope> = match chan.envelope.as_ref() {
+                Some(Envelope::Exponents(e)) => Some(CachedEnvelope::Exponents(e.clone())),
+                Some(Envelope::LspIndices(idx)) => {
+                    let grid = usize::from(self.cfg.lsp_grid_len(block.block_size));
+                    match lsp_envelope(idx, m, grid) {
+                        Ok(env) => Some(CachedEnvelope::Lsp {
+                            weights: env.weights,
+                            max: env.max,
+                        }),
+                        // The decoder's own decode error for the
+                        // block: the channel stays silent.
+                        Err(_) => continue,
+                    }
                 }
                 Some(Envelope::Reused) => self.env_cache[ch][slot]
-                    .as_ref()
-                    .map(|e| Envelope::Exponents(e.clone())),
-                other => other.cloned(),
+                    .clone()
+                    .or_else(|| self.last_env[ch].clone().map(|e| e.resampled(m))),
+                None => None,
             };
-            let weights = band_weights(&self.cfg, envelope.as_ref(), m);
-            let gain = total_gain_multiplier(block.total_gain) * ABS_SCALE;
+            if let Some(env) = envelope.as_ref() {
+                self.env_cache[ch][slot] = Some(env.clone());
+                self.last_env[ch] = Some(env.clone());
+            }
+            let weights = per_bin_weights(&self.cfg, envelope.as_ref(), m);
+            // The vendor composition: `q · w · F(total)`, then the
+            // calibrated PCM scale. On the §3.1 path the decoder's own
+            // rounding points are honoured (`g = f32(f32(1/max W) ·
+            // F)`, bin `f32((q · W[i]) · g)`).
+            let f_total = vendor_total_gain(block.total_gain);
+            let gain = f_total * pcm_scale();
+            let lsp_gain: Option<f64> = match envelope.as_ref() {
+                Some(CachedEnvelope::Lsp { max, .. }) => {
+                    let inv_max = f64::from((1.0 / f64::from(*max)) as f32);
+                    Some(f64::from((inv_max * f_total) as f32))
+                }
+                _ => None,
+            };
+            let lsp_raw: Option<&[f32]> = match envelope.as_ref() {
+                Some(CachedEnvelope::Lsp { weights, .. }) => Some(weights),
+                _ => None,
+            };
             // §2.1: a noise-substituted band contributes no coded
             // coefficients — the coefficient sub-stream skips its
             // bins. Rebuild that mapping when the block carries
@@ -382,7 +432,13 @@ impl BlockSynth {
                     break;
                 }
                 if q != 0 {
-                    spec[ch][k] = f64::from(q) * weights[k] * gain;
+                    spec[ch][k] = match (lsp_raw, lsp_gain) {
+                        (Some(w), Some(g)) => {
+                            let v = ((f64::from(q) * f64::from(w[k])) as f32) as f64;
+                            ((v * g) as f32) as f64 * pcm_scale()
+                        }
+                        _ => f64::from(q) * weights[k] * gain,
+                    };
                 } else if self.zero_fill_noise {
                     spec[ch][k] =
                         self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs();
@@ -427,23 +483,59 @@ fn noise_excluded_ranges(
         .collect()
 }
 
-/// The staged-ladder band weights over the coefficient axis: for each
-/// band of the block's partition, `10^((e − e_max) / 16)` — the
-/// ladder's own 1.25 dB/step ratio anchored at the block's loudest
-/// band (module docs). LSP-path and absent envelopes yield a flat
-/// weight.
+/// A decoded envelope as the per-size cache holds it.
+#[derive(Debug, Clone, PartialEq)]
+enum CachedEnvelope {
+    /// §3 VLC-delta exponents, one per band.
+    Exponents(Vec<i32>),
+    /// §3.1 converted envelope: the per-bin `W[i]` and the recorded
+    /// maximum.
+    Lsp {
+        /// `W[i]`, one per coefficient of the block it was converted for.
+        weights: Vec<f32>,
+        /// The conversion's recorded maximum.
+        max: f32,
+    },
+}
+
+impl CachedEnvelope {
+    /// The envelope a block of `m` coefficients reuses: exponents are
+    /// per band and carry over as they are; a §3.1 envelope of another
+    /// length is resampled by nearest neighbour, its recorded maximum
+    /// kept (module docs).
+    fn resampled(self, m: usize) -> Self {
+        match self {
+            CachedEnvelope::Lsp { weights, max } if weights.len() != m => CachedEnvelope::Lsp {
+                weights: resample_envelope(&weights, m),
+                max,
+            },
+            other => other,
+        }
+    }
+}
+
+/// The staged band weights over the coefficient axis: for each band
+/// of the block's partition, `10^((e − e_max) / 16)` through the
+/// staged `wma-envelope-weight-lut` ([`envelope_weight`]) — the
+/// vendor's per-band weight anchored at the block's loudest band.
+/// Absent envelopes yield a flat weight; a §3.1 envelope is not a
+/// band envelope (see [`per_bin_weights`]).
 pub(crate) fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: usize) -> Vec<f64> {
     let exponents = match envelope {
         Some(Envelope::Exponents(e)) if !e.is_empty() => e,
-        // §3.1 conversion tables unstaged / uncoded: flat envelope.
         _ => return vec![1.0; m],
     };
+    exponent_weights(cfg, exponents, m)
+}
+
+/// [`band_weights`] over an exponent list.
+fn exponent_weights(cfg: &StreamConfig, exponents: &[i32], m: usize) -> Vec<f64> {
     let edges = crate::band_partition::exponent_band_edges(cfg.sample_rate, m as u16);
     let e_max = exponents.iter().copied().max().unwrap_or(0);
     let mut w = vec![1.0; m];
     for (b, pair) in edges.windows(2).enumerate() {
         let e = exponents.get(b).copied().unwrap_or(e_max);
-        let weight = ladder_ratio(e, e_max);
+        let weight = envelope_weight(e - e_max);
         for slot in &mut w[usize::from(pair[0])..usize::from(pair[1]).min(m)] {
             *slot = weight;
         }
@@ -451,22 +543,76 @@ pub(crate) fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: u
     w
 }
 
-/// `ladder[a] / ladder[b]` on the staged dequant ladder, with the
-/// ladder's own `10^(1/16)` ratio extended outside its 113 entries.
-pub(crate) fn ladder_ratio(a: i32, b: i32) -> f64 {
-    let idx = |e: i32| -> f64 {
-        let clamped = e.clamp(0, (DEQUANT_GAIN_LUT.len() - 1) as i32);
-        let base = f64::from(DEQUANT_GAIN_LUT[clamped as usize]);
-        // Extend beyond the table at the staged step ratio.
-        base * 10f64.powf(f64::from(e - clamped) / 16.0)
-    };
-    idx(a) / idx(b)
+/// The per-bin weight of a cached envelope: the band weights for
+/// exponents, `W[i] / max W` for a §3.1 envelope (the role the band
+/// weight plays in every §2.1 noise formula), flat when absent.
+fn per_bin_weights(cfg: &StreamConfig, envelope: Option<&CachedEnvelope>, m: usize) -> Vec<f64> {
+    match envelope {
+        Some(CachedEnvelope::Exponents(e)) if !e.is_empty() => exponent_weights(cfg, e, m),
+        Some(CachedEnvelope::Lsp { weights, max }) => {
+            let inv = 1.0 / f64::from(*max);
+            let mut w: Vec<f64> = weights.iter().map(|&x| f64::from(x) * inv).collect();
+            w.resize(m, 1.0);
+            w
+        }
+        _ => vec![1.0; m],
+    }
 }
 
-/// Total-gain multiplier: `10^((g − 64) / 20)` — 1 dB per B1 step,
-/// the calibrated composition (module docs).
+/// The staged band weight for an exponent delta `e = e_b − e_max`:
+/// `10^(e/16)` as the vendor's split lookup — `e` clamped to
+/// `[−72, 50]`, the stored mantissa of `wma-envelope-weight-lut`
+/// divided by `2^(|e| >> 2)` on the negative side and multiplied by
+/// `2^(e >> 2)` on the positive side; `e = −72` reads the slot one
+/// past the negative table, which is the positive table's entry 1
+/// (the documented quirk). Validated bit-for-bit on 71 439 vendor
+/// bins in the staging.
+pub fn envelope_weight(delta: i32) -> f64 {
+    let e = delta.clamp(-72, 50);
+    if e <= 0 {
+        let d = (-e) as usize;
+        let stored = if d < ENVELOPE_WEIGHT_STORED_NEG.len() {
+            f32::from_bits(ENVELOPE_WEIGHT_STORED_NEG[d])
+        } else {
+            f32::from_bits(ENVELOPE_WEIGHT_STORED_POS[1])
+        };
+        f64::from(stored) / f64::from(1u32 << (d >> 2))
+    } else {
+        let stored = f32::from_bits(ENVELOPE_WEIGHT_STORED_POS[e as usize]);
+        f64::from(stored) * f64::from(1u32 << (e >> 2))
+    }
+}
+
+/// The staged total-gain law `F(g) = 10^(g/20)`: the
+/// `wma-total-gain-lut` product `mantissa[g] · 2^(4 + (g >> 3))` for
+/// `18 ≤ g < 146` (validated bit-for-bit on vendor bits), the runtime
+/// power `10^(0.05 g)` the decoder computes at and above 146, and —
+/// below 18, where the staged reader note gives a coarse
+/// power-of-two form with an unstaged constant — the continuous
+/// `10^(g/20)` (module docs).
+pub fn vendor_total_gain(total_gain: u32) -> f64 {
+    let g = total_gain as usize;
+    if (18..TOTAL_GAIN_MANTISSA.len()).contains(&g) {
+        let mantissa = f64::from(f32::from_bits(TOTAL_GAIN_MANTISSA[g]));
+        mantissa * f64::from(1u32 << TOTAL_GAIN_EXP_PART_LOG2[g >> 3])
+    } else if g >= TOTAL_GAIN_MANTISSA.len() {
+        f64::from(10f64.powf(0.05 * g as f64) as f32)
+    } else {
+        10f64.powf(g as f64 / 20.0)
+    }
+}
+
+/// The calibrated PCM scale on top of the vendor composition:
+/// `ABS_SCALE / F(64)`, so that `q · w · F(g) · pcm_scale()` equals the
+/// r457-calibrated `q · w · 10^((g − 64)/20) · ABS_SCALE` (module docs).
+pub fn pcm_scale() -> f64 {
+    ABS_SCALE / vendor_total_gain(64)
+}
+
+/// Total-gain multiplier relative to gain 64: `F(g) / F(64)` — 1 dB
+/// per B1 step, the calibrated composition (module docs).
 pub(crate) fn total_gain_multiplier(total_gain: u32) -> f64 {
-    10f64.powf(f64::from(total_gain as i32 - 64) / 20.0)
+    vendor_total_gain(total_gain) / vendor_total_gain(64)
 }
 
 /// Inverse lapped transform: the fast staged-set path for `{256,
@@ -614,11 +760,36 @@ mod tests {
     }
 
     #[test]
-    fn envelope_weights_follow_the_staged_ladder_ratio() {
-        // Two bands 16 steps apart weight 10× apart (the ladder is
-        // 10^(1/16) per step).
-        let r = ladder_ratio(52, 36) / ladder_ratio(36, 36);
-        assert!((r - 10.0).abs() < 0.11, "ratio {r}");
+    fn envelope_weights_follow_the_staged_law() {
+        // 10^(e/16) within the staged 6e-8 relative on the whole
+        // clamp range bar the documented e = −72 quirk; 16 steps =
+        // 10×; the quirk reads the positive table's entry 1 over
+        // 2^18; the clamp holds outside [−72, 50].
+        for e in -71..=50 {
+            let want = 10f64.powf(f64::from(e) / 16.0);
+            let got = envelope_weight(e);
+            assert!((got / want - 1.0).abs() < 1e-6, "e={e}: {got} vs {want}");
+        }
+        assert_eq!(envelope_weight(0), 1.0);
+        let r = envelope_weight(-16) / envelope_weight(-32);
+        assert!((r - 10.0).abs() < 1e-5, "ratio {r}");
+        let quirk = envelope_weight(-72);
+        assert!((quirk - 1.154_781_94 / 262_144.0).abs() < 1e-12, "{quirk}");
+        assert_eq!(envelope_weight(-100), quirk);
+        assert_eq!(envelope_weight(60), envelope_weight(50));
+    }
+
+    #[test]
+    fn total_gain_law_is_one_decibel_per_step_from_the_staged_table() {
+        for g in 18..146u32 {
+            let want = 10f64.powf(f64::from(g) / 20.0);
+            let got = vendor_total_gain(g);
+            assert!((got / want - 1.0).abs() < 1e-6, "g={g}: {got} vs {want}");
+        }
+        // Above the table: the runtime power; below: continuous.
+        assert!((vendor_total_gain(150) / 10f64.powf(7.5) - 1.0).abs() < 1e-6);
+        assert!((vendor_total_gain(10) / 10f64.powf(0.5) - 1.0).abs() < 1e-12);
+        assert!((pcm_scale() * vendor_total_gain(64) / ABS_SCALE - 1.0).abs() < 1e-15);
     }
 
     #[test]
@@ -627,7 +798,7 @@ mod tests {
         // amplitude, anchored at gain 64 → 1.0.
         assert!((total_gain_multiplier(64) - 1.0).abs() < 1e-12);
         let r = total_gain_multiplier(84) / total_gain_multiplier(64);
-        assert!((r - 10.0).abs() < 1e-9, "ratio {r}");
+        assert!((r - 10.0).abs() < 1e-6, "ratio {r}");
     }
 
     #[test]

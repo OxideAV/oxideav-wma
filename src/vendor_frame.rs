@@ -21,8 +21,8 @@
 //!   `+ 10`, deltas from band 1).
 //! * §3.1 — the line-spectral envelope path when `flags2` bit 0 is
 //!   clear: ten fixed-width indices (3,4,4,4,4,4,4,4,3,3 bits) per
-//!   coded channel; the index → envelope conversion tables are not
-//!   staged, so the indices are carried as data.
+//!   coded channel, carried as data here and converted to the per-bin
+//!   envelope by [`crate::lsp_envelope`] in the decode stage.
 //! * §4 — the coefficient run-level sub-stream: symbol 0 =
 //!   **escape** (literal `|level|` at the gain-mapped width, run at
 //!   `frame_length_bits`, sign), symbol 1 = **end of block**,
@@ -99,8 +99,9 @@ pub fn escape_level_width(total_gain: u32) -> u8 {
 pub enum Envelope {
     /// §3 VLC-delta exponents, one per band of the block's partition.
     Exponents(Vec<i32>),
-    /// §3.1 line-spectral indices (their conversion tables are a
-    /// staged gap; the wire data is carried verbatim).
+    /// §3.1 line-spectral indices — the ten wire fields, converted to
+    /// the per-bin envelope by [`crate::lsp_envelope`] in the decode
+    /// stage.
     LspIndices([u8; 10]),
     /// §2 B2 = 0 — reuse the previously decoded envelope for this
     /// block size (the §3 per-block-size cache, `ctx+0x24c` in the

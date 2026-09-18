@@ -794,6 +794,8 @@ pub mod decode;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod dequant;
+/// Dequantisation look-up tables, transcribed from the staged extraction.
+pub mod dequant_luts;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod encode;
