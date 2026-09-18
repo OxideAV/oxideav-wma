@@ -6,6 +6,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-wma/compare/v0.0.4...v0.0.5) - 2026-09-18
+
+### Other
+
+- docs + fuzz: README/CHANGELOG for the r459 LSP-envelope round; fuzz targets cover the §3.1 path and the staged cutoff walk
+- the §3.1 LSP envelope path — 21 low-rate catalogue cells encodable and black-box accepted
+- the staged §2.1 noise rule, cutoff bin and LCG — mono 22.05 kHz closes 122/122
+- the validated dequantisers — §3.1 LSP path decoded, staged weight/gain tables replace the ladder ratio
+- the §3.1 LSP → spectral-envelope conversion, bit-exact to the staged model
+- README for the r457 encoder campaign + noise-substitution / policy findings
+- noise substitution end to end: F3/F4 emission, measured level law, decoder synthesis, cost election; cutoff-bin walk start
+- per-frame allocation + stereo election by a masking-aware cost; dead zone; bisected reservoir-paced rate control
+- encoder ladder — every encodable v2 catalogue cell, own chain + black-box reference per cell
+- noise-substitution policy across the sample-rate axis + per-short-block B2 on every stream
+- ABS_SCALE recalibrated per channel — the r450 fit absorbed the reference downmix's 1/sqrt2
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Added
 
 - **§3.1 LSP envelope conversion, bit-exact (r459)** —
