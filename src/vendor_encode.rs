@@ -68,7 +68,7 @@
 use crate::bitio::{BitReader, BitWriter};
 use crate::header::Version;
 use crate::stream_config::StreamConfig;
-use crate::vendor_frame::{escape_level_width, measured_noise_policy, NoiseSpec, ReuseRule};
+use crate::vendor_frame::{NoiseSpec, ReuseRule, escape_level_width, measured_noise_policy};
 use crate::wire_vlc::{coef_vlc, gain_vlc, runlevel_index, scale_vlc};
 
 /// A channel's envelope, encoder side: the form must match the
@@ -919,7 +919,7 @@ impl VendorBitWriter {
             if self.starts_in_packet_of(self.position()) >= 15 {
                 self.pad_to_boundary();
             }
-        } else if self.position() % self.body_bits() != 0 {
+        } else if !self.position().is_multiple_of(self.body_bits()) {
             // §1 degenerate case: one frame per packet, each starting
             // at bit 0 of its packet.
             self.pad_to_boundary();
@@ -1413,7 +1413,7 @@ mod tests {
         c0[500] = 1; // run 499: escape (mapped runs are short)
         c0[501] = 2; // run 0, level 2: companion pair
         c0[n - 1] = -1; // exact fill: parser stops without EOB
-                        // Channel 1: leading zeros then EOB tail.
+        // Channel 1: leading zeros then EOB tail.
         let mut c1 = vec![0i32; n];
         c1[3] = 1;
         let mk = |coeffs: Vec<i32>| EncChannelData {

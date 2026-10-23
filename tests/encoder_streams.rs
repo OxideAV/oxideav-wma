@@ -30,9 +30,9 @@ mod common;
 use common::{
     decode_own, fit, hiss, material, reference_available, reference_decode, snr_at_lead, wav_wrap,
 };
+use oxideav_wma::VendorEncoder;
 use oxideav_wma::header::Version;
 use oxideav_wma::stream_config::StreamConfig;
-use oxideav_wma::VendorEncoder;
 
 /// One encoder family under test.
 struct Family {

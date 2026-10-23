@@ -499,7 +499,7 @@ impl Encoder for WmaEncoder {
         let mut planar: Vec<Vec<f64>> = vec![Vec::with_capacity(audio.samples as usize); channels];
         for (t, group) in data[..want].chunks_exact(4 * channels).enumerate() {
             let _ = t;
-            for (ch, chunk) in group.chunks_exact(4).enumerate() {
+            for (ch, chunk) in group.as_chunks::<4>().0.iter().enumerate() {
                 planar[ch].push(f64::from(f32::from_le_bytes([
                     chunk[0], chunk[1], chunk[2], chunk[3],
                 ])));
@@ -649,7 +649,7 @@ mod tests {
 
         // All output is finite F32 in a sane range.
         for frame in [&f, &f1, &tail] {
-            for chunk in frame.data[0].chunks_exact(4) {
+            for chunk in frame.data[0].as_chunks::<4>().0 {
                 let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 assert!(v.is_finite() && v.abs() <= 4.0, "sample {v}");
             }
@@ -720,7 +720,7 @@ mod tests {
         let mut frames = 0;
         while let Ok(Frame::Audio(f)) = dec.receive_frame() {
             frames += 1;
-            for chunk in f.data[0].chunks_exact(4) {
+            for chunk in f.data[0].as_chunks::<4>().0 {
                 let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 assert!(v.is_finite());
             }
@@ -781,7 +781,9 @@ mod tests {
             while let Ok(Frame::Audio(f)) = dec.receive_frame() {
                 pcm.extend(
                     f.data[0]
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
                 );
             }
@@ -790,7 +792,9 @@ mod tests {
         while let Ok(Frame::Audio(f)) = dec.receive_frame() {
             pcm.extend(
                 f.data[0]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
             );
         }

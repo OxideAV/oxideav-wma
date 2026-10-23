@@ -51,7 +51,7 @@
 
 use crate::bitio::{BitReader, BitWriter};
 use crate::huffman::{HuffmanCode, HuffmanError};
-use crate::runlevel_tables::{RunLevel, RUNLEVEL_MODE1, RUNLEVEL_MODE2, RUNLEVEL_MODE3};
+use crate::runlevel_tables::{RUNLEVEL_MODE1, RUNLEVEL_MODE2, RUNLEVEL_MODE3, RunLevel};
 use crate::wire_tables::{
     COEF_EOB_SYMBOL, COEF_ESCAPE_SYMBOL, COEF_RUNLEVEL_BASE_SYMBOL, COEF_VLC_CLASS1_ALT_LENGTHS,
     COEF_VLC_CLASS3_ALT_LENGTHS, COEF_VLC_MODE1_LENGTHS, COEF_VLC_MODE2_REAL_LENGTHS,

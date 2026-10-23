@@ -40,9 +40,9 @@
 //! `frame_length / 2` near-zero samples followed by the input.
 
 use crate::stream_config::StreamConfig;
-use crate::vendor_decode::{band_weights, total_gain_multiplier, transition_window, ABS_SCALE};
+use crate::vendor_decode::{ABS_SCALE, band_weights, total_gain_multiplier, transition_window};
 use crate::vendor_encode::{EmitError, EncBlockData, EncChannelData, EncEnvelope, VendorBitWriter};
-use crate::vendor_frame::{escape_level_width, Envelope, NoiseSpec, ReuseRule};
+use crate::vendor_frame::{Envelope, NoiseSpec, ReuseRule, escape_level_width};
 
 /// Per-block stereo policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -401,7 +401,7 @@ impl VendorEncoder {
         let need = (total_frames + 1) * flen;
         let pad = (need - self.pushed) as usize;
         for buf in &mut self.input {
-            buf.extend(std::iter::repeat(0.0).take(pad));
+            buf.extend(std::iter::repeat_n(0.0, pad));
         }
         self.pushed = need;
         while self.encoded_frames < total_frames {

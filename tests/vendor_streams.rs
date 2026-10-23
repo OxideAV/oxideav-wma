@@ -382,10 +382,10 @@ fn registered_decoder_matches_the_direct_chain() {
                     Err(_) => {
                         let remaining = usize::from(rec.header.frame_count - f);
                         for chan in &mut direct {
-                            chan.extend(
-                                std::iter::repeat(0.0)
-                                    .take(usize::from(l.cfg.frame_length) * remaining),
-                            );
+                            chan.extend(std::iter::repeat_n(
+                                0.0,
+                                usize::from(l.cfg.frame_length) * remaining,
+                            ));
                         }
                         synth.reset();
                         failed = true;
@@ -420,7 +420,9 @@ fn registered_decoder_matches_the_direct_chain() {
                 Ok(Frame::Audio(f)) => {
                     out.extend(
                         f.data[0]
-                            .chunks_exact(4)
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
                             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
                     );
                 }
@@ -509,7 +511,7 @@ fn vendor_pcm_decodes_and_correlates() {
         let reference: Vec<Vec<f64>> = match out {
             Ok(o) if o.status.success() => {
                 let mut per = vec![Vec::new(); channels];
-                for (i, c) in o.stdout.chunks_exact(4).enumerate() {
+                for (i, c) in o.stdout.as_chunks::<4>().0.iter().enumerate() {
                     per[i % channels].push(f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
                 }
                 per
@@ -558,10 +560,10 @@ fn vendor_pcm_decodes_and_correlates() {
                         // the timeline stays aligned to the §1 counts.
                         let remaining = usize::from(rec.header.frame_count - f);
                         for chan in &mut pcm {
-                            chan.extend(
-                                std::iter::repeat(0.0)
-                                    .take(usize::from(l.cfg.frame_length) * remaining),
-                            );
+                            chan.extend(std::iter::repeat_n(
+                                0.0,
+                                usize::from(l.cfg.frame_length) * remaining,
+                            ));
                         }
                         synth.reset();
                         failed = true;

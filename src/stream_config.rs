@@ -155,11 +155,7 @@ impl StreamConfig {
         } else if sample_rate <= 22_050 {
             1024
         } else if sample_rate <= 32_000 {
-            if version == Version::V1 {
-                1024
-            } else {
-                2048
-            }
+            if version == Version::V1 { 1024 } else { 2048 }
         } else {
             2048
         };

@@ -132,7 +132,7 @@ pub fn reference_decode(wav: &[u8], channels: usize) -> Option<Vec<Vec<f64>>> {
         return None;
     }
     let mut per = vec![Vec::new(); channels];
-    for (i, c) in out.stdout.chunks_exact(4).enumerate() {
+    for (i, c) in out.stdout.as_chunks::<4>().0.iter().enumerate() {
         per[i % channels].push(f64::from(f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
     }
     Some(per)

@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-wma"
 version = "0.0.4"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust Windows Media Audio (WMA v1 + v2 baseline; later Pro + Lossless) decoder for oxideav"

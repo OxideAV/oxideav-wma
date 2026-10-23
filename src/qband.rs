@@ -232,12 +232,12 @@ impl QuantBandLayout {
         if bands.is_empty() != (total_coeffs == 0) {
             return Err(InvalidQuantBandLayout::BandCountMismatchEmptiness);
         }
-        if let Some(first) = bands.first() {
-            if first.start != 0 {
-                return Err(InvalidQuantBandLayout::LeadingGap {
-                    first_start: first.start,
-                });
-            }
+        if let Some(first) = bands.first()
+            && first.start != 0
+        {
+            return Err(InvalidQuantBandLayout::LeadingGap {
+                first_start: first.start,
+            });
         }
         for i in 0..bands.len().saturating_sub(1) {
             let cur = bands[i];

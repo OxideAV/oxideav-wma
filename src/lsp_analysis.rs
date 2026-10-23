@@ -31,7 +31,7 @@
 //! The returned envelope is the decoder's, bit for bit, so the
 //! quantiser normalises by exactly what the decoder will multiply by.
 
-use crate::lsp_envelope::{codebook_entry, lsp_envelope, LspEnvelope, LSP_ORDER};
+use crate::lsp_envelope::{LSP_ORDER, LspEnvelope, codebook_entry, lsp_envelope};
 use crate::vendor_frame::LSP_INDEX_WIDTHS;
 
 /// Number of reachable entries of codebook row `i` (`2^width`).
@@ -238,11 +238,11 @@ pub fn fit_lsp_envelope(
         }
         let mut r = autocorrelation(&power, LSP_ORDER);
         r[0] *= 1.0 + 1e-6;
-        if let Some(a) = levinson(&r, LSP_ORDER) {
-            if let Some(omegas) = lpc_to_lsp(&a) {
-                for (i, &w) in omegas.iter().enumerate() {
-                    start[i] = quantise_row(i, -2.0 * w.cos());
-                }
+        if let Some(a) = levinson(&r, LSP_ORDER)
+            && let Some(omegas) = lpc_to_lsp(&a)
+        {
+            for (i, &w) in omegas.iter().enumerate() {
+                start[i] = quantise_row(i, -2.0 * w.cos());
             }
         }
     }

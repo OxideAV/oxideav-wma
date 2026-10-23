@@ -385,26 +385,36 @@ mod tests {
         // Any size other than the longest (4096) counts as transient
         // handling per §2 rationale: smaller blocks are selected for
         // time-resolution preservation.
-        assert!(TransientSwitch::BlockSizeSwitch {
-            block_size: BlockSize::S256,
-        }
-        .is_transient_handled());
-        assert!(TransientSwitch::BlockSizeSwitch {
-            block_size: BlockSize::S512,
-        }
-        .is_transient_handled());
-        assert!(TransientSwitch::BlockSizeSwitch {
-            block_size: BlockSize::S1024,
-        }
-        .is_transient_handled());
-        assert!(TransientSwitch::BlockSizeSwitch {
-            block_size: BlockSize::S2048,
-        }
-        .is_transient_handled());
-        assert!(!TransientSwitch::BlockSizeSwitch {
-            block_size: BlockSize::S4096,
-        }
-        .is_transient_handled());
+        assert!(
+            TransientSwitch::BlockSizeSwitch {
+                block_size: BlockSize::S256,
+            }
+            .is_transient_handled()
+        );
+        assert!(
+            TransientSwitch::BlockSizeSwitch {
+                block_size: BlockSize::S512,
+            }
+            .is_transient_handled()
+        );
+        assert!(
+            TransientSwitch::BlockSizeSwitch {
+                block_size: BlockSize::S1024,
+            }
+            .is_transient_handled()
+        );
+        assert!(
+            TransientSwitch::BlockSizeSwitch {
+                block_size: BlockSize::S2048,
+            }
+            .is_transient_handled()
+        );
+        assert!(
+            !TransientSwitch::BlockSizeSwitch {
+                block_size: BlockSize::S4096,
+            }
+            .is_transient_handled()
+        );
     }
 
     #[test]

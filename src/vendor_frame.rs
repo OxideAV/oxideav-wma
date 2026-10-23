@@ -81,7 +81,7 @@ use crate::stream_config::StreamConfig;
 use crate::wire_tables::{
     CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD, CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD,
 };
-use crate::wire_vlc::{coef_vlc, gain_vlc, runlevel_map, scale_vlc, ExactVlc, VlcDecodeError};
+use crate::wire_vlc::{ExactVlc, VlcDecodeError, coef_vlc, gain_vlc, runlevel_map, scale_vlc};
 
 /// §3.1 fixed index widths of the line-spectral envelope path.
 pub const LSP_INDEX_WIDTHS: [u8; 10] = [3, 4, 4, 4, 4, 4, 4, 4, 3, 3];
@@ -933,11 +933,7 @@ pub fn noise_cutoff(cfg: &StreamConfig) -> Option<f64> {
         {
             0.6
         } else if (16_000..22_050).contains(&sr) {
-            if cfg.bps <= 0.5 {
-                0.3
-            } else {
-                0.5
-            }
+            if cfg.bps <= 0.5 { 0.3 } else { 0.5 }
         } else {
             staged
         },
@@ -1058,12 +1054,12 @@ pub fn noise_walk_bands_for(
         .take_while(|&b| walk_edges[b] < coef_end)
         .map(|b| {
             let mut lo = walk_edges[b].max(coef_start);
-            if b == start {
-                if let Some(c) = first_lo {
-                    // Inside the start band: the cutoff bin rounded
-                    // up, never below the band's own edge.
-                    lo = c.clamp(lo, walk_edges[b + 1]);
-                }
+            if b == start
+                && let Some(c) = first_lo
+            {
+                // Inside the start band: the cutoff bin rounded
+                // up, never below the band's own edge.
+                lo = c.clamp(lo, walk_edges[b + 1]);
             }
             let hi = walk_edges[b + 1].min(coef_end).max(lo);
             (lo, hi)
@@ -1285,7 +1281,7 @@ mod tests {
         // Pair via symbol 2, negative sign.
         assert!(vlc.encode_symbol(2, &mut w));
         w.write_bit(false); // negative
-                            // Escape: |level| = 300 (9 bits), run = 5, positive.
+        // Escape: |level| = 300 (9 bits), run = 5, positive.
         assert!(vlc.encode_symbol(0, &mut w));
         w.write_bits(300, 9);
         w.write_bits(5, cfg.frame_length_bits);
@@ -1325,8 +1321,8 @@ mod tests {
         w.write_bits(10, 7); // B1 → total gain 11
         write_scale_delta_zero_run(&mut w, bands); // ch0 envelope
         write_scale_delta_zero_run(&mut w, bands); // ch1 envelope
-                                                   // Channel-scoped ALT: ch0 from the primary tree, ch1 from
-                                                   // the ALT tree.
+        // Channel-scoped ALT: ch0 from the primary tree, ch1 from
+        // the ALT tree.
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w));
         assert!(coef_vlc(3, true).unwrap().encode_symbol(1, &mut w));
         let bit_len = w.bit_len();
@@ -1532,7 +1528,7 @@ mod tests {
         w.write_bit(false); // B2 = 0: reuse — envelopes absent
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w)); // ch0 EOB
         assert!(coef_vlc(3, false).unwrap().encode_symbol(1, &mut w)); // ch1 EOB
-                                                                       // Second block completes the 1024-sample frame.
+        // Second block completes the 1024-sample frame.
         w.write_bits(1, 2); // next
         w.write_bit(false); // F2a
         w.write_bit(false); // ch0
@@ -1574,7 +1570,7 @@ mod tests {
         assert_eq!(staged_noise_cutoff(&hi_off), None); // rate 1.16
         let lo8k = StreamConfig::derive(Version::V2, 8000, 1, 1000, 640, 0x0026).unwrap();
         assert_eq!(staged_noise_cutoff(&lo8k), None); // bps 1.0 > 0.75
-                                                      // The two black-box-corrected rows.
+        // The two black-box-corrected rows.
         let low_rate = StreamConfig::derive(Version::V2, 22_050, 1, 1900, 744, 0x000f).unwrap();
         assert_eq!(staged_noise_cutoff(&low_rate), Some(0.5));
         assert_eq!(noise_cutoff(&low_rate), Some(0.6));

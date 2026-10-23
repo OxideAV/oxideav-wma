@@ -51,11 +51,11 @@
 //!   `[GAP]`; this driver decodes one frame's already-delimited blocks
 //!   and does not parse frame/superframe boundaries.
 
+use crate::ChannelMode;
 use crate::decode::{ChannelDecoder, DecodeError};
 use crate::runlevel::RunLevelPair;
 use crate::stereo_decode::{StereoDecodeError, StereoDecoder};
 use crate::stereo_synthesis::StereoBlock;
-use crate::ChannelMode;
 
 /// One mono block's already-demuxed, already-decoded per-block
 /// parameters — the owned analogue of the borrowed argument triple

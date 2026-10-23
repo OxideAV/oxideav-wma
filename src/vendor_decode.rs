@@ -607,7 +607,7 @@ fn noise_excluded_ranges(
     crate::vendor_frame::noise_walk_bands_for(cfg, block.block_size, &spec)
         .into_iter()
         .zip(flags.iter())
-        .filter(|(_, &f)| f)
+        .filter(|&(_, &f)| f)
         .map(|(range, _)| range)
         .filter(|&(lo, hi)| lo < hi)
         .collect()

@@ -2579,8 +2579,8 @@ mod tests {
         assert_eq!(RUNLEVEL_MODE1[0], (0, 1)); // symbol 2
         assert_eq!(RUNLEVEL_MODE1[663], (0, 60)); // symbol 665
         assert_eq!(RUNLEVEL_MODE2[0], (0, 1)); // symbol 2
-                                               // The staged correction's own worked examples (provenance
-                                               // §4e): symbols 1016..1023 are ordinary pairs.
+        // The staged correction's own worked examples (provenance
+        // §4e): symbols 1016..1023 are ordinary pairs.
         assert_eq!(RUNLEVEL_MODE2[1016 - 2], (1, 51));
         assert_eq!(RUNLEVEL_MODE2[1017 - 2], (0, 52));
         assert_eq!(RUNLEVEL_MODE2[1023 - 2], (0, 55));

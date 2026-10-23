@@ -999,7 +999,7 @@ pub use frame_encode::{
 pub use gain_ladder::GainLadderError;
 pub use header::{Version, WmaHeader};
 
-pub use registration::{make_decoder, make_encoder, register, WmaDecoder, WmaEncoder};
+pub use registration::{WmaDecoder, WmaEncoder, make_decoder, make_encoder, register};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use huffman::{HuffmanCode, HuffmanError};
@@ -1073,9 +1073,8 @@ pub use vendor_encode::{
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use wire_chain::{
-    clamp_rate_float, rate_float_region, select_decode_class, DecodeClassSelection,
-    RateFloatRegion, WireBlockConfig, WireChainError, WireFrameCodec,
-    DECODE_CLASS_RATE_THRESHOLD_HZ,
+    DECODE_CLASS_RATE_THRESHOLD_HZ, DecodeClassSelection, RateFloatRegion, WireBlockConfig,
+    WireChainError, WireFrameCodec, clamp_rate_float, rate_float_region, select_decode_class,
 };
 
 /// Crate-local error type. Concrete variants land as the rebuild

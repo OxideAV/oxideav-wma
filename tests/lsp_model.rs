@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use oxideav_wma::header::Version;
-use oxideav_wma::lsp_envelope::{lsp_envelope, RootLuts, LSP_ORDER};
+use oxideav_wma::lsp_envelope::{LSP_ORDER, RootLuts, lsp_envelope};
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
 use oxideav_wma::vendor_frame::{Envelope, FrameParser, LSP_INDEX_WIDTHS};

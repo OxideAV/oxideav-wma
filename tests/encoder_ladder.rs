@@ -258,13 +258,13 @@ fn every_catalogue_cell_encodes_and_is_accepted() {
                     }
                 }
             }
-            if let Some(f) = &fixed {
-                if f.reference.is_none() {
-                    failures.push(format!(
-                        "{}: reference rejected the fixed-block stream",
-                        cell_name(cell)
-                    ));
-                }
+            if let Some(f) = &fixed
+                && f.reference.is_none()
+            {
+                failures.push(format!(
+                    "{}: reference rejected the fixed-block stream",
+                    cell_name(cell)
+                ));
             }
         }
     }

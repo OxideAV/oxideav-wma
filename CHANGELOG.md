@@ -52,6 +52,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - **Dequantisation as validated (r459)** — the band weight is the
   staged `wma-envelope-weight-lut` split lookup (`10^(e/16)`, `e`
   clamped to `[−72, 50]`, the `e = −72` one-past quirk carried) and the

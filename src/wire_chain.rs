@@ -50,12 +50,12 @@ use crate::dequant::{DequantStage, InvalidDequant};
 use crate::encode::{ChannelEncoder, EncodeAssemblyError};
 use crate::entropy_mode::Partition;
 use crate::envelope_vlc::{GainVlc, ScaleVlc};
-use crate::exponent_bands::{exponent_band_layout, noise_band_layout, BandDeriveError};
+use crate::exponent_bands::{BandDeriveError, exponent_band_layout, noise_band_layout};
 use crate::frame_bits::{
-    read_frame, read_packet, write_frame, write_packet, BlockPlan, FrameBitsError,
-    FrameFieldWidths, WireFrame,
+    BlockPlan, FrameBitsError, FrameFieldWidths, WireFrame, read_frame, read_packet, write_frame,
+    write_packet,
 };
-use crate::gain_ladder::{band_weights, GainLadderError};
+use crate::gain_ladder::{GainLadderError, band_weights};
 use crate::header::WmaHeader;
 use crate::noisefill::{InvalidNoiseFill, NoiseFiller};
 use crate::paircode::EscapeWidths;
@@ -1237,20 +1237,22 @@ mod tests {
                 side_field: 3,
                 flag: false,
             },
-            channel_blocks: vec![encoded
-                .iter()
-                .map(|b| {
-                    assert!(b.pairs.is_empty(), "all-levels mode has no tail pairs");
-                    crate::frame_bits::WireBlock {
-                        header: 0x11,
-                        gain_symbols: vec![18],
-                        stereo_coupling: None,
-                        envelope_base: 5,
-                        scale_symbols: vec![60; n],
-                        coefficients: b.levels.clone(),
-                    }
-                })
-                .collect()],
+            channel_blocks: vec![
+                encoded
+                    .iter()
+                    .map(|b| {
+                        assert!(b.pairs.is_empty(), "all-levels mode has no tail pairs");
+                        crate::frame_bits::WireBlock {
+                            header: 0x11,
+                            gain_symbols: vec![18],
+                            stereo_coupling: None,
+                            envelope_base: 5,
+                            scale_symbols: vec![60; n],
+                            coefficients: b.levels.clone(),
+                        }
+                    })
+                    .collect(),
+            ],
         };
 
         // Wire: bits out, bits back, field-exact.

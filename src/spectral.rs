@@ -458,10 +458,9 @@ impl core::fmt::Display for SpectralError {
                 f,
                 "oxideav-wma::spectral: level-mode symbol count {got} does not match partition split {expected}",
             ),
-            SpectralError::RunLevelWalk(e) => write!(
-                f,
-                "oxideav-wma::spectral: run-level tail walk failed: {e}",
-            ),
+            SpectralError::RunLevelWalk(e) => {
+                write!(f, "oxideav-wma::spectral: run-level tail walk failed: {e}",)
+            }
             SpectralError::LevelOverflow { magnitude } => write!(
                 f,
                 "oxideav-wma::spectral: run-level magnitude {magnitude} exceeds i32::MAX",

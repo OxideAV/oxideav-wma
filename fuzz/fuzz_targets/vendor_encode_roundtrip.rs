@@ -25,6 +25,7 @@
 //! geometry, and a 44.1 kHz reservoir stream.
 
 use libfuzzer_sys::fuzz_target;
+use oxideav_wma::VendorEncoder;
 use oxideav_wma::header::Version;
 use oxideav_wma::packet::PacketAssembler;
 use oxideav_wma::stream_config::StreamConfig;
@@ -32,8 +33,7 @@ use oxideav_wma::vendor_decode::BlockSynth;
 use oxideav_wma::vendor_encode::{
     EmitError, EncBlockData, EncChannelData, EncEnvelope, VendorBitWriter,
 };
-use oxideav_wma::vendor_frame::{escape_level_width, Envelope, FrameParser};
-use oxideav_wma::VendorEncoder;
+use oxideav_wma::vendor_frame::{Envelope, FrameParser, escape_level_width};
 use std::sync::OnceLock;
 
 fn configs() -> &'static Vec<StreamConfig> {
@@ -87,7 +87,7 @@ fn sanitized_block(cfg: &StreamConfig, feed: &mut ByteFeed<'_>, size_index: u8) 
     let joint_stereo = cfg.channels == 2 && feed.next() & 1 == 1;
     let channels = (0..cfg.channels)
         .map(|_| {
-            if feed.next() % 8 == 0 {
+            if feed.next().is_multiple_of(8) {
                 return EncChannelData {
                     coded: false,
                     envelope: None,
@@ -217,9 +217,11 @@ fn wire_leg(cfg: &StreamConfig, feed: &mut ByteFeed<'_>) {
         return;
     }
     let packets = writer.finish().expect("finish after clean writes");
-    assert!(packets
-        .iter()
-        .all(|p| p.len() == usize::from(cfg.block_align)));
+    assert!(
+        packets
+            .iter()
+            .all(|p| p.len() == usize::from(cfg.block_align))
+    );
 
     // Decode back: field-exact frames, closing boundaries, sized PCM.
     let mut asm = PacketAssembler::new(cfg);

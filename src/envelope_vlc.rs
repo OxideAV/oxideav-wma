@@ -46,7 +46,7 @@ pub const SCALE_DELTA_CENTER: usize = 60;
 pub const GAIN_DELTA_CENTER: usize = 18;
 
 macro_rules! envelope_vlc {
-    ($name:ident, $lengths:expr, $center:expr, $doc:literal) => {
+    ($name:ident, $lengths:expr_2021, $center:expr_2021, $doc:literal) => {
         #[doc = $doc]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name {

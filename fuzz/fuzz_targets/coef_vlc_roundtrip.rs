@@ -36,7 +36,9 @@ fuzz_target!(|data: &[u8]| {
 
         // Symbol stream from byte pairs, folded into the alphabet.
         let symbols: Vec<usize> = data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(64)
             .map(|p| (usize::from(p[0]) << 8 | usize::from(p[1])) % count)
             .collect();
