@@ -62,6 +62,7 @@ fn r32(x: f64) -> f32 {
 
 /// The §3.1 conversion's failure modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LspError {
     /// The grid length is not a power of two in `16..=2048`, or the
     /// block length exceeds it.
@@ -445,6 +446,7 @@ pub fn evaluate_mag2(neg_a: &[f32; LSP_ORDER], l: usize) -> Option<Vec<f32>> {
 
 /// The converted envelope of one coded channel.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct LspEnvelope {
     /// `W[i]`, `i = 0..block_len` — the decoder's stored `f32` values.
     pub weights: Vec<f32>,

@@ -6,6 +6,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- API hygiene: `#[non_exhaustive]` on `Error`, `LspError`, `Version`,
+  `WmaHeader` and `LspEnvelope`. `BlockSize` (the fixed power-of-two
+  block sizes) and the `RootLuts` table record stay exhaustive. No
+  behaviour change.
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-wma/compare/v0.0.4...v0.0.5) - 2026-10-23
 
 ### Other

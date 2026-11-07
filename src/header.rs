@@ -55,6 +55,7 @@ use crate::{Error, Result};
 
 /// WMA major version, as identified by the container's codec ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Version {
     /// WMA v1 — codec ID `0x160`. Extradata payload is 4 bytes.
     V1,
@@ -88,6 +89,7 @@ impl Version {
 /// Parsed WMA header — container fields plus the version-specific
 /// extradata bits.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WmaHeader {
     /// Codec version (v1 or v2).
     pub version: Version,
