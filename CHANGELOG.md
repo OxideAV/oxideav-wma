@@ -6,6 +6,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-wma/compare/v0.0.5...v0.0.6) - 2026-11-10
+
+### Other
+
+- r485 — vendor PCM reproduced on the nine sandbox-encoded conformance vectors, VLC single exponent array, encoder against the same targets; open list refreshed
+- §3 VLC path reads one exponent array per channel on its coded partition; §2.1 ratio_k by the 0x5390 law
+- noise-band gains carry the decoder's ratio_k; joint stereo withheld on unbalanced noise regions; chunking and flags2 bit-5 pinned
+- §3.1 LSP path on the round-12 dataflow — the nine sandbox-encoded vendor streams reproduce the vendor PCM (99.93 % bit-exact, max 1 LSB)
+- API hygiene: #[non_exhaustive] on Error, LspError, Version, WmaHeader, LspEnvelope
+
 ### Added
 
 - **Sandbox-encoded conformance vectors (r485)** — `tests/sandbox_encoded.rs`
