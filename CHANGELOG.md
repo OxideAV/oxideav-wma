@@ -26,8 +26,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `vendor_frame::staged_cutoff_bin_at` — the §2.1 cutoff bin with the
   decoder's binary32 rounding points (`f_c = f32(half · factor)`).
 
+- **Encoder against the same targets** — every fixture's vendor PCM is
+  re-encoded at the fixture's exact configuration and decoded by this
+  crate and the black-box reference (own SNR 5.0–9.5 dB on these
+  deliberately noise-heavy signals, the reference tracking it); tests
+  pin that the encoder's output is independent of `push` chunking and
+  that `flags2` bit 5 is honoured on both sides (a bit-5 stream read
+  under the bit-clear label drops from 19.5 to 1.7 dB).
+
 ### Fixed
 
+- **Encoder noise-band levels**: F4 gains now carry the decoder's
+  `ratio_k` (`target / ratio_k`, target `rms(spec) / rms(w)`), and the
+  joint-stereo candidate is withheld on frames whose §2.1 noise region
+  differs by more than 3 dB between left and right (the §5 inverse
+  spreads the sum/difference noise equally over both sides). On the
+  re-encoded fixtures the noise region now lands within ±0.6 dB of the
+  input (was +0.3 … +5.0 dB) and own SNR gains 0.3–2.4 dB.
 - **§3.1 LSP path rebuilt on the round-12 dataflow**: one envelope
   buffer per channel (no per-size cache), the uncoded-channel 1.0
   fill on new-envelope blocks, the `.text 0x5c20` in-place reuse

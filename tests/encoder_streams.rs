@@ -245,3 +245,89 @@ fn black_box_reference_accepts_the_emitted_wire_format() {
         }
     }
 }
+
+/// The encoder's output does not depend on how the PCM is handed to
+/// it: whole-signal, frame-sized and odd-sized `push` calls emit the
+/// same bytes, on a fixed-block LSP cell, a variable-block LSP cell
+/// with noise substitution, a stereo LSP cell and a VLC cell (the
+/// vendor encoder's output is documented to depend on its
+/// convert-call chunking — `provenance/12` §2.1 — this one's is not).
+#[test]
+fn encoder_output_is_independent_of_push_chunking() {
+    let cells: [(u8, u32, u32, u16, u16); 4] = [
+        (1, 8000, 625, 40, 0x0000),
+        (1, 22_050, 2002, 595, 0x000e),
+        (2, 16_000, 2004, 342, 0x000e),
+        (2, 44_100, 8005, 1487, 0x000f),
+    ];
+    for (channels, sr, avg, ba, flags2) in cells {
+        let cfg = StreamConfig::derive(Version::V2, sr, channels, avg, ba, flags2).unwrap();
+        let len = sr as usize * 3 / 2 + 77;
+        let pcm: Vec<Vec<f64>> = (0..channels)
+            .map(|ch| {
+                material(sr, len, u64::from(ch) + 1)
+                    .iter()
+                    .zip(hiss(len, u64::from(ch) + 7))
+                    .map(|(a, h)| a + 0.05 * h)
+                    .collect()
+            })
+            .collect();
+        let encode = |chunk: usize| -> Vec<Vec<u8>> {
+            let mut enc = VendorEncoder::new(&cfg).unwrap();
+            let mut start = 0;
+            while start < len {
+                let end = (start + chunk).min(len);
+                let part: Vec<Vec<f64>> = pcm.iter().map(|c| c[start..end].to_vec()).collect();
+                enc.push(&part).unwrap();
+                start = end;
+            }
+            enc.finish().unwrap()
+        };
+        let whole = encode(len);
+        for chunk in [usize::from(cfg.frame_length), 4096, 333, 1] {
+            assert!(
+                encode(chunk) == whole,
+                "{channels}ch {sr} Hz f{flags2:04x}: chunk {chunk} changed the stream"
+            );
+        }
+    }
+}
+
+/// `flags2` bit 5 (§3.1 envelope grid = the block's own length): this
+/// encoder fits the ten indices on the grid the decoder will evaluate
+/// them on, so a bit-5 cookie yields a different stream that decodes
+/// as well as the bit-clear one. (The vendor encoder ignores the bit
+/// and always fits on the `frame_length` grid — `provenance/12` §2.4
+/// — so its output under a bit-5 cookie is mislabelled; this one's
+/// is not.) Decoding the bit-5 stream under the bit-clear label must
+/// lose, which pins that the label is honoured on both sides.
+#[test]
+fn lsp_grid_bit5_is_honoured_by_encoder_and_decoder() {
+    let (sr, avg, ba) = (16_000u32, 1500u32, 384u16);
+    let clear = StreamConfig::derive(Version::V2, sr, 1, avg, ba, 0x0006).unwrap();
+    let set = StreamConfig::derive(Version::V2, sr, 1, avg, ba, 0x0026).unwrap();
+    assert!(set.lsp_grid_scaling() && !clear.lsp_grid_scaling());
+    let pcm = vec![material(sr, sr as usize * 2, 3)];
+    // Every block 256 samples (half the frame), where the two grids
+    // differ.
+    let encode = |cfg: &StreamConfig| -> Vec<Vec<u8>> {
+        let settings = oxideav_wma::vendor_analysis::EncoderSettings {
+            blocks: oxideav_wma::vendor_analysis::BlockPolicy::Fixed(1),
+            ..Default::default()
+        };
+        let mut enc = VendorEncoder::with_settings(cfg, settings).unwrap();
+        enc.push(&pcm).unwrap();
+        enc.finish().unwrap()
+    };
+    let (p_clear, p_set) = (encode(&clear), encode(&set));
+    assert!(p_clear != p_set, "bit 5 must change the fitted envelopes");
+    let snr_clear = snr_at_lead(&clear, &pcm[0], &decode_own(&clear, &p_clear)[0]);
+    let snr_set = snr_at_lead(&set, &pcm[0], &decode_own(&set, &p_set)[0]);
+    let snr_mislabelled = snr_at_lead(&clear, &pcm[0], &decode_own(&clear, &p_set)[0]);
+    eprintln!(
+        "bit 5 clear {snr_clear:.2} dB, set {snr_set:.2} dB, set stream read as clear {snr_mislabelled:.2} dB"
+    );
+    assert!(snr_clear > 15.0 && snr_set > 15.0);
+    assert!((snr_clear - snr_set).abs() < 2.0);
+    assert!(snr_mislabelled < snr_set - 1.0);
+}

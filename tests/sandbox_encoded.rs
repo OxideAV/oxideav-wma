@@ -10,6 +10,8 @@
 //! against the codec-packet size of every fixture). When the
 //! fixtures or the binary are absent the tests skip.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -333,5 +335,125 @@ fn float_output_matches_the_vendor_scale() {
             l.fx.dir,
             s.exact
         );
+    }
+}
+
+/// Long-term spectral power per bin (512-bin lapped analysis, sine
+/// window), summed over every frame of `x`.
+fn power_spectrum(x: &[f64]) -> Vec<f64> {
+    use oxideav_wma::block::BlockSize;
+    use oxideav_wma::mlt::Mlt;
+    let m = 512usize;
+    let mlt = Mlt::new(BlockSize::from_samples(m as u16).unwrap());
+    let win: Vec<f64> = (0..2 * m)
+        .map(|n| (std::f64::consts::PI * (n as f64 + 0.5) / (2 * m) as f64).sin())
+        .collect();
+    let mut acc = vec![0.0; m];
+    let mut start = 0;
+    while start + 2 * m <= x.len() {
+        let frame: Vec<f64> = x[start..start + 2 * m]
+            .iter()
+            .zip(win.iter())
+            .map(|(a, w)| a * w)
+            .collect();
+        for (a, c) in acc.iter_mut().zip(mlt.forward(&frame).unwrap()) {
+            *a += c * c;
+        }
+        start += m;
+    }
+    acc
+}
+
+/// Band power ratio (dB) of `y` over `x` on the fraction range
+/// `[lo, hi)` of the half sample rate.
+fn band_level_db(x: &[f64], y: &[f64], lo: f64, hi: f64) -> f64 {
+    let (px, py) = (power_spectrum(x), power_spectrum(y));
+    let m = px.len();
+    let (a, b) = ((lo * m as f64) as usize, (hi * m as f64) as usize);
+    let ex: f64 = px[a..b].iter().sum();
+    let ey: f64 = py[a..b].iter().sum();
+    10.0 * (ey / ex.max(1e-300)).log10()
+}
+
+/// The encoder against the same targets: the vendor PCM of every
+/// fixture re-encoded by this crate's encoder at the fixture's exact
+/// configuration (`flags2` bit 5 clear, v2), decoded by this crate
+/// and — when the black-box reference is available — by it. Every
+/// stream must decode in both, track at unit gain, and put the
+/// noise-substituted region back at the input's level.
+#[test]
+fn encoder_reencodes_every_fixture_configuration() {
+    use oxideav_wma::vendor_analysis::VendorEncoder;
+    use oxideav_wma::vendor_frame::noise_cutoff;
+    let loaded = skip_unless_fixtures!();
+    let with_reference = common::reference_available();
+    for l in &loaded {
+        let input: Vec<Vec<f64>> = l
+            .expected
+            .iter()
+            .map(|c| c.iter().map(|&s| f64::from(s) / 32768.0).collect())
+            .collect();
+        let mut enc = VendorEncoder::new(&l.cfg).expect("fixture configuration encodable");
+        enc.push(&input).unwrap();
+        let packets = enc.finish().unwrap();
+        assert!(
+            packets
+                .iter()
+                .all(|p| p.len() == usize::from(l.fx.block_align))
+        );
+        let own = common::decode_own(&l.cfg, &packets);
+        let cutoff = noise_cutoff(&l.cfg).expect("noise substitution on every fixture");
+        let coef_end =
+            f64::from(l.cfg.coef_end(l.cfg.frame_length)) / f64::from(l.cfg.frame_length);
+        let mut line = format!("{:34}", l.fx.dir);
+        let mut own_corr = Vec::new();
+        for (ch, orig) in input.iter().enumerate() {
+            let (lag, corr2, gain, snr) = common::fit(orig, &own[ch]);
+            let aligned: Vec<f64> = (0..orig.len())
+                .map(|t| {
+                    let u = t as i64 + lag;
+                    if u < 0 || u as usize >= own[ch].len() {
+                        0.0
+                    } else {
+                        own[ch][u as usize]
+                    }
+                })
+                .collect();
+            let low = band_level_db(orig, &aligned, 0.0, cutoff);
+            let high = band_level_db(orig, &aligned, cutoff, coef_end);
+            line += &format!(
+                " | ch{ch} own corr2 {corr2:.3} gain {gain:.3} SNR {snr:.1} dB, coded band {low:+.2} dB, noise band {high:+.2} dB"
+            );
+            // r485: own SNR 5.0–9.5 dB on these deliberately
+            // noise-heavy signals (the vendor encoder's own sanity
+            // SNRs against their sources: 3.7–7.9 dB), coded region
+            // −0.2 … −0.7 dB, noise region within ±0.6 dB (was
+            // +0.3 … +5.0 dB before the encoder accounted for the
+            // decoder's ratio_k and the joint-stereo noise spread).
+            assert!(corr2 > 0.65, "{}: own corr2 {corr2}", l.fx.dir);
+            assert!((0.85..1.1).contains(&gain), "{}: own gain {gain}", l.fx.dir);
+            assert!(snr > 4.0, "{}: own SNR {snr:.2} dB", l.fx.dir);
+            assert!(low.abs() < 1.5, "{}: coded region {low:+.2} dB", l.fx.dir);
+            assert!(high.abs() < 1.5, "{}: noise region {high:+.2} dB", l.fx.dir);
+            own_corr.push(corr2);
+        }
+        if with_reference {
+            let mut extradata = [0u8; 10];
+            extradata[4..6].copy_from_slice(&l.fx.flags2.to_le_bytes());
+            let wav = common::wav_wrap(&l.cfg, &extradata, &packets);
+            let r = common::reference_decode(&wav, input.len())
+                .unwrap_or_else(|| panic!("{}: reference rejected the re-encode", l.fx.dir));
+            for (ch, orig) in input.iter().enumerate() {
+                let (_, corr2, gain, snr) = common::fit(orig, &r[ch]);
+                line += &format!(" | ref ch{ch} corr2 {corr2:.3} gain {gain:.3} SNR {snr:.1}");
+                assert!(
+                    corr2 > own_corr[ch] - 0.02 && (0.8..1.25).contains(&gain),
+                    "{} ch{ch}: reference corr2 {corr2:.3} gain {gain:.3} does not track own {:.3}",
+                    l.fx.dir,
+                    own_corr[ch]
+                );
+            }
+        }
+        eprintln!("{line}");
     }
 }

@@ -565,6 +565,7 @@ impl VendorEncoder {
             match self.settings.stereo {
                 StereoMode::Independent => vec![false],
                 StereoMode::Joint => vec![true],
+                StereoMode::Auto if self.noise_region_unbalanced(&analysed) => vec![false],
                 StereoMode::Auto => vec![false, true],
             }
         } else {
@@ -710,6 +711,40 @@ impl VendorEncoder {
         }
     }
 
+    /// Whether any block's §2.1 noise region carries left and right
+    /// at levels further apart than [`JOINT_NOISE_BALANCE_DB`]. A
+    /// joint block's substituted bands are filled with independent
+    /// noise in the sum and the difference channel, which the §5
+    /// inverse spreads equally over left and right — each side then
+    /// gets the *average* of the two levels (measured on the
+    /// sandbox-encoded separated-stereo fixtures re-encoded: +3.4 /
+    /// −1.1 dB in the noise region), so such frames stay independent.
+    fn noise_region_unbalanced(&self, analysed: &[(u8, Vec<Vec<f64>>)]) -> bool {
+        let limit = 10f64.powf(JOINT_NOISE_BALANCE_DB / 10.0);
+        analysed.iter().any(|(idx, specs)| {
+            let Some(block_size) = self.cfg.block_size_for_index(*idx) else {
+                return false;
+            };
+            let coef_start = usize::from(self.cfg.coef_start(block_size));
+            let coef_end = usize::from(self.cfg.coef_end(block_size));
+            let Some(walk) = self.noise_walk(block_size, &[], coef_start, coef_end) else {
+                return false;
+            };
+            let energy = |spec: &[f64]| -> f64 {
+                walk.iter()
+                    .map(|&(lo, hi)| {
+                        spec[coef_start + lo..coef_start + hi]
+                            .iter()
+                            .map(|v| v * v)
+                            .sum::<f64>()
+                    })
+                    .sum()
+            };
+            let (l, r) = (energy(&specs[0]), energy(&specs[1]));
+            l > 0.0 && r > 0.0 && (l / r > limit || r / l > limit)
+        })
+    }
+
     /// The §2.1 walk of a block — the bands the encoder may
     /// substitute, `(lo, hi)` on the coded axis — when the stream
     /// carries the sub-stream and the setting is on.
@@ -746,6 +781,11 @@ impl VendorEncoder {
 /// leaves more than this fraction of its energy as error is
 /// substituted.
 const SUBSTITUTION_ERROR_WEIGHT: f64 = 0.25;
+
+/// The left/right level difference in a block's §2.1 noise region
+/// beyond which the joint stereo candidate is not offered (encoder
+/// tuning; see `VendorEncoder::noise_region_unbalanced`).
+const JOINT_NOISE_BALANCE_DB: f64 = 3.0;
 
 /// The election cost of a realised frame (see [`frame_cost`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1188,12 +1228,45 @@ fn realise_block(prep: &PreparedBlock, offset: i32, dead_zone: f64) -> EncBlockD
                         flags_rev.push(flag);
                     }
                     noise_flags = flags_rev.into_iter().rev().collect();
+                    // The decoder scales flagged band `k` by
+                    // `F(gain_k) · ratio_k` on the per-bin envelope,
+                    // `ratio_k = sqrt(P_k / P_last)` with `P` the
+                    // band's mean squared envelope and `P_last` the
+                    // last flagged band's (§2.1 / §3.1 normalisers):
+                    // the band's level is `F(gain_k) · ratio_k ·
+                    // rms(w)`, so the gain carries `target / ratio_k`
+                    // where `target = rms(spec) / rms(w)`.
+                    let mean_sq = |lo: usize, hi: usize| -> f64 {
+                        p.weights[lo..hi].iter().map(|w| w * w).sum::<f64>() / (hi - lo) as f64
+                    };
+                    let p_last = walk
+                        .iter()
+                        .zip(noise_flags.iter())
+                        .filter(|&(&(lo, hi), &f)| f && lo < hi)
+                        .map(|(&(lo, hi), _)| mean_sq(lo, hi))
+                        .next_back()
+                        .unwrap_or(0.0);
                     for (&(lo, hi), &flag) in walk.iter().zip(noise_flags.iter()) {
                         if !flag {
                             continue;
                         }
-                        let energy: f64 = p.normalised[lo..hi].iter().map(|v| v * v).sum();
-                        let rms = (energy / (hi - lo) as f64).sqrt();
+                        let spec_energy: f64 = p.normalised[lo..hi]
+                            .iter()
+                            .zip(p.weights[lo..hi].iter())
+                            .map(|(v, w)| (v * w) * (v * w))
+                            .sum();
+                        let w_energy: f64 = p.weights[lo..hi].iter().map(|w| w * w).sum();
+                        let p_k = mean_sq(lo, hi);
+                        let ratio = if p_last > 0.0 && p_k > 0.0 {
+                            (p_k / p_last).sqrt()
+                        } else {
+                            1.0
+                        };
+                        let rms = if w_energy > 0.0 {
+                            (spec_energy / w_energy).sqrt() / ratio
+                        } else {
+                            0.0
+                        };
                         let mut gain = noise_gain_for_rms(rms);
                         if let Some(&prev) = noise_gains.last() {
                             gain = gain.clamp(prev - 18, prev + 18);
