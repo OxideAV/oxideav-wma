@@ -249,22 +249,40 @@ vendor-encoded WMA v2 streams**:
   noise-substitution stream **122/122** (64 in r446, 103 in r457: the
   "F1 anomaly" was the noise walk's first band, one bin and one band
   width off the staged rule).
-* The PCM leg — variable-size lapped reconstruction with
-  neighbour-matched sine slopes, the **staged dequantisers as
-  validated on vendor bits** (r459: the `wma-envelope-weight-lut`
-  band weight `10^((e − e_max)/16)` clamped to `[−72, 50]`, the
-  `wma-total-gain-lut` total gain `10^(g/20)`, the decoder's own
-  `f32` store points; the r457 per-channel `ABS_SCALE` calibration
-  carried over as `ABS_SCALE / F(64)`), the computed band partition
-  rounding to the **nearest** multiple of four, and the **§3.1 LSP
-  envelope** ([`lsp_envelope`], below) — reaches **per-second median
-  SNR 138 / 138 dB** (the reference's own `f32` floor) on the two
-  44.1 kHz families, **92.7 dB** on the mono 8 kHz LSP stream
-  (4.7 dB in r457), **45.4 dB** on the stereo 22.05 kHz stream, all
-  at **corr² 0.998–1.000, fitted gain 0.99–1.00**, and **15.1 dB /
-  corr² 0.945** on the mono 22.05 kHz noise-substitution family
-  (its flagged bands carry the vendor generator's noise — an
-  uncorrelated fill by construction against the reference's own).
+* **The vendor's own PCM, reproduced (r485).** The nine LSP-path
+  streams the staging produced with the vendor encoder in its sandbox
+  (`reference/sandbox-encoded/`: 8 kHz mono 5 / 6 kbps with noise
+  substitution, 16 / 22.05 kHz variable block length with 512 / 256 /
+  128 and 1024 / 512 / 256 transitions, 8 / 16 kHz stereo L/R and
+  sum/difference) come with the vendor decoder's PCM; on them
+  (`tests/sandbox_encoded.rs`) this decoder's opt-in 16-bit output
+  stage (`BlockSynth::with_pcm16_output`) reproduces **962 869 of
+  963 584 samples bit-exactly (99.93 %) and every other one within
+  ±1 LSB** — the residual is the inverse transform's own arithmetic,
+  which the staging has not traced. What that took: the §3.1 path on
+  the round-12 dataflow (one envelope buffer per channel, the
+  uncoded-channel 1.0 fill, the `.text 0x5c20` in-place reuse
+  resample, the binary32 `ratio_k`, the four noise-enabled store forms
+  with their rounding points), §0.3 `coef_end` scaled from the frame
+  for short blocks (116 for a 128-sample block — three of the nine
+  failed to parse before), and two output-stage facts read off the
+  vendor PCM: the absolute scale is exactly the 16-bit full scale with
+  the sign inverted (fitted gain 1.000 000 ± 3·10⁻⁷ on all nine), and
+  each block's windowed contribution is rounded to 16 bits before the
+  overlap-add. The neighbour-matched sine-slope transition windows
+  carry no extra error at any of the staged transitions. The default
+  float stage keeps the unrounded sum (unit gain, ±1 LSB, 75 % exact).
+* Against the black-box reference on the committed VLC-path vendor
+  streams (the staged dequantisers, §3 single exponent array per
+  channel read on its coded partition, the `.text 0x5390` `ratio_k`
+  law): **per-second median SNR 137–138 dB** (the reference's own
+  `f32` floor) on the two 44.1 kHz families and on the stereo
+  22.05 kHz stream (45.4 dB before r485 — the per-block-size envelope
+  cache it replaced was the error), **92.7 dB** on the mono 8 kHz LSP
+  stream, and **19.4 dB / corr² 0.987** on the mono 22.05 kHz
+  noise-substitution family (15.1 / 0.945 before; its flagged bands
+  carry the vendor generator's noise — an uncorrelated fill by
+  construction against the reference's own).
 * **§3.1 LSP envelope, bit-exact** ([`lsp_envelope`], [`lsp_tables`],
   r459): the staged round-09 model of the vendor decoder's
   line-spectral → envelope conversion (codebook → symmetric P/Q
@@ -274,8 +292,7 @@ vendor-encoded WMA v2 streams**:
   runs the staged script as a black box and pins **all 3 931
   conversions of `cand_mono8k_8kbps_v8` (2 012 672 bins) bit-exact**
   — the model the staging validated bit-for-bit in the sandboxed
-  vendor decoder. The LSP-path dequantiser (`g = f32(f32(1/max W) ·
-  F(total))`, bin `f32((q · W[i]) · g)`) follows the validated form.
+  vendor decoder.
 * Five §1/§2/§5 details calibrated *differently* from the staged
   reading, with the §1 carry boundary as ground truth (reported to
   the docs staging as erratum/extension asks): the F1 field is a
@@ -290,22 +307,19 @@ vendor-encoded WMA v2 streams**:
   **channel-scoped** (second coded channel only); and the §2.1 walk
   start below.
 
-* **The §2.1 noise substitution is the staged rule** (r459;
-  `vendor_frame::staged_noise_cutoff` / `noise_cutoff` /
-  `noise_policy`): the enable rule and cutoff table of the staging
-  (a fraction of half the sample rate per version / sample-rate /
-  rate row), the cutoff bin `c = min(trunc(N · fraction + 0.5), N)`,
-  the walk from the band **containing** `c`, and only `[c, edge)` of
-  a flagged first band leaving the coefficient axis — validated
-  bit-for-bit in the staging on the vendor mono 22.05 kHz stream,
-  which closes 122/122 under it. The r454/r457 black-box brackets
-  (`measured_noise_policy`, kept as the alias) sit inside the staged
-  rows wherever they overlap; two rows are carried as the black-box
-  reference demonstrably reads them (each an erratum hypothesis
-  against the static read, reported): 22050–44099 Hz at
-  `rate < 0.72` is `0.6 · half` (staged 0.5), and the 16000–22049 Hz
-  row's branch sense is reversed (`0.3 · half` if `bps ≤ 0.5`, else
-  `0.5 · half`). Every short block carries the B2 bit.
+* **The §2.1 noise substitution is the staged rule** (r459, table
+  per the round-11 correction since r485;
+  `vendor_frame::staged_noise_cutoff` / `staged_cutoff_bin_at`): the
+  enable rule and cutoff table (a fraction of half the sample rate per
+  version / sample-rate / rate row, binary32 constants), the cutoff bin
+  `c = min(trunc(2·N·f_c / sample_rate + 0.5), N)` with `f_c =
+  f32(half · factor)`, the walk from the band **containing** `c`, and
+  only `[c, edge)` of a flagged first band leaving the coefficient
+  axis. The two rows the crate had carried from black-box measurement
+  (22050–44099 Hz at `rate < 0.72` → `0.6 · half`; the 16000–22049 Hz
+  branch sense) are what the corrected staging says; the `< 8000 Hz` /
+  v1-generic row is the staged three-way split. Every short block
+  carries the B2 bit.
 * **The §2.1 noise generator is the staged vendor generator** (r459):
   `s ← s · 0x19660d + 0x3c6ef35f`, `r = (s ≫ 2) + (s ≫ 4)`, first
   difference, `2⁻²⁹`, one draw per bin; every coded bin carries the
@@ -323,30 +337,25 @@ vendor-encoded WMA v2 streams**:
 
 ### What is still open
 
-* the **two §2.1 rows the black-box reference contradicts** (the
-  22050–44099 Hz low-rate branch and the 16000–22049 Hz branch
-  sense) — carried as the reference reads them, unverifiable against
-  the vendor without a stream on those branches; the `< 8000 Hz` row
-  and the version-1 rows are carried as staged and unexercised;
-* the **`byte_offset_bits` rounding at a power-of-two boundary**
-  (the reference rounds the frame byte count up; the vendor's own
-  reading there is unverified) and the total-gain form below 18
-  (an unstaged constant; the continuous law is carried);
+* the **inverse transform's arithmetic** (operation order and
+  binary32 stores of the vendor's transform, staging gap G10): it is
+  the whole of the ±1 LSB residual on 0.07 % of the conformance
+  vectors' samples;
+* **WMA v1**: no v1 vendor stream exists in the staged set, and the
+  vendor encoder refuses v1 (`provenance/12` §2.3), so the v1 rows
+  (`i < coef_start` dither, the B3 base, the v1 cutoff rows) stay
+  static readings; the v1 per-channel byte-alignment rule is unread;
+* the §3.1 **replication** resample (`prev < cur`) and a reuse on a
+  frame's first block are carried as read — the vendor encoder never
+  produced either;
 * **128-sample blocks at 22.05 / 44.1 kHz in this crate's own
   streams**: the reference decodes vendor 128-blocks (and this
   crate parses them, 1056 in the 96 kbps stream) but rejects most
   block schedules in which this encoder emits them (position
   dependent; 32 / 48 kHz accept everything) — cause not isolated;
   the encoder's own scheduler never emits 128-sample blocks;
-* the **transition-window shape** and the absolute output scale
-  after the inverse transform (the measured-best realisation is
-  carried; the dequantisers themselves are now the staged, validated
-  forms);
-* the §3.1 path on **short blocks, cross-size reuse and stereo** (no
-  committed vendor stream exercises them; the resampler and the
-  noise-enabled §3.1 forms are carried as read, DERIVED);
-* **WMA v1** specifics (no v1 vendor stream exists in the staged
-  set) and the v1 per-channel byte-alignment rule.
+* the VLC-path noise-**disabled** store form and `F(g)` at `g ≥ 146`
+  (the runtime power) are carried unvalidated.
 
 ### Vendor-wire encoder (r454, campaign r457, §3.1 path r459)
 
@@ -404,6 +413,23 @@ The encoder mirror is complete end-to-end at the vendor wire level:
   5–22 kbps, mono and stereo, headerless and reservoir/VBL): own
   chain 17.8–27.3 dB, the reference decodes every cell at corr²
   0.987–0.999 tracking the own chain (18.1–33.2 dB).
+* **Against the vendor conformance vectors** (r485,
+  `tests/sandbox_encoded.rs`): each fixture's vendor PCM re-encoded at
+  the fixture's exact configuration decodes in this crate and in the
+  black-box reference (own SNR 5.0–9.5 dB on these deliberately
+  noise-heavy signals — the vendor encoder's own figures against their
+  sources are 3.7–7.9 dB), with the coded region within −0.2 … −0.7 dB
+  and the noise-substituted region within ±0.6 dB of the input. That
+  last figure needed two fixes: F4 gains carry the decoder's
+  `ratio_k`, and joint stereo is not offered on frames whose noise
+  region differs by more than 3 dB between left and right (the §5
+  inverse spreads sum/difference noise equally). Unlike the vendor
+  encoder (`provenance/12` §2), this one's output does **not** depend
+  on how the PCM is chunked into `push` calls, and it **honours
+  `flags2` bit 5** (fits the envelope on the block grid when set; a
+  bit-5 stream read under the bit-clear label drops from 19.5 to
+  1.7 dB, mirroring the vendor's mislabel finding). It still emits
+  WMA v1 (unvalidated — no vendor v1 producer or stream exists).
 
 ### Framework registration (r450, encoder r454)
 
