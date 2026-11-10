@@ -116,7 +116,7 @@ use crate::dequant_luts::{
     ENVELOPE_WEIGHT_STORED_NEG, ENVELOPE_WEIGHT_STORED_POS, TOTAL_GAIN_EXP_PART_LOG2,
     TOTAL_GAIN_MANTISSA,
 };
-use crate::lsp_envelope::{lsp_envelope, resample_envelope};
+use crate::lsp_envelope::lsp_envelope;
 use crate::mlt::Mlt;
 use crate::stream_config::StreamConfig;
 use crate::vendor_frame::{Envelope, ParsedBlock};
@@ -152,16 +152,6 @@ pub struct BlockSynth {
     pos: i64,
     /// The last synthesised block's size (left windowing context).
     prev_size: Option<u16>,
-    /// §3 per-block-size envelope cache, `[channel][size_index]` —
-    /// the envelope a B2 = 0 block reuses
-    /// ([`crate::vendor_frame::Envelope::Reused`]). The staged trace
-    /// stores the reuse state per block-size index (`ctx+0x24c`), so
-    /// the cache is keyed the same way.
-    env_cache: Vec<Vec<Option<CachedEnvelope>>>,
-    /// The most recent envelope per channel of any size — what a
-    /// §3.1 reuse falls back to (resampled) when the per-size slot is
-    /// empty.
-    last_env: Vec<Option<CachedEnvelope>>,
     /// The reference-measured zero-fill generator's state
     /// ([`ZERO_FILL_RMS_STEPS`]; the crate's own xorshift).
     noise_state: u64,
@@ -190,6 +180,9 @@ pub struct BlockSynth {
     /// The size of the previous block of the current frame (the
     /// resample's `prev`).
     prev_in_frame: u16,
+    /// §3 VLC path: each channel's single exponent array and the block
+    /// size it was coded at (`chan+4` / `ctx+0xbc`).
+    vlc_exp: Vec<Option<(Vec<i32>, u16)>>,
     /// Whether the output stage is the vendor's 16-bit one
     /// ([`BlockSynth::with_pcm16_output`]).
     pcm16: bool,
@@ -236,9 +229,9 @@ pub fn noise_band_rms(gain: i32, band_weight: f64) -> f64 {
     10f64.powf(f64::from(gain - 64) / 20.0) * band_weight * ABS_SCALE.abs()
 }
 
-/// Number of per-channel envelope-cache slots (block-size indices
-/// 0..=4 cover the §0 clamp range down to 128-sample blocks).
-const ENV_CACHE_SLOTS: usize = 8;
+/// The §2.1 dither constant on the VLC path (`.rdata 0x1a56c`, 0.02;
+/// the §3.1 path's is 0.04).
+const VLC_DITHER: f32 = 0.02;
 
 impl BlockSynth {
     /// A synthesiser for one stream.
@@ -250,8 +243,6 @@ impl BlockSynth {
             acc_base: 0,
             pos: 0,
             prev_size: None,
-            env_cache: vec![vec![None; ENV_CACHE_SLOTS]; channels],
-            last_env: vec![None; channels],
             noise_state: 0x9E37_79B9_7F4A_7C15,
             lcg_state: 0,
             lcg_prev: 0,
@@ -262,6 +253,7 @@ impl BlockSynth {
             frame_pos: 0,
             prev_in_frame: cfg.frame_length,
             pcm16: false,
+            vlc_exp: vec![None; channels],
         }
     }
 
@@ -333,12 +325,7 @@ impl BlockSynth {
         }
         self.acc_base = self.pos;
         self.prev_size = None;
-        for ch in &mut self.env_cache {
-            for slot in ch.iter_mut() {
-                *slot = None;
-            }
-        }
-        self.last_env.fill(None);
+        self.vlc_exp.fill(None);
         self.frame_pos = 0;
         self.prev_in_frame = self.cfg.frame_length;
     }
@@ -457,207 +444,121 @@ impl BlockSynth {
         out
     }
 
-    /// Dequantise a block's coded channels onto the full coefficient
-    /// axis (uncoded channels zero-filled, §5) and run the §5
-    /// sum/difference inverse when the block is joint.
+    /// The §3 VLC path (`flags2` bit 0 set): dequantise a block's coded
+    /// channels onto the full coefficient axis (uncoded channels
+    /// zero-filled, §5) and run the §5 sum/difference inverse when the
+    /// block is joint.
+    ///
+    /// Each channel keeps **one** exponent array and the block size it
+    /// was coded at (`chan+4` / `ctx+0xbc`, `frame-bit-layout.md` §3,
+    /// round 11): a B2 = 0 block of any size reads that array on the
+    /// coded partition through `m(x) = (x ≪ s) ≫ 6`, `s = 6 +
+    /// log2(coded / block)`, and the §2.1 `ratio_k` follows the `.text
+    /// 0x5390` law on the integer exponents ([`vlc_band_ratios`]).
+    /// Store forms (round 10, validated on vendor bits): coded bin
+    /// `f32((0.02·2⁻²⁹·n + q) · f32(w_b · g₀))`, flagged band
+    /// `f32((n·2⁻²⁹) · f32(w_b · f32(ratio_k · F(gain_k))))`, tail
+    /// `f32((n·2⁻²⁹) · f32(0.02 · (w_b · g₀)))`, `g₀ = f32(F(total))`.
     fn dequantise(&mut self, block: &ParsedBlock) -> Vec<Vec<f64>> {
         let channels = usize::from(self.cfg.channels);
         let m = usize::from(block.block_size);
         let coef_start = usize::from(self.cfg.coef_start(block.block_size));
+        let coef_end = usize::from(self.cfg.coef_end(block.block_size)).min(m);
+        let f_total = vendor_total_gain(block.total_gain);
+        let g = f64::from(f_total as f32);
+        let scale = pcm_scale();
+        let gain = f_total * scale;
+        let ns = f64::from(VLC_DITHER) * NOISE_UNIT;
         let mut spec: Vec<Vec<f64>> = vec![vec![0.0; m]; channels];
         for (ch, chan) in block.channels.iter().enumerate() {
             if !chan.coded {
                 continue;
             }
-            // §3 per-block-size envelope cache: a fresh envelope
-            // (exponents, or a §3.1 conversion) fills the slot for
-            // this size index; a Reused envelope reads it back — a
-            // §3.1 envelope of another size is resampled (`.text
-            // 0x5c20`); flat when nothing was cached yet (only
-            // possible right after a reset).
-            let slot = usize::from(block.size_index).min(ENV_CACHE_SLOTS - 1);
-            let envelope: Option<CachedEnvelope> = match chan.envelope.as_ref() {
-                Some(Envelope::Exponents(e)) => Some(CachedEnvelope::Exponents(e.clone())),
-                Some(Envelope::LspIndices(idx)) => {
-                    let grid = usize::from(self.cfg.lsp_grid_len(block.block_size));
-                    match lsp_envelope(idx, m, grid) {
-                        Ok(env) => Some(CachedEnvelope::Lsp {
-                            weights: env.weights,
-                            max: env.max,
-                        }),
-                        // The decoder's own decode error for the
-                        // block: the channel stays silent.
-                        Err(_) => continue,
-                    }
-                }
-                Some(Envelope::Reused) => self.env_cache[ch][slot]
-                    .clone()
-                    .or_else(|| self.last_env[ch].clone().map(|e| e.resampled(m))),
-                None => None,
-            };
-            if let Some(env) = envelope.as_ref() {
-                self.env_cache[ch][slot] = Some(env.clone());
-                self.last_env[ch] = Some(env.clone());
+            if let Some(Envelope::Exponents(e)) = chan.envelope.as_ref() {
+                self.vlc_exp[ch] = Some((e.clone(), block.block_size));
             }
-            let weights = per_bin_weights(&self.cfg, envelope.as_ref(), m);
-            // The vendor composition: `q · w · F(total)`, then the
-            // calibrated PCM scale. On the §3.1 path the decoder's own
-            // rounding points are honoured (`g = f32(f32(1/max W) ·
-            // F)`, bin `f32((q · W[i]) · g)`).
-            let f_total = vendor_total_gain(block.total_gain);
-            let gain = f_total * pcm_scale();
-            let lsp_gain: Option<f64> = match envelope.as_ref() {
-                Some(CachedEnvelope::Lsp { max, .. }) => {
-                    let inv_max = f64::from((1.0 / f64::from(*max)) as f32);
-                    Some(f64::from((inv_max * f_total) as f32))
+            // Flat when nothing was coded yet (only right after a
+            // reset).
+            let w: Vec<f64> = match self.vlc_exp[ch].as_ref() {
+                Some((e, coded)) if !e.is_empty() => {
+                    coded_size_weights(&self.cfg, e, *coded, block.block_size)
                 }
-                _ => None,
+                _ => vec![1.0; m],
             };
-            let lsp_raw: Option<&[f32]> = match envelope.as_ref() {
-                Some(CachedEnvelope::Lsp { weights, .. }) => Some(weights),
-                _ => None,
-            };
-            // §2.1: a noise-substituted band contributes no coded
-            // coefficients — the coefficient sub-stream skips its
-            // bins. Rebuild that mapping when the block carries
-            // noise flags (the parser's default measured policy), and
-            // fill the substituted bands with noise at the measured
-            // level law ([`noise_band_rms`]), one F4 gain per band.
+            // §2.1: a noise-substituted band's bins leave the
+            // coefficient axis and are filled from the generator at
+            // its F4 gain.
             let excluded: Vec<(u16, u16)> = if chan.noise_flags.iter().any(|&f| f) {
                 noise_excluded_ranges(&self.cfg, block, &chan.noise_flags)
             } else {
                 Vec::new()
             };
-            let coef_end = usize::from(self.cfg.coef_end(block.block_size)).min(m);
-            let noise_on = self.noise_enabled;
-            let lsp = lsp_raw.is_some();
-            // Per-bin base weight `w[i]` and gain `g` of the vendor
-            // composition: the band weight and `g₀ = f32(F(total))`
-            // on the VLC path; the raw envelope `W[i]` and
-            // `g = f32(f32(1/max W) · F(total))` on the §3.1 path.
-            let w: Vec<f64> = match lsp_raw {
-                Some(raw) => raw.iter().map(|&x| f64::from(x)).collect(),
-                None => weights.clone(),
+            let ratios: Vec<f64> = match self.vlc_exp[ch].as_ref() {
+                Some((e, coded)) if !e.is_empty() => {
+                    vlc_band_ratios(&self.cfg, e, *coded, block.block_size, &excluded)
+                }
+                _ => vec![1.0; excluded.len()],
             };
-            let g = match lsp_gain {
-                Some(g) => g,
-                None => f64::from(f_total as f32),
-            };
-            let scale = pcm_scale();
-            // §2.1 flagged-band scales: `S_k = ratio_k · F(gain_k)`
-            // (VLC path; the §3.1 path folds `1/max W` in), with
-            // `ratio_k = sqrt(mean(env²) over band k / mean(env²)
-            // over the last flagged band)` on the per-bin envelope.
-            let band_scales: Vec<f64> = {
-                let mean_sq = |&(lo, hi): &(u16, u16)| -> f64 {
-                    let (lo, hi) = (usize::from(lo), usize::from(hi).min(m));
-                    if hi <= lo {
-                        return 0.0;
-                    }
-                    weights[lo..hi].iter().map(|v| v * v).sum::<f64>() / (hi - lo) as f64
-                };
-                let last = excluded.last().map(mean_sq).unwrap_or(0.0);
-                excluded
-                    .iter()
-                    .zip(chan.noise_gains.iter())
-                    .map(|(range, &gain)| {
-                        let ratio = if last > 0.0 {
-                            (mean_sq(range) / last).sqrt()
-                        } else {
-                            1.0
-                        };
-                        let f_gain = vendor_gain_law(gain);
-                        let inv_max = match envelope.as_ref() {
-                            Some(CachedEnvelope::Lsp { max, .. }) => 1.0 / f64::from(*max),
-                            _ => 1.0,
-                        };
-                        f64::from((ratio * f_gain) as f32) * inv_max
-                    })
-                    .collect()
-            };
+            let band_scales: Vec<f64> = ratios
+                .iter()
+                .zip(chan.noise_gains.iter())
+                .map(|(&ratio, &gain_k)| f64::from((ratio * vendor_gain_law(gain_k)) as f32))
+                .collect();
             let band_of = |k: usize| -> Option<usize> {
                 excluded
                     .iter()
                     .position(|&(lo, hi)| (usize::from(lo)..usize::from(hi)).contains(&k))
             };
-            // The dither scale: `0.02 · 2⁻²⁹` on the VLC path, `0.04 ·
-            // 2⁻²⁹` on the §3.1 path (the decoder's f32 constants).
-            let ns = if lsp {
-                f64::from(0.04f32) * NOISE_UNIT
-            } else {
-                f64::from(0.02f32) * NOISE_UNIT
-            };
             let mut coefs = chan.coefficients.iter().copied();
-            // The dequantised value of bin k before the PCM scale.
-            let vendor_bin = |k: usize, q: i32, n: f64, flagged: Option<usize>| -> f64 {
-                if !noise_on {
-                    // Noise disabled: `q · w · g` on the coded range,
-                    // zero elsewhere (validated: `f32((q · W[i]) · g)`).
-                    if q == 0 {
-                        return 0.0;
-                    }
-                    let v = f64::from((f64::from(q) * w[k]) as f32);
-                    return f64::from((v * g) as f32);
-                }
-                if let Some(b) = flagged {
-                    // Flagged band: `f32((n · 2⁻²⁹) · f32(w · S_k))`.
-                    let s = band_scales.get(b).copied().unwrap_or(0.0);
-                    return f64::from(((n * NOISE_UNIT) * f64::from((w[k] * s) as f32)) as f32);
-                }
-                if k < coef_start || k >= coef_end {
-                    // Below the coded range (v1) / the tail above it:
-                    // `f32((n · 2⁻²⁹) · f32(0.02 · (w_edge · g)))` with
-                    // the weight of the nearest coded bin.
-                    let edge = if k < coef_start {
-                        coef_start
-                    } else {
-                        coef_end.saturating_sub(1)
-                    };
-                    let dither = f64::from((ns / NOISE_UNIT * (w[edge] * g)) as f32);
-                    return f64::from(((n * NOISE_UNIT) * dither) as f32);
-                }
-                // Coded bin: `f32((ns · n + q) · f32(w · g))` — every
-                // coded bin, zero or not, carries the dither.
-                let wg = f64::from((w[k] * g) as f32);
-                f64::from(((ns * n + f64::from(q)) * wg) as f32)
-            };
-            if noise_on {
+            if self.noise_enabled {
                 // One generator draw per bin, in bin order.
                 for k in 0..m {
                     let n = f64::from(self.noise_draw());
                     let flagged = band_of(k);
-                    let q = if flagged.is_none() && k >= coef_start && k < coef_end {
-                        coefs.next().unwrap_or(0)
+                    let v = if let Some(b) = flagged {
+                        let s = band_scales.get(b).copied().unwrap_or(0.0);
+                        f64::from(((n * NOISE_UNIT) * f64::from((w[k] * s) as f32)) as f32)
+                    } else if k < coef_start || k >= coef_end {
+                        // Below the coded range (v1) / the tail: the
+                        // weight of the nearest coded bin.
+                        let edge = if k < coef_start {
+                            coef_start
+                        } else {
+                            coef_end.saturating_sub(1)
+                        };
+                        let dither = f64::from((f64::from(VLC_DITHER) * (w[edge] * g)) as f32);
+                        f64::from(((n * NOISE_UNIT) * dither) as f32)
                     } else {
-                        0
+                        // Coded bin: every one, zero or not, carries
+                        // the dither.
+                        let q = coefs.next().unwrap_or(0);
+                        let wg = f64::from((w[k] * g) as f32);
+                        let v = f64::from(((ns * n + f64::from(q)) * wg) as f32);
+                        if v == 0.0 && q == 0 && self.zero_fill_noise {
+                            spec[ch][k] =
+                                self.noise_sample() * ZERO_FILL_RMS_STEPS * w[k] * gain.abs();
+                            continue;
+                        }
+                        v
                     };
-                    let v = vendor_bin(k, q, n, flagged);
-                    spec[ch][k] = if v == 0.0 && q == 0 && self.zero_fill_noise && flagged.is_none()
-                    {
-                        self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs()
-                    } else {
-                        v * scale
-                    };
+                    spec[ch][k] = v * scale;
                 }
             } else {
                 for k in coef_start..coef_end {
-                    if band_of(k).is_some() {
-                        continue;
-                    }
                     let Some(q) = coefs.next() else { break };
                     if q != 0 {
-                        spec[ch][k] = vendor_bin(k, q, 0.0, None) * scale;
+                        let v = f64::from((f64::from(q) * w[k]) as f32);
+                        spec[ch][k] = f64::from((v * g) as f32) * scale;
                     } else if self.zero_fill_noise {
-                        spec[ch][k] =
-                            self.noise_sample() * ZERO_FILL_RMS_STEPS * weights[k] * gain.abs();
+                        spec[ch][k] = self.noise_sample() * ZERO_FILL_RMS_STEPS * w[k] * gain.abs();
                     }
                 }
             }
         }
 
-        // §5 sum/difference inverse, on dequantised coefficients,
-        // before the inverse transform; both channels count as coded
-        // afterwards.
+        // §5 sum/difference inverse over all N bins, on dequantised
+        // coefficients, before the inverse transform; both channels
+        // count as coded afterwards.
         if channels == 2 && block.joint_stereo && block.channels.iter().any(|c| c.coded) {
             let (a, b) = spec.split_at_mut(1);
             for (mid, side) in a[0].iter_mut().zip(b[0].iter_mut()) {
@@ -839,6 +740,134 @@ impl BlockSynth {
     }
 }
 
+/// `m(x) = (x ≪ s) ≫ 6` with `s = 6 + log2(coded / block)` — a bin
+/// of a `block`-sized block mapped onto the coordinates of the
+/// partition the exponents were coded on (§2.1 / §3, `.text 0x5ce0`,
+/// `0x5390`).
+fn coded_coord(x: usize, coded: u16, block: u16) -> usize {
+    let (c, b) = (usize::from(coded), usize::from(block));
+    if c >= b { x * (c / b) } else { x / (b / c) }
+}
+
+/// The band of `edges` containing `x` (the last band past the end).
+fn band_containing(edges: &[u16], x: usize) -> usize {
+    let bands = edges.len().saturating_sub(1);
+    (0..bands)
+        .find(|&j| x < usize::from(edges[j + 1]))
+        .unwrap_or(bands.saturating_sub(1))
+}
+
+/// §3 VLC path: per-bin band weights of a block of `block` bins from
+/// the channel's single exponent array coded at `coded` bins — each
+/// bin reads the exponent of the coded partition's band containing
+/// `m(i)` (§3 erratum candidate, round 11), weighted `10^((e − e_max)/16)`.
+fn coded_size_weights(cfg: &StreamConfig, exps: &[i32], coded: u16, block: u16) -> Vec<f64> {
+    let edges = crate::band_partition::exponent_band_edges(cfg.sample_rate, coded);
+    let e_max = exps.iter().copied().max().unwrap_or(0);
+    (0..usize::from(block))
+        .map(|i| {
+            let j = band_containing(&edges, coded_coord(i, coded, block));
+            envelope_weight(exps.get(j).copied().unwrap_or(e_max) - e_max)
+        })
+        .collect()
+}
+
+/// The `wma-envelope-weight-lut` law on a raw exponent (`.text
+/// 0x5390`'s `w(e)`): `e ≤ 0` → `LUTneg[−e] / 2^((−e) ≫ 2)` with
+/// `e < −72` read as `−71`; `e > 0` → `2^(e ≫ 2) · LUTpos[min(e, 50)]`.
+fn raw_exponent_weight(e: i32) -> f64 {
+    if e <= 0 {
+        envelope_weight(if e < -72 { -71 } else { e })
+    } else {
+        let stored = f32::from_bits(ENVELOPE_WEIGHT_STORED_POS[e.min(50) as usize]);
+        f64::from(stored) * 2f64.powi(e >> 2)
+    }
+}
+
+/// §2.1 `ratio_k` on the VLC path (`.text 0x5390`, round 11, validated
+/// on 2 975 vendor ratios including cross-size reuse): from the
+/// channel's integer exponents coded at `coded` bins, for the flagged
+/// bands `ranges` (`[lo, hi)` in the block's own bins, `hi` clipped to
+/// `coef_end`) of a `block`-bin block.
+fn vlc_band_ratios(
+    cfg: &StreamConfig,
+    exps: &[i32],
+    coded: u16,
+    block: u16,
+    ranges: &[(u16, u16)],
+) -> Vec<f64> {
+    let g = ranges.len();
+    if g == 0 {
+        return Vec::new();
+    }
+    let edges = crate::band_partition::exponent_band_edges(cfg.sample_rate, coded);
+    let x = |j: usize| exps.get(j).copied().unwrap_or(0);
+    let s = 6 + (i32::from(coded).ilog2() as i32 - i32::from(block).ilog2() as i32);
+    let mid_rate =
+        cfg.version != crate::header::Version::V1 && (32_000..44_100).contains(&cfg.sample_rate);
+    if s == 6 || mid_rate {
+        let xs: Vec<i32> = ranges
+            .iter()
+            .map(|&(lo, _)| {
+                x(band_containing(
+                    &edges,
+                    coded_coord(usize::from(lo), coded, block),
+                ))
+            })
+            .collect();
+        let last = xs[g - 1];
+        return xs
+            .iter()
+            .enumerate()
+            .map(|(k, &xk)| {
+                if k + 1 == g {
+                    1.0
+                } else {
+                    f64::from(raw_exponent_weight(xk - last) as f32)
+                }
+            })
+            .collect();
+    }
+    // Cross-size reuse.
+    let coef_end_full = usize::from(cfg.coef_end(cfg.frame_length));
+    let l = usize::from(coded) * coef_end_full / usize::from(cfg.frame_length);
+    let p: Vec<f64> = ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            let (lo, hi) = (usize::from(lo), usize::from(hi));
+            let j1 = band_containing(&edges, coded_coord(lo, coded, block));
+            let j2 = band_containing(
+                &edges,
+                coded_coord(hi, coded, block).min(l).saturating_sub(1),
+            );
+            let w1 = raw_exponent_weight(x(j1));
+            if j1 == j2 || hi <= lo {
+                return f64::from((w1 * w1) as f32);
+            }
+            let w2 = raw_exponent_weight(x(j2));
+            let t = usize::from(edges[(j1 + 1).min(edges.len() - 1)]).min(l);
+            let t = if s > 6 {
+                (t + (1 << (s - 7))) >> (s - 6)
+            } else {
+                t << (6 - s)
+            };
+            let (hi_f, lo_f, t_f) = (hi as f64, lo as f64, t as f64);
+            f64::from((((hi_f - t_f) * w2 * w2 + (t_f - lo_f) * w1 * w1) / (hi_f - lo_f)) as f32)
+        })
+        .collect();
+    let last = p[g - 1];
+    p.iter()
+        .enumerate()
+        .map(|(k, &pk)| {
+            if k + 1 == g || last <= 0.0 {
+                1.0
+            } else {
+                f64::from((pk / last).sqrt() as f32)
+            }
+        })
+        .collect()
+}
+
 /// The §3.1 reuse resample (`.text 0x5c20`), in place on a channel's
 /// envelope buffer from the previous block's size `prev` to this
 /// block's size `cur`: `prev > cur` decimates (`W[i] = W[i·r]`,
@@ -892,43 +921,12 @@ fn noise_excluded_ranges(
         .collect()
 }
 
-/// A decoded envelope as the per-size cache holds it.
-#[derive(Debug, Clone, PartialEq)]
-enum CachedEnvelope {
-    /// §3 VLC-delta exponents, one per band.
-    Exponents(Vec<i32>),
-    /// §3.1 converted envelope: the per-bin `W[i]` and the recorded
-    /// maximum.
-    Lsp {
-        /// `W[i]`, one per coefficient of the block it was converted for.
-        weights: Vec<f32>,
-        /// The conversion's recorded maximum.
-        max: f32,
-    },
-}
-
-impl CachedEnvelope {
-    /// The envelope a block of `m` coefficients reuses: exponents are
-    /// per band and carry over as they are; a §3.1 envelope of another
-    /// length is resampled by nearest neighbour, its recorded maximum
-    /// kept (module docs).
-    fn resampled(self, m: usize) -> Self {
-        match self {
-            CachedEnvelope::Lsp { weights, max } if weights.len() != m => CachedEnvelope::Lsp {
-                weights: resample_envelope(&weights, m),
-                max,
-            },
-            other => other,
-        }
-    }
-}
-
 /// The staged band weights over the coefficient axis: for each band
 /// of the block's partition, `10^((e − e_max) / 16)` through the
 /// staged `wma-envelope-weight-lut` ([`envelope_weight`]) — the
 /// vendor's per-band weight anchored at the block's loudest band.
 /// Absent envelopes yield a flat weight; a §3.1 envelope is not a
-/// band envelope (see [`per_bin_weights`]).
+/// band envelope.
 pub(crate) fn band_weights(cfg: &StreamConfig, envelope: Option<&Envelope>, m: usize) -> Vec<f64> {
     let exponents = match envelope {
         Some(Envelope::Exponents(e)) if !e.is_empty() => e,
@@ -950,22 +948,6 @@ fn exponent_weights(cfg: &StreamConfig, exponents: &[i32], m: usize) -> Vec<f64>
         }
     }
     w
-}
-
-/// The per-bin weight of a cached envelope: the band weights for
-/// exponents, `W[i] / max W` for a §3.1 envelope (the role the band
-/// weight plays in every §2.1 noise formula), flat when absent.
-fn per_bin_weights(cfg: &StreamConfig, envelope: Option<&CachedEnvelope>, m: usize) -> Vec<f64> {
-    match envelope {
-        Some(CachedEnvelope::Exponents(e)) if !e.is_empty() => exponent_weights(cfg, e, m),
-        Some(CachedEnvelope::Lsp { weights, max }) => {
-            let inv = 1.0 / f64::from(*max);
-            let mut w: Vec<f64> = weights.iter().map(|&x| f64::from(x) * inv).collect();
-            w.resize(m, 1.0);
-            w
-        }
-        _ => vec![1.0; m],
-    }
 }
 
 /// The staged band weight for an exponent delta `e = e_b − e_max`:
@@ -1502,5 +1484,53 @@ mod tests {
         }
         let db = 10.0 * (acc / noise).log10();
         assert!((9.0..11.0).contains(&db), "+10 gain steps = {db:.2} dB");
+    }
+
+    #[test]
+    fn reuse_resample_follows_the_staged_law() {
+        // prev > cur: W[i] = W[i·r] ascending.
+        let mut w: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        resample_in_place(&mut w, 8, 4);
+        assert_eq!(&w[..4], &[0.0, 2.0, 4.0, 6.0]);
+        // prev < cur: W[j·r … j·r + r − 1] = W[j] descending.
+        let mut w: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        resample_in_place(&mut w, 2, 8);
+        assert_eq!(w, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        // Equal sizes: untouched.
+        let mut w: Vec<f32> = (0..4).map(|i| i as f32).collect();
+        resample_in_place(&mut w, 4, 4);
+        assert_eq!(w, vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn coded_partition_mapping_and_vlc_ratio_law() {
+        // m(x) = (x ≪ s) ≫ 6: coded at 512, read by a 256 block → 2x;
+        // coded at 256, read by a 512 block → x / 2.
+        assert_eq!(coded_coord(100, 512, 256), 200);
+        assert_eq!(coded_coord(101, 256, 512), 50);
+        assert_eq!(coded_coord(77, 512, 512), 77);
+        // The raw-exponent weight: e > 50 keeps its own power of two.
+        assert_eq!(raw_exponent_weight(0), envelope_weight(0));
+        assert_eq!(raw_exponent_weight(-80), envelope_weight(-71));
+        assert!((raw_exponent_weight(54) / raw_exponent_weight(50) - 2.0).abs() < 1e-12);
+        // Same-size ratios: f32(w(x_k − x_last)), the last band 1.
+        let cfg = StreamConfig::derive(Version::V2, 22_050, 1, 2003, 744, 0x000f).unwrap();
+        let edges = crate::band_partition::exponent_band_edges(22_050, 1024);
+        let exps: Vec<i32> = (0..edges.len() as i32 - 1).map(|b| 40 - b).collect();
+        let ranges = vec![(717u16, 884u16), (884, 932)];
+        let r = vlc_band_ratios(&cfg, &exps, 1024, 1024, &ranges);
+        let j0 = band_containing(&edges, 717);
+        let j1 = band_containing(&edges, 884);
+        assert_eq!(r[1], 1.0);
+        assert_eq!(
+            r[0],
+            f64::from(raw_exponent_weight(exps[j0] - exps[j1]) as f32)
+        );
+        // Cross-size reuse with both bands inside one coded band each:
+        // `ratio = f32(sqrt(f32(w0²) / f32(w1²)))`.
+        let r = vlc_band_ratios(&cfg, &exps, 1024, 512, &[(358, 440), (440, 466)]);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1], 1.0);
+        assert!(r[0] > 0.0 && r[0].is_finite());
     }
 }

@@ -106,9 +106,11 @@ pub enum Envelope {
     /// the per-bin envelope by [`crate::lsp_envelope`] in the decode
     /// stage.
     LspIndices([u8; 10]),
-    /// §2 B2 = 0 — reuse the previously decoded envelope for this
-    /// block size (the §3 per-block-size cache, `ctx+0x24c` in the
-    /// staged trace; the decode stage resolves it).
+    /// §2 B2 = 0 — reuse the channel's previously decoded envelope
+    /// (the decode stage resolves it: on the §3 path the one exponent
+    /// array read on the partition it was coded at, on the §3.1 path
+    /// the one envelope buffer resampled in place — `frame-bit-layout.md`
+    /// §3 / §3.1; only the B2 *flag* slot is per block-size index).
     Reused,
 }
 
@@ -672,7 +674,7 @@ impl FrameParser {
         // B2/B3/B4 — one per-block B2 reuse bit under the configured
         // [`ReuseRule`], then per coded channel envelopes, channel 0
         // first. B2 = 0 marks every coded channel's envelope as
-        // reused from the per-block-size cache (§3) — no envelope
+        // reused (§3 / §3.1, resolved by the decode stage) — no envelope
         // bits follow.
         let b2_short = block_size < self.cfg.frame_length && self.cfg.vbl_enabled;
         let per_block_condition = match self.reuse {

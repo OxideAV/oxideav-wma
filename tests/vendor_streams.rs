@@ -691,19 +691,26 @@ fn vendor_pcm_decodes_and_correlates() {
                 // r454: the measured noise-substitution policy opened
                 // this family (97/122, ≈ 14 dB); r459: the staged
                 // cutoff-bin walk closes it (122/122, 15.1 dB, corr²
-                // 0.945 — the substituted bands are noise of the
-                // vendor generator's sequence, uncorrelated with the
+                // 0.945); r485: the single exponent array read on the
+                // coded partition across sizes and the `.text 0x5390`
+                // ratio law — 19.4 dB, corr² 0.987, gain 0.998 (the
+                // substituted bands are noise of the vendor
+                // generator's sequence, uncorrelated with the
                 // reference's own fill by construction).
-                assert!(corr2 > 0.9, "corr² regressed: {corr2}");
-                assert!(median > 13.0, "median SNR regressed to {median:.2} dB");
+                assert!(corr2 > 0.98, "corr² regressed: {corr2}");
+                assert!(median > 18.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"
                 );
             }
             "cand_stereo22k_32kbps_av.wma" => {
-                assert!(corr2 > 0.98, "corr² regressed: {corr2}");
-                assert!(median > 38.0, "median SNR regressed to {median:.2} dB");
+                // r485: 45.4 dB → 137.4 dB (the reference's own f32
+                // floor) once a reused envelope is the channel's one
+                // exponent array read on its coded partition, not a
+                // per-block-size cache.
+                assert!(corr2 > 0.999, "corr² regressed: {corr2}");
+                assert!(median > 100.0, "median SNR regressed to {median:.2} dB");
                 assert!(
                     (0.8..1.25).contains(&gain),
                     "fitted gain {gain} strayed from 1"

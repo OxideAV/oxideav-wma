@@ -36,6 +36,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **§3 VLC path: one exponent array per channel** (round-11 erratum
+  candidate, `frame-bit-layout.md` §3): a B2 = 0 block of any size
+  reads the channel's last coded exponents on the partition they were
+  coded at through `m(x) = (x ≪ s) ≫ 6` — the per-block-size cache is
+  gone — and the §2.1 `ratio_k` follows the `.text 0x5390` law on the
+  integer exponents (same-size / 32–44 kHz `w(x_k − x_last)`,
+  cross-size two-band energy split). Against the black-box reference
+  the stereo 22.05 kHz vendor stream goes from 45.4 dB to **137.4 dB**
+  (its own f32 floor) and the mono 22.05 kHz noise-substitution stream
+  from 15.1 dB / corr² 0.945 to **19.4 dB / 0.987**; 1763 / 1763
+  boundaries still close.
 - **Encoder noise-band levels**: F4 gains now carry the decoder's
   `ratio_k` (`target / ratio_k`, target `rms(spec) / rms(w)`), and the
   joint-stereo candidate is withheld on frames whose §2.1 noise region

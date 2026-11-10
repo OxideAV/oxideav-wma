@@ -82,8 +82,8 @@ pub enum EncEnvelope {
     /// §3.1 fresh line-spectral indices, ten fields of the staged
     /// widths (3,4,4,4,4,4,4,4,3,3 bits).
     Lsp([u8; 10]),
-    /// §2 B2 = 0 — reuse the envelope cached for this block-size
-    /// index. Only valid on blocks that carry the B2 bit, and only
+    /// §2 B2 = 0 — reuse the channel's previously decoded envelope
+    /// (§3 / §3.1: one per channel, not one per block size). Only valid on blocks that carry the B2 bit, and only
     /// when **every** coded channel reuses (B2 is per block).
     Reuse,
 }
@@ -1273,7 +1273,7 @@ mod tests {
         let mut w = VendorBitWriter::new(&cfg).unwrap();
         let bs = cfg.block_size_for_index(1).unwrap();
         // Frame 1: two fresh short blocks. Frame 2: two blocks whose
-        // envelopes reuse the size-1 cache.
+        // envelopes reuse the channel's last one.
         let fresh = vec![simple_block(&cfg, 1, 11), simple_block(&cfg, 1, 12)];
         let mut reused_block = simple_block(&cfg, 1, 13);
         for ch in &mut reused_block.channels {
