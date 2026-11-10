@@ -6,6 +6,49 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Sandbox-encoded conformance vectors (r485)** — `tests/sandbox_encoded.rs`
+  decodes the nine LSP-path vendor-encoded streams staged in
+  `docs/audio/wma/reference/sandbox-encoded/` (8 kHz mono 5 / 6 kbps
+  with noise substitution, 16 / 22.05 kHz variable block length, 8 /
+  16 kHz stereo L/R and sum/difference) and compares against the
+  vendor decoder's own PCM: with the new opt-in 16-bit output stage
+  (`BlockSynth::with_pcm16_output`) **962 869 / 963 584 samples
+  (99.93 %) are bit-exact and every other sample is within ±1 LSB**
+  on all nine (before: three fixtures failed to parse, the other six
+  matched 11–25 % of samples with errors up to 35 LSB and one at
+  corr² 0.51). The default float stage lands at unit gain with the
+  single-rounding ±1 residual.
+- `vendor_decode::vendor_gain_law` — the staged gain law `F(g)` over
+  every integer, including the `0 ≤ g < 18` and `g < 0` coarse forms
+  (`wma-total-gain-coarse-consts`); the F4 noise gains use it.
+- `vendor_frame::staged_cutoff_bin_at` — the §2.1 cutoff bin with the
+  decoder's binary32 rounding points (`f_c = f32(half · factor)`).
+
+### Fixed
+
+- **§3.1 LSP path rebuilt on the round-12 dataflow**: one envelope
+  buffer per channel (no per-size cache), the uncoded-channel 1.0
+  fill on new-envelope blocks, the `.text 0x5c20` in-place reuse
+  resample only when the block is not its frame's first, the binary32
+  `ratio_k` normaliser over `W`, and the four noise-enabled store
+  forms with their rounding points (`f32(((q + n·ns)·W)·g)`,
+  `f32((n·W)·S_k)`, `f32(n·T)`); the §5 inverse stores binary32 over
+  all `N` bins.
+- **§0.3 `coef_end` for short blocks** is the frame's `coef_end`
+  scaled by `block / frame` (integer division): 116, not 117, for a
+  128-sample block — the sandbox 16 kHz stereo fixtures' 128-sample
+  blocks parse only under it (the committed vendor corpus still closes
+  1763 / 1763).
+- **Absolute output scale** read off the vendor PCM: the inverse
+  transform output is the 16-bit sample with its sign inverted
+  (`pcm_scale() = −1/32768`); `ABS_SCALE` is now `−F(64)/32768`
+  (the r457 fit was 0.15 % high).
+- **§2.1 enable/cutoff table** follows the round-11 corrected staging
+  (the `< 8000 Hz` / v1-generic three-way row; the two rows the crate
+  had carried from black-box measurement are now the staged ones).
+
 ### Changed
 
 - API hygiene: `#[non_exhaustive]` on `Error`, `LspError`, `Version`,

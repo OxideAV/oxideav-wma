@@ -71,34 +71,46 @@
 //! * **total gain** — `F(g) = 10^(g/20)` (1 dB per B1 step) as the
 //!   staged `wma-total-gain-lut` product `mantissa[g] · 2^(4 + (g >> 3))`
 //!   for `18 ≤ g < 146` ([`vendor_total_gain`]); `g ≥ 146` uses the
-//!   runtime power the decoder computes. The r450 sweep had found the
-//!   1/20 exponent; the staged table confirms it and the decoder's
-//!   `g₀ = f32(F(total))` rounding point.
-//! * **LSP path** (§3.1) — per-bin weight `W[i]` from
-//!   [`crate::lsp_envelope`] (bit-exact), `g = f32(f32(1 / max W) ·
-//!   F(total))`, coded bin `f32((q · W[i]) · g)` — validated bit-for-bit
-//!   on the noise-disabled form (the only committed LSP-path stream has
-//!   noise off). A reused envelope for a block of another size is
-//!   resampled by nearest neighbour (`.text 0x5c20`); the recorded
-//!   maximum is kept (DERIVED — no committed stream exercises it).
-//! * **absolute scale** — `ABS_SCALE`: the one black-box-calibrated
-//!   constant, folding the inverse transform's normalisation and the
-//!   reference's ±1.0 float convention into a fitted gain ≈ 1 (its
-//!   sign absorbs the reconstruction's phase convention). It is
-//!   applied on top of the vendor composition as `ABS_SCALE / F(64)`
-//!   ([`pcm_scale`]) so the r457 calibration (which anchored the total
-//!   gain at 64) carries over unchanged. The absolute output scale
-//!   after the inverse transform is the one part of G9 the staging has
-//!   not read.
+//!   runtime power the decoder computes, and `g < 18` the staged coarse
+//!   power-of-two step (`wma-total-gain-coarse-consts`,
+//!   [`vendor_gain_law`] — the F4 noise-band gains, which reach below
+//!   zero, share the law). The r450 sweep had found the 1/20 exponent;
+//!   the staged table confirms it and the decoder's `g₀ = f32(F(total))`
+//!   rounding point.
+//! * **LSP path** (§3.1, `BlockSynth::dequantise_lsp`) — the staged
+//!   dataflow as validated bit-for-bit on the sandbox-encoded vendor
+//!   streams (round 12): one envelope buffer per channel (a coded
+//!   channel's conversion or an uncoded channel's 1.0 fill writes its
+//!   first `N` slots on a new-envelope block; a reuse block resamples
+//!   it in place from the previous block of the frame, `.text
+//!   0x5c20`), the binary32 `ratio_k` normaliser, the four
+//!   noise-enabled store forms with their rounding points, the shared
+//!   generator, and the §5 inverse over all `N` bins.
+//! * **absolute scale** — read off the vendor PCM of the
+//!   sandbox-encoded conformance vectors (`tests/sandbox_encoded.rs`):
+//!   the inverse transform of the dequantised binary32 coefficients on
+//!   [`crate::mlt`]'s `2/M` normalisation is the vendor's 16-bit
+//!   sample with its **sign inverted** (fitted gain 1.000 000 ± 3·10⁻⁷
+//!   on all nine; [`pcm_scale`] = `−1/32768` in the ±1.0 convention).
+//!   The r457 black-box calibration (`−4.844·10⁻²` at gain 64) was
+//!   this value 0.15 % high; [`ABS_SCALE`] keeps its meaning (the
+//!   scale at total gain 64) for the encoder's level laws.
+//! * **16-bit output stage** ([`BlockSynth::with_pcm16_output`], opt-in)
+//!   — the vendor rounds each block's windowed contribution to the
+//!   16-bit grid before the overlap-add: with it the nine conformance
+//!   vectors reproduce **99.93 %** of the vendor's samples bit-exactly
+//!   and the rest within ±1 LSB (the inverse transform's own
+//!   arithmetic, untraced — gap G10).
 //!
 //! ## Honest approximations (staged gaps)
 //!
-//! * The transition-window shape is unstaged and carried as the
-//!   measured-best realisation of the staged facts.
-//! * `F(g)` below 18: the staged reader note gives a coarse
-//!   power-of-two form with an unstaged constant (`.rdata 0x1a530`);
-//!   the continuous `10^(g/20)` is carried there (it is what the
-//!   black-box reference measures), reported as a docs ask.
+//! * The transition-window shape is unstaged; the realisation above
+//!   (sine slopes of `min(M, neighbour)` centred on the slot
+//!   boundaries) is carried — on the sandbox-encoded streams (512 /
+//!   256 / 128 and 1024 / 512 / 256 transitions) it reproduces the
+//!   vendor PCM to the same ±1 LSB residual as the steady state.
+//! * The inverse transform's arithmetic (operation order, binary32
+//!   stores) is untraced; this crate's transform runs in binary64.
 
 use crate::dequant_luts::{
     ENVELOPE_WEIGHT_STORED_NEG, ENVELOPE_WEIGHT_STORED_POS, TOTAL_GAIN_EXP_PART_LOG2,
@@ -109,20 +121,21 @@ use crate::mlt::Mlt;
 use crate::stream_config::StreamConfig;
 use crate::vendor_frame::{Envelope, ParsedBlock};
 
-/// Black-box-calibrated absolute output scale (module docs): places
-/// decoded PCM in the reference's ±1.0 float convention; the sign
-/// absorbs the reconstruction's phase convention.
-///
-/// r457 recalibration: the r450 value (`-6.85e-2`) was fitted
-/// against the reference's stereo→mono *downmix* compared with this
-/// decoder's `(L + R) / 2`; the reference's downmix weights are
-/// `1/√2` per channel, so that fit absorbed a factor √2 and the
-/// decoder ran 3 dB loud (the mono 22.05 kHz family's fitted gain
-/// of 1.40 in r454 was the tell). Measured per channel, the
-/// reference's fitted gain is now ≈ 1.0 on every family, mono
-/// included, and on this crate's own encoded streams at every
-/// total gain and envelope anchor.
-pub const ABS_SCALE: f64 = -4.844e-2;
+/// The output scale at total gain 64 (module docs): `−F(64) / 32768`,
+/// i.e. a coefficient `q · w` at gain 64 contributes `q · w ·
+/// ABS_SCALE` in the ±1.0 float convention. Read off the vendor PCM
+/// of the sandbox-encoded conformance vectors (r485; the r457
+/// black-box fit was `−4.844·10⁻²`, 0.15 % high); the sign is the
+/// vendor's output polarity relative to [`crate::mlt`]'s basis.
+pub const ABS_SCALE: f64 = -(f32::from_bits(TOTAL_GAIN_MANTISSA[64]) as f64)
+    * (1u32 << TOTAL_GAIN_EXP_PART_LOG2[64 >> 3]) as f64
+    / PCM_FULL_SCALE;
+
+/// The decoder's 16-bit output full scale: an inverse-transform
+/// output of `x` (on [`crate::mlt`]'s `2/M` normalisation, from the
+/// binary32 dequantised coefficients) is the 16-bit sample `−x`; in
+/// the ±1.0 float convention that is `−x / 32768`.
+pub const PCM_FULL_SCALE: f64 = 32768.0;
 
 /// Stateful PCM synthesiser for parsed vendor blocks: per-channel
 /// lapped-transform accumulator carried across blocks, frames and
@@ -163,6 +176,23 @@ pub struct BlockSynth {
     /// Whether zero-quantised bins of coded channels are noise-filled
     /// at the reference's measured floor ([`ZERO_FILL_RMS_STEPS`]).
     zero_fill_noise: bool,
+    /// §3.1 — each channel's **single** per-bin envelope buffer `W`
+    /// (`frame_length` slots; a conversion or an uncoded fill writes
+    /// the first `N`, a reuse resamples it in place).
+    lsp_w: Vec<Vec<f32>>,
+    /// §3.1 — each channel's recorded envelope maximum (untouched by
+    /// the reuse resample).
+    lsp_max: Vec<f32>,
+    /// Sample offset of the next block inside its frame (0 = the next
+    /// block opens a frame): the §3.1 reuse resample runs only when
+    /// the block is not the first of its frame.
+    frame_pos: u32,
+    /// The size of the previous block of the current frame (the
+    /// resample's `prev`).
+    prev_in_frame: u16,
+    /// Whether the output stage is the vendor's 16-bit one
+    /// ([`BlockSynth::with_pcm16_output`]).
+    pcm16: bool,
 }
 
 /// The black-box-measured **zero-coefficient noise floor** of the
@@ -227,7 +257,33 @@ impl BlockSynth {
             lcg_prev: 0,
             noise_enabled: crate::vendor_frame::noise_policy(cfg).is_some(),
             zero_fill_noise: false,
+            lsp_w: vec![vec![0.0; usize::from(cfg.frame_length)]; channels],
+            lsp_max: vec![0.0; channels],
+            frame_pos: 0,
+            prev_in_frame: cfg.frame_length,
+            pcm16: false,
         }
+    }
+
+    /// Select the vendor decoder's **16-bit output stage**: every
+    /// block's windowed inverse-transform output is rounded to the
+    /// 16-bit grid (`round(x · 32768)`, ties to even) before it is
+    /// overlap-added, and the sum saturates at the 16-bit range, so
+    /// every emitted sample is an exact `k / 32768`.
+    ///
+    /// This is a black-box measurement against the vendor decoder's
+    /// own PCM on the nine sandbox-encoded conformance vectors
+    /// (`docs/audio/wma/reference/sandbox-encoded/`, round 12): with
+    /// the per-block rounding the residual against the vendor's
+    /// 16-bit output is ±1 LSB on ≈ 0.1 % of samples (the inverse
+    /// transform's arithmetic, which the staging has not traced —
+    /// gap G10), where a single rounding of the float sum leaves a
+    /// triangular ±1 residual on 25 % of them. The default output
+    /// stage keeps the unrounded float sum (higher fidelity than the
+    /// 16-bit stage); this switch exists for conformance comparison.
+    pub fn with_pcm16_output(mut self, on: bool) -> Self {
+        self.pcm16 = on;
+        self
     }
 
     /// Fill zero-quantised bins of coded channels with noise at the
@@ -283,6 +339,8 @@ impl BlockSynth {
             }
         }
         self.last_env.fill(None);
+        self.frame_pos = 0;
+        self.prev_in_frame = self.cfg.frame_length;
     }
 
     /// Synthesise one parsed block into `block_size` PCM samples per
@@ -293,7 +351,15 @@ impl BlockSynth {
     /// overlap-add (module docs).
     pub fn block(&mut self, block: &ParsedBlock) -> Vec<Vec<f64>> {
         let m = usize::from(block.block_size);
-        let spec = self.dequantise(block);
+        let first_in_frame = self.frame_pos == 0;
+        let spec = if self.cfg.exp_vlc {
+            self.dequantise(block)
+        } else {
+            self.dequantise_lsp(block, first_in_frame)
+        };
+        self.prev_in_frame = block.block_size;
+        self.frame_pos = (self.frame_pos + u32::from(block.block_size))
+            % u32::from(self.cfg.frame_length).max(1);
 
         // Left windowing context: the carried previous size when the
         // chain is unbroken, else the parser's three-field-opening
@@ -310,6 +376,15 @@ impl BlockSynth {
         for (ch, coeffs) in spec.into_iter().enumerate() {
             let mut time = inverse_transform(&coeffs);
             transition_window(&mut time, prev, next);
+            if self.pcm16 {
+                // The vendor's 16-bit output stage (measured on the
+                // sandbox-encoded conformance vectors): each block's
+                // windowed contribution is rounded to the 16-bit grid
+                // before the overlap-add.
+                for v in time.iter_mut() {
+                    *v = (*v * PCM_FULL_SCALE).round_ties_even() / PCM_FULL_SCALE;
+                }
+            }
             let start = self.pos - (m as i64) / 2;
             let need = (self.pos + 3 * (m as i64) / 2 - self.acc_base) as usize;
             if self.acc[ch].len() < need {
@@ -360,6 +435,9 @@ impl BlockSynth {
                 let rel = (abs - self.acc_base) as usize;
                 if rel < self.acc[ch].len() {
                     *p = self.acc[ch][rel];
+                    if self.pcm16 {
+                        *p = p.clamp(-1.0, 32767.0 / PCM_FULL_SCALE);
+                    }
                 }
             }
             out.push(pcm);
@@ -488,7 +566,7 @@ impl BlockSynth {
                         } else {
                             1.0
                         };
-                        let f_gain = vendor_total_gain(gain.max(0) as u32);
+                        let f_gain = vendor_gain_law(gain);
                         let inv_max = match envelope.as_ref() {
                             Some(CachedEnvelope::Lsp { max, .. }) => 1.0 / f64::from(*max),
                             _ => 1.0,
@@ -591,7 +669,208 @@ impl BlockSynth {
         }
         spec
     }
+
+    /// The §3.1 path (`flags2` bit 0 clear), in the staged dataflow
+    /// (`frame-bit-layout.md` §3.1, validated bit-for-bit on the
+    /// sandbox-encoded vendor streams in round 12):
+    ///
+    /// * **envelope stage** — on a block that codes new envelopes
+    ///   (B2 absent or 1) a coded channel converts its ten indices
+    ///   into the first `N` slots of its single buffer `W` and records
+    ///   the maximum; an uncoded channel sets those slots and the
+    ///   maximum to 1.0. On a reuse block (B2 = 0) every channel keeps
+    ///   its buffer and, unless the block opens its frame, resamples
+    ///   it in place from the previous block's size to this one's
+    ///   (`prev > cur`: `W[i] = W[i·r]` ascending; `prev < cur`:
+    ///   `W[j·r … j·r+r−1] = W[j]` descending); the maximum is kept;
+    /// * **normaliser** — `ratio_k = f32(sqrt(P_k / P_{G−1}))`, `P_k =
+    ///   f32(f32(Σ W²) · (1/(hi − lo)))` with the sum accumulated in
+    ///   binary32 over the flagged band `[lo, hi)`;
+    /// * **dequantiser** — `inv = f32(1/max W)`, `g = f32(inv ·
+    ///   F(total))`, `ns = f32(0.04 · 2⁻²⁹)`, one generator draw `n`
+    ///   per bin in bin order (shared state, channel 0's bins then
+    ///   channel 1's): coded / unflagged bins `f32(((q + n·ns)·W[i])·g)`,
+    ///   flagged band `k` `f32((n·W[i])·S_k)` with `S_k =
+    ///   f32(((F(gain_k)·ratio_k)·inv)·2⁻²⁹)`, tail `f32(n·T)` with
+    ///   `T = f32((g·W[coef_end−1])·ns)`; noise disabled
+    ///   `f32((q·W[i])·g)` on the coded range, zero elsewhere;
+    /// * **§5** — the sum/difference inverse over all `N` bins,
+    ///   binary32 stores.
+    ///
+    /// The returned coefficients are the decoder's binary32 values
+    /// (widened), before the PCM scale.
+    fn dequantise_lsp(&mut self, block: &ParsedBlock, first_in_frame: bool) -> Vec<Vec<f64>> {
+        let channels = usize::from(self.cfg.channels);
+        let m = usize::from(block.block_size);
+        let mut spec: Vec<Vec<f64>> = vec![vec![0.0; m]; channels];
+        if !block.channels.iter().any(|c| c.coded) {
+            // The block ends after the channel flags: no envelope
+            // stage, no dequantiser.
+            return spec;
+        }
+        let new_envelopes = !block
+            .channels
+            .iter()
+            .any(|c| c.coded && matches!(c.envelope, Some(Envelope::Reused)));
+        let grid = usize::from(self.cfg.lsp_grid_len(block.block_size));
+        let mut failed = vec![false; channels];
+        for (ch, chan) in block.channels.iter().enumerate() {
+            let buf = &mut self.lsp_w[ch];
+            if buf.len() < m {
+                buf.resize(m, 0.0);
+            }
+            if new_envelopes {
+                if chan.coded {
+                    let converted = match chan.envelope.as_ref() {
+                        Some(Envelope::LspIndices(idx)) => lsp_envelope(idx, m, grid).ok(),
+                        _ => None,
+                    };
+                    match converted {
+                        Some(env) => {
+                            buf[..m].copy_from_slice(&env.weights[..m]);
+                            self.lsp_max[ch] = env.max;
+                        }
+                        // The decoder's own decode error for the
+                        // channel: it stays silent this block.
+                        None => failed[ch] = true,
+                    }
+                } else {
+                    buf[..m].fill(1.0);
+                    self.lsp_max[ch] = 1.0;
+                }
+            } else if !first_in_frame {
+                resample_in_place(buf, usize::from(self.prev_in_frame), m);
+            }
+        }
+
+        let coef_start = usize::from(self.cfg.coef_start(block.block_size));
+        let coef_end = usize::from(self.cfg.coef_end(block.block_size)).min(m);
+        let f_total = vendor_gain_law(block.total_gain as i32);
+        let ns = f64::from((f64::from(LSP_DITHER) * NOISE_UNIT) as f32);
+        for (ch, chan) in block.channels.iter().enumerate() {
+            if !chan.coded || failed[ch] {
+                continue;
+            }
+            let max = self.lsp_max[ch];
+            if max == 0.0 {
+                continue;
+            }
+            let inv = f64::from((1.0 / f64::from(max)) as f32);
+            let g = f64::from((inv * f_total) as f32);
+            let w: Vec<f64> = self.lsp_w[ch][..m].iter().map(|&x| f64::from(x)).collect();
+            let out = &mut spec[ch];
+            let mut coefs = chan.coefficients.iter().copied();
+            if !self.noise_enabled {
+                for (k, slot) in out.iter_mut().enumerate().take(coef_end).skip(coef_start) {
+                    let Some(q) = coefs.next() else { break };
+                    *slot = f64::from(((f64::from(q) * w[k]) * g) as f32);
+                }
+                continue;
+            }
+            let excluded: Vec<(usize, usize)> = if chan.noise_flags.iter().any(|&f| f) {
+                noise_excluded_ranges(&self.cfg, block, &chan.noise_flags)
+                    .into_iter()
+                    .map(|(lo, hi)| (usize::from(lo), usize::from(hi).min(m)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // `.text 0x5200`: binary32 band energies, ratios against
+            // the last flagged band.
+            let energy = |&(lo, hi): &(usize, usize)| -> f64 {
+                let mut a = 0.0f32;
+                for &x in &w[lo..hi.max(lo)] {
+                    a = (f64::from(a) + x * x) as f32;
+                }
+                let len = hi.saturating_sub(lo).max(1) as f64;
+                f64::from((f64::from(a) * (1.0 / len)) as f32)
+            };
+            let p_last = excluded.last().map(energy).unwrap_or(0.0);
+            let band_scales: Vec<f64> = excluded
+                .iter()
+                .enumerate()
+                .map(|(k, range)| {
+                    let ratio = if k + 1 == excluded.len() {
+                        1.0
+                    } else {
+                        f64::from((energy(range) / p_last).sqrt() as f32)
+                    };
+                    let gain = chan.noise_gains.get(k).copied().unwrap_or(0);
+                    f64::from((((vendor_gain_law(gain) * ratio) * inv) * NOISE_UNIT) as f32)
+                })
+                .collect();
+            let tail = f64::from(((g * w[coef_end.saturating_sub(1)]) * ns) as f32);
+            let mut band = 0usize;
+            for k in 0..m {
+                let n = f64::from(self.noise_draw());
+                while band < excluded.len() && k >= excluded[band].1 {
+                    band += 1;
+                }
+                let flagged = band < excluded.len() && k >= excluded[band].0;
+                out[k] = if flagged {
+                    f64::from(((n * w[k]) * band_scales[band]) as f32)
+                } else if k >= coef_end {
+                    f64::from((n * tail) as f32)
+                } else if k < coef_start {
+                    // v1 only (static reading): constant weight.
+                    f64::from((((n * ns) * w[coef_start]) * g) as f32)
+                } else {
+                    let q = f64::from(coefs.next().unwrap_or(0));
+                    f64::from((((q + n * ns) * w[k]) * g) as f32)
+                };
+            }
+        }
+
+        if channels == 2 && block.joint_stereo {
+            let (a, b) = spec.split_at_mut(1);
+            for (mid, side) in a[0].iter_mut().zip(b[0].iter_mut()) {
+                let (m0, s0) = (*mid, *side);
+                *mid = f64::from((m0 + s0) as f32);
+                *side = f64::from((m0 - s0) as f32);
+            }
+        }
+        let scale = pcm_scale();
+        for chan in &mut spec {
+            for v in chan.iter_mut() {
+                *v *= scale;
+            }
+        }
+        spec
+    }
 }
+
+/// The §3.1 reuse resample (`.text 0x5c20`), in place on a channel's
+/// envelope buffer from the previous block's size `prev` to this
+/// block's size `cur`: `prev > cur` decimates (`W[i] = W[i·r]`,
+/// ascending), `prev < cur` replicates (`W[j·r … j·r + r − 1] =
+/// W[j]`, descending), equal sizes leave it unchanged.
+pub(crate) fn resample_in_place(w: &mut [f32], prev: usize, cur: usize) {
+    if prev == 0 || cur == 0 || prev == cur {
+        return;
+    }
+    if prev > cur {
+        let r = prev / cur;
+        for i in 0..cur.min(w.len()) {
+            if i * r < w.len() {
+                w[i] = w[i * r];
+            }
+        }
+    } else {
+        let r = cur / prev;
+        for j in (0..cur / r).rev() {
+            let v = w[j];
+            for t in 0..r {
+                if let Some(slot) = w.get_mut(j * r + t) {
+                    *slot = v;
+                }
+            }
+        }
+    }
+}
+
+/// The §3.1 dither constant `ctx+0x388` on the LSP path (0.04; the
+/// VLC path's is 0.02).
+const LSP_DITHER: f32 = 0.04;
 
 /// The §2.1 flagged-band bin ranges of a parsed block, recomputed
 /// from the same measured walk the parser used
@@ -721,22 +1000,48 @@ pub fn envelope_weight(delta: i32) -> f64 {
 /// power-of-two form with an unstaged constant — the continuous
 /// `10^(g/20)` (module docs).
 pub fn vendor_total_gain(total_gain: u32) -> f64 {
-    let g = total_gain as usize;
-    if (18..TOTAL_GAIN_MANTISSA.len()).contains(&g) {
-        let mantissa = f64::from(f32::from_bits(TOTAL_GAIN_MANTISSA[g]));
-        mantissa * f64::from(1u32 << TOTAL_GAIN_EXP_PART_LOG2[g >> 3])
-    } else if g >= TOTAL_GAIN_MANTISSA.len() {
-        f64::from(10f64.powf(0.05 * g as f64) as f32)
+    vendor_gain_law(i32::try_from(total_gain).unwrap_or(i32::MAX))
+}
+
+/// The staged gain law `F(g)` over every integer `g` (`.text 0x48b0`;
+/// the B1 total gain and the F4 noise-band gains share it), returned
+/// unrounded as the decoder leaves it on the x87 stack:
+///
+/// * `18 ≤ g < 146` — `mantissa[g] · 2^(4 + (g >> 3))`
+///   (`wma-total-gain-lut`);
+/// * `0 ≤ g < 18` — the coarse step `2^((g >> 3) + 1) · c₀`, `c₀` the
+///   binary32 `0x3f5e939b` (`wma-total-gain-coarse-consts`);
+/// * `g < 0` — `c₁ / 2^(((−g) >> 3) + 1)`, `c₁` the binary32
+///   `0x3ec41138`;
+/// * `g ≥ 146` — the runtime power `10^(0.05 · g)`.
+pub fn vendor_gain_law(g: i32) -> f64 {
+    if g < 0 {
+        let c1 = f64::from(f32::from_bits(GAIN_COARSE_NEG_BITS));
+        let k = ((-i64::from(g)) >> 3) + 1;
+        c1 / 2f64.powi(k.min(1074) as i32)
+    } else if g < 18 {
+        let c0 = f64::from(f32::from_bits(GAIN_COARSE_LOW_BITS));
+        c0 * f64::from(1u32 << ((g >> 3) + 1))
+    } else if (g as usize) < TOTAL_GAIN_MANTISSA.len() {
+        let mantissa = f64::from(f32::from_bits(TOTAL_GAIN_MANTISSA[g as usize]));
+        mantissa * f64::from(1u32 << TOTAL_GAIN_EXP_PART_LOG2[(g as usize) >> 3])
     } else {
-        10f64.powf(g as f64 / 20.0)
+        10f64.powf(0.05 * f64::from(g))
     }
 }
+
+/// `wma-total-gain-coarse-consts` `.rdata 0x1a530`: the `0 ≤ g < 18`
+/// factor (0.869439781).
+const GAIN_COARSE_LOW_BITS: u32 = 0x3f5e_939b;
+/// `wma-total-gain-coarse-consts` `.rdata 0x1a534`: the `g < 0`
+/// numerator (0.382943869).
+const GAIN_COARSE_NEG_BITS: u32 = 0x3ec4_1138;
 
 /// The calibrated PCM scale on top of the vendor composition:
 /// `ABS_SCALE / F(64)`, so that `q · w · F(g) · pcm_scale()` equals the
 /// r457-calibrated `q · w · 10^((g − 64)/20) · ABS_SCALE` (module docs).
 pub fn pcm_scale() -> f64 {
-    ABS_SCALE / vendor_total_gain(64)
+    -1.0 / PCM_FULL_SCALE
 }
 
 /// Total-gain multiplier relative to gain 64: `F(g) / F(64)` — 1 dB
@@ -916,9 +1221,22 @@ mod tests {
             let got = vendor_total_gain(g);
             assert!((got / want - 1.0).abs() < 1e-6, "g={g}: {got} vs {want}");
         }
-        // Above the table: the runtime power; below: continuous.
+        // Above the table: the runtime power; below: the staged
+        // coarse step (6 dB per 8 steps, `wma-total-gain-coarse-consts`).
         assert!((vendor_total_gain(150) / 10f64.powf(7.5) - 1.0).abs() < 1e-6);
-        assert!((vendor_total_gain(10) / 10f64.powf(0.5) - 1.0).abs() < 1e-12);
+        for (g, want) in [
+            (0, 1.738_879_6),
+            (7, 1.738_879_6),
+            (8, 3.477_759_1),
+            (17, 6.955_518_2),
+        ] {
+            let got = vendor_gain_law(g);
+            assert!((got - want).abs() < 1e-6, "g={g}: {got}");
+        }
+        assert_eq!(vendor_total_gain(1), vendor_gain_law(1));
+        // g < 0: 0.382943869 / 2^(((−g) >> 3) + 1).
+        assert!((vendor_gain_law(-1) - 0.382_943_869 / 2.0).abs() < 1e-9);
+        assert!((vendor_gain_law(-8) - 0.382_943_869 / 4.0).abs() < 1e-9);
         assert!((pcm_scale() * vendor_total_gain(64) / ABS_SCALE - 1.0).abs() < 1e-15);
     }
 

@@ -309,7 +309,9 @@ impl StreamConfig {
     /// `block_size` samples (the top ≈9 % of the spectrum is never
     /// coded).
     pub fn coef_end(&self, block_size: u16) -> u16 {
-        block_size - ((9 * u32::from(block_size)) / 100) as u16
+        let fl = u32::from(self.frame_length);
+        let full = fl - (9 * fl) / 100;
+        ((full * u32::from(block_size)) / fl) as u16
     }
 
     /// `flags2` bit 5 — §3.1 envelope grid scaling: when set the LSP
@@ -563,7 +565,13 @@ mod tests {
         assert_eq!(cfg.coef_start(2048), 0);
         assert_eq!(cfg.coef_end(2048), 2048 - 184);
         assert_eq!(cfg.coef_end(1024), 1024 - 92);
-        assert_eq!(cfg.coef_end(128), 128 - 11);
+        // §0.3: the frame's `coef_end` scaled by `block / frame`
+        // (integer): 1864 · 128 / 2048 = 116.5 → 116, one below the
+        // block's own `128 − floor(9 · 128 / 100)` = 117 — the
+        // sandbox-encoded 16 kHz stereo fixtures' 128-sample blocks
+        // parse only under the scaled form.
+        assert_eq!(cfg.coef_end(128), 116);
+        assert_eq!(cfg.coef_end(256), 233);
         let v1 = StreamConfig::derive(Version::V1, 32_000, 2, 8000, 1536, 0x0000).unwrap();
         assert_eq!(v1.frame_length, 1024); // version arm at 32 kHz
         assert_eq!(v1.coef_start(1024), 3);

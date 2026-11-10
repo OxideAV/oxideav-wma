@@ -791,7 +791,7 @@ pub(crate) fn noise_walk_start(
     };
     match *start {
         NoiseStart::StagedCutoff { half_fraction } => {
-            let c = staged_cutoff_bin(half_fraction, block_size);
+            let c = staged_cutoff_bin_at(sample_rate, half_fraction, block_size);
             (0..walk_count)
                 .find(|&b| walk_edges[b] <= c && c < walk_edges[b + 1])
                 .unwrap_or(walk_count)
@@ -837,107 +837,79 @@ pub(crate) fn noise_walk_start(
 pub const MEASURED_NOISE_START_EDGES_22050: [(u16, u16); 3] = [(1024, 716), (512, 356), (256, 148)];
 
 /// The staged §2.1 **enable rule and cutoff frequency**
-/// (`frame-bit-layout.md` §2.1, `.text 0x5770`; `half = sample_rate
-/// / 2`, `bps` and `rate` the §0 floats): `Some(fraction of half)`
-/// when the sub-stream is active for the configuration, `None` when
-/// it is not.
+/// (`frame-bit-layout.md` §2.1, `.text 0x5770`, as corrected in round
+/// 11 and validated on 9 232 sandboxed opens; `half = sample_rate /
+/// 2`, `bps` and `rate` the §0 binary32 floats compared against the
+/// binary32 constants of `tables/wma-noise-cutoff-consts`):
+/// `Some(fraction of half)` when the sub-stream is active for the
+/// configuration, `None` when it is not.
 ///
 /// | version | sample rate | enabled | cutoff |
 /// | --- | --- | --- | --- |
 /// | 2 | ≥ 44100 | `rate < 0.61` | `0.4 · half` |
-/// | 2 | 22050 … 44099 | `rate < 1.16` | `0.5 · half` if `rate < 0.72`, else `0.7 · half` |
-/// | 2 | 16000 … 22049 | always | `0.5 · half` if `bps ≤ 0.5`, else `0.3 · half` |
+/// | 2 | 22050 … 44099 | `rate < 1.16` | `0.6 · half` if `rate < 0.72`, else `0.7 · half` |
+/// | 2 | 16000 … 22049 | always | `0.3 · half` if `bps ≤ 0.5`, else `0.5 · half` |
 /// | 2 | 11025 … 15999 | always | `0.7 · half` |
 /// | 2 | 8000 … 11024 | `bps ≤ 0.75` | `0.5 · half` if `bps ≤ 0.625`, else `0.65 · half` |
-/// | 2 | < 8000 | always | `0.75 · half` if `bps < 0.8`, else `0.6 · half` |
+/// | 2 | < 8000 | always | `0.5 · half` if `bps < 0.6`; `0.6 · half` if `bps < 0.8`; else `0.75 · half` |
 /// | 1 | 22050 / 44100 / 16000 / 11025 / 8000 exactly | as the v2 row | as the v2 row |
-/// | 1 | any other rate | always | `0.75 · half` if `bps < 0.8`, else `0.6 · half` |
+/// | 1 | any other rate | always | as the v2 `< 8000` row |
 ///
-/// The r454/r457 black-box brackets ([`measured_noise_policy`]'s
-/// former table) sit inside these rows wherever they overlap: the
-/// 44.1/48 kHz enable in `(0.600, 0.617]` is `0.61`, the 22.05/32 kHz
-/// enable is the `1.16` class-2 constant, the 22.05 kHz cutoff switch
-/// in `(0.689, 0.727]` is `0.72`, and every measured start *band*
-/// (the band containing the cutoff bin) at 22.05 / 32 / 44.1 / 48 /
-/// 11.025 kHz is the band this rule selects (7717 Hz vs the measured
-/// 7700 Hz seed at 22.05 kHz: bins 717 / 358 / 179 vs 716 / 358 /
-/// 148-override). Two rows are contradicted by the black-box
-/// reference and corrected in [`noise_cutoff`], the policy the crate
-/// runs; this function is the staged table verbatim.
+/// The round-11 correction confirmed the two rows the crate had
+/// carried from black-box measurement against the round-08 reading
+/// (22050 … 44099 at `rate < 0.72` → `0.6 · half`; the 16000 … 22049
+/// branch sense) and fixed the `< 8000` / v1-generic row (a three-way
+/// split). The r454/r457 black-box brackets sit inside these rows
+/// wherever they overlap. Cutoff bins: [`staged_cutoff_bin_at`].
 pub fn staged_noise_cutoff(cfg: &StreamConfig) -> Option<f64> {
     let rate = cfg.rate_float;
     let bps = cfg.bps;
     let sr = cfg.sample_rate;
+    let low_row = || -> Option<f64> {
+        Some(if bps < 0.6 {
+            0.5
+        } else if bps < 0.8 {
+            0.6
+        } else {
+            0.75
+        })
+    };
     let v2_row = |sr: u32| -> Option<f64> {
         if sr >= 44_100 {
             (rate < 0.61).then_some(0.4)
         } else if sr >= 22_050 {
             (rate < CLASS_SELECTOR_CLASS2_BRANCH_THRESHOLD).then_some(
                 if rate < CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD {
-                    0.5
+                    0.6
                 } else {
                     0.7
                 },
             )
         } else if sr >= 16_000 {
-            Some(if bps <= 0.5 { 0.5 } else { 0.3 })
+            Some(if bps <= 0.5 { 0.3 } else { 0.5 })
         } else if sr >= 11_025 {
             Some(0.7)
         } else if sr >= 8_000 {
             (bps <= 0.75).then_some(if bps <= 0.625 { 0.5 } else { 0.65 })
         } else {
-            Some(if bps < 0.8 { 0.75 } else { 0.6 })
+            low_row()
         }
     };
     match cfg.version {
         Version::V2 => v2_row(sr),
         Version::V1 => match sr {
             22_050 | 44_100 | 16_000 | 11_025 | 8_000 => v2_row(sr),
-            _ => Some(if bps < 0.8 { 0.75 } else { 0.6 }),
+            _ => low_row(),
         },
     }
 }
 
-/// The §2.1 cutoff the crate actually parses and emits with: the
-/// staged table ([`staged_noise_cutoff`]) with two rows corrected to
-/// what the black-box reference decoder demonstrably does (r459,
-/// crafted streams through this crate's emitter, one cutoff fraction
-/// at a time; a wrong fraction desynchronises the reference and it
-/// rejects or garbles the stream):
-///
-/// * **22050 … 44099 Hz, `rate < 0.72`: `0.6 · half`** (staged
-///   `0.5 · half`). Mono 22.05 kHz at rate 0.689: the reference decodes
-///   the full stream only under 0.6 (0.5 / 0.65 / 0.7 all fail); the
-///   r457 measurement (a 6400 Hz start band) is the same band.
-/// * **16000 … 22049 Hz: `0.3 · half` if `bps ≤ 0.5`, else `0.5 ·
-///   half`** — the staged row with its branch sense reversed. Stereo
-///   16 kHz at bps 0.475: only 0.3 decodes; mono/stereo 16 kHz at bps
-///   0.5–1.0: only 0.5 decodes (the r457 3700 Hz start band is the
-///   band containing `0.5 · half`). The reversed sense also matches the
-///   other rows' direction (a lower rate moves the cutoff down).
-///
-/// Both are erratum hypotheses against the static read, reported as
-/// docs asks; neither is exercised by a committed vendor stream (the
-/// one noise-enabled vendor stream sits on the 22.05 kHz `0.7 · half`
-/// branch, which the two readings share).
+/// The §2.1 cutoff the crate parses and emits with — the staged table
+/// ([`staged_noise_cutoff`]). Before round 11 of the staging this
+/// carried two black-box corrections to the round-08 reading; the
+/// corrected staging now says the same.
 pub fn noise_cutoff(cfg: &StreamConfig) -> Option<f64> {
-    let staged = staged_noise_cutoff(cfg)?;
-    let sr = cfg.sample_rate;
-    let v2_rows =
-        cfg.version == Version::V2 || matches!(sr, 22_050 | 44_100 | 16_000 | 11_025 | 8_000);
-    if !v2_rows {
-        return Some(staged);
-    }
-    Some(
-        if (22_050..44_100).contains(&sr) && cfg.rate_float < CLASS_SELECTOR_CLASS1_BRANCH_THRESHOLD
-        {
-            0.6
-        } else if (16_000..22_050).contains(&sr) {
-            if cfg.bps <= 0.5 { 0.3 } else { 0.5 }
-        } else {
-            staged
-        },
-    )
+    staged_noise_cutoff(cfg)
 }
 
 /// The §2.1 policy a configuration parses under — the staged enable
@@ -1039,9 +1011,11 @@ pub fn noise_walk_bands_for(
         cfg.sample_rate,
     );
     let first_lo: Option<u16> = match spec.start {
-        NoiseStart::StagedCutoff { half_fraction } => {
-            Some(staged_cutoff_bin(half_fraction, block_size))
-        }
+        NoiseStart::StagedCutoff { half_fraction } => Some(staged_cutoff_bin_at(
+            cfg.sample_rate,
+            half_fraction,
+            block_size,
+        )),
         NoiseStart::CutoffHz(f) => Some(cutoff_bin(f, block_size, cfg.sample_rate)),
         NoiseStart::CutoffHzWithOverrides(f, overrides)
             if !overrides.iter().any(|&(bs, _)| bs == block_size) =>
@@ -1077,6 +1051,22 @@ pub fn noise_walk_bands_for(
 pub fn staged_cutoff_bin(half_fraction: f64, block_size: u16) -> u16 {
     let n = f64::from(block_size);
     ((n * half_fraction + 0.5).trunc()).min(n) as u16
+}
+
+/// The staged §2.1 cutoff bin with the decoder's own rounding points
+/// (`frame-bit-layout.md` §2.1, round 11): the stored cutoff is
+/// `f_c = f32(half · factor)` with `half = f32(sample_rate · 0.5)` and
+/// `factor` the binary32 constant of the row
+/// (`tables/wma-noise-cutoff-consts`), and the bin of a block of `N`
+/// coefficients is `c = min(trunc(2 · N · f_c / sample_rate + 0.5), N)`.
+/// Agrees with [`staged_cutoff_bin`] except where the binary32
+/// constant moves `N · factor + 0.5` across an integer.
+pub fn staged_cutoff_bin_at(sample_rate: u32, half_fraction: f64, block_size: u16) -> u16 {
+    let sr = f64::from(sample_rate.max(1));
+    let half = f64::from((sr * 0.5) as f32);
+    let f_c = f64::from((half * f64::from(half_fraction as f32)) as f32);
+    let n = f64::from(block_size);
+    ((2.0 * n * f_c / sr + 0.5).trunc()).min(n) as u16
 }
 
 fn cutoff_bin(f: u32, block_size: u16, sample_rate: u32) -> u16 {
@@ -1570,19 +1560,33 @@ mod tests {
         assert_eq!(staged_noise_cutoff(&hi_off), None); // rate 1.16
         let lo8k = StreamConfig::derive(Version::V2, 8000, 1, 1000, 640, 0x0026).unwrap();
         assert_eq!(staged_noise_cutoff(&lo8k), None); // bps 1.0 > 0.75
-        // The two black-box-corrected rows.
+        // The round-11 corrected rows.
         let low_rate = StreamConfig::derive(Version::V2, 22_050, 1, 1900, 744, 0x000f).unwrap();
-        assert_eq!(staged_noise_cutoff(&low_rate), Some(0.5));
+        assert_eq!(staged_noise_cutoff(&low_rate), Some(0.6));
         assert_eq!(noise_cutoff(&low_rate), Some(0.6));
         let s16 = StreamConfig::derive(Version::V2, 16_000, 2, 1900, 342, 0x000e).unwrap();
-        assert_eq!(staged_noise_cutoff(&s16), Some(0.5)); // bps 0.475 ≤ 0.5
-        assert_eq!(noise_cutoff(&s16), Some(0.3));
+        assert_eq!(staged_noise_cutoff(&s16), Some(0.3)); // bps 0.475 ≤ 0.5
         let m16 = StreamConfig::derive(Version::V2, 16_000, 1, 2000, 64, 0x0000).unwrap();
-        assert_eq!(staged_noise_cutoff(&m16), Some(0.3)); // bps 1.0
-        assert_eq!(noise_cutoff(&m16), Some(0.5));
-        // Version 1 at a rate outside the exact list: 0.75 / 0.6.
+        assert_eq!(staged_noise_cutoff(&m16), Some(0.5)); // bps 1.0
+        // Version 1 at a rate outside the exact list: the three-way
+        // `< 8000` row.
         let v1 = StreamConfig::derive(Version::V1, 32_000, 1, 4000, 256, 0x0001).unwrap();
-        assert_eq!(staged_noise_cutoff(&v1), Some(0.6)); // bps 1.0 ≥ 0.8
+        assert_eq!(staged_noise_cutoff(&v1), Some(0.75)); // bps 1.0 ≥ 0.8
+        let v1_mid = StreamConfig::derive(Version::V1, 32_000, 1, 2800, 256, 0x0001).unwrap();
+        assert_eq!(staged_noise_cutoff(&v1_mid), Some(0.6)); // bps 0.7
+        let v1_low = StreamConfig::derive(Version::V1, 32_000, 1, 2000, 256, 0x0001).unwrap();
+        assert_eq!(staged_noise_cutoff(&v1_low), Some(0.5)); // bps 0.5
+        // The binary32 rounding points agree with the plain product on
+        // the sandbox-encoded geometries.
+        for (sr, frac) in [(8000, 0.5), (8000, 0.65), (16_000, 0.5), (22_050, 0.7)] {
+            for n in [128u16, 256, 512, 1024] {
+                assert_eq!(
+                    staged_cutoff_bin_at(sr, frac, n),
+                    staged_cutoff_bin(frac, n),
+                    "{sr} {frac} {n}"
+                );
+            }
+        }
     }
 
     #[test]
